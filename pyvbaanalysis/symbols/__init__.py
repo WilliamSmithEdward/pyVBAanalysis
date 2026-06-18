@@ -1,6 +1,13 @@
 """VBA symbol graph: per-module symbols, name resolution, and the project index."""
 
 from .build_module_symbols import BuildModuleSymbolsOptions, build_module_symbols
+from .project_index import (
+    ModuleInput,
+    ProjectIndex,
+    ProjectIndexOptions,
+    ReferenceScope,
+    ShadowedSpan,
+)
 from .name_resolution import (
     BareIdentifierContext,
     BareIdentifierResolution,
@@ -27,6 +34,11 @@ from .symbol_model import (
 __all__ = [
     "BuildModuleSymbolsOptions",
     "build_module_symbols",
+    "ModuleInput",
+    "ProjectIndex",
+    "ProjectIndexOptions",
+    "ReferenceScope",
+    "ShadowedSpan",
     "BareIdentifierContext",
     "BareIdentifierResolution",
     "BareIdentifierResolutionInput",
