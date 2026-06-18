@@ -14,6 +14,20 @@ from dataclasses import dataclass
 
 from .context import PushFn, RulePassContext
 from .exprwalk import ProcedureExpressionVisitor
+from .rules.declarations import (
+    check_dim_initializer,
+    check_duplicate_options,
+    check_empty_type,
+    check_identifier_too_long,
+    check_invalid_identifier_starts,
+    check_option_placement,
+    check_procedure_header,
+    check_reserved_declaration_names,
+    check_too_many_parameters,
+    check_type_declaration_character_as_clause,
+    check_udt_parameter_constraints,
+    check_unexpected_declaration_tokens,
+)
 from .rules.duplicates import (
     check_duplicate_declarations,
     check_duplicate_enum_members,
@@ -67,6 +81,25 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
         name="duplicateTypeFields",
         run=lambda ctx, push: check_duplicate_type_fields(ctx.source, ctx.mod, ctx.activity, push),
     ),
-    # NOTE: ambiguousEnumMemberReferences (registry position 12) is deferred -
-    # it needs type inference + host + runtime resolution (M8/M9).
+    # -- declarations family (positions 8-11) --
+    DiagnosticRuleEntry(name="emptyType", run=lambda ctx, push: check_empty_type(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="tooManyParameters", run=lambda ctx, push: check_too_many_parameters(ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="identifierTooLong", run=lambda ctx, push: check_identifier_too_long(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="udtParameterConstraints", run=lambda ctx, push: check_udt_parameter_constraints(ctx.mod, ctx.activity, push)),
+    # Positions 12-15 deferred: ambiguousEnumMemberReferences (M8/M9), constAssignment
+    # (M8), optionExplicit + undeclaredVariables (undeclared family, M8/M9).
+    DiagnosticRuleEntry(name="optionPlacement", run=lambda ctx, push: check_option_placement(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="duplicateOption", run=lambda ctx, push: check_duplicate_options(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="procedureHeader", run=lambda ctx, push: check_procedure_header(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="invalidIdentifierStarts", run=lambda ctx, push: check_invalid_identifier_starts(ctx.source, ctx.mod, ctx.activity, push)),
+    # Positions 20-22 deferred: the module-declaration-placement rules (need the
+    # scan-cc-branch-order / module-declaration shared helpers).
+    DiagnosticRuleEntry(name="reservedDeclarationNames", run=lambda ctx, push: check_reserved_declaration_names(ctx.source, ctx.mod, ctx.activity, push)),
+    # Positions 24-33 deferred: property accessor/setter (type inference + host),
+    # parameter order (normalizeType), parameter defaults (memberCtx), non-constant
+    # values (spanForTokens), and the expressions family.
+    DiagnosticRuleEntry(name="dimInitializer", run=lambda ctx, push: check_dim_initializer(ctx.source, ctx.mod, ctx.activity, push)),
+    # Positions 35-40 deferred: the arrays family (M7).
+    DiagnosticRuleEntry(name="typeDeclarationCharacterAsClause", run=lambda ctx, push: check_type_declaration_character_as_clause(ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="unexpectedDeclarationTokens", run=lambda ctx, push: check_unexpected_declaration_tokens(ctx.source, ctx.mod, ctx.activity, push)),
 )

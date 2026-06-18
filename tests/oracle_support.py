@@ -40,3 +40,21 @@ def asserted_cases(code: str) -> list[OracleCase]:
 def accepted_cases() -> list[OracleCase]:
     """Every compile-accepted (valid) corpus case - used for no-false-positive sweeps."""
     return [c for c in CASES.values() if c.expected == "accepted"]
+
+
+def assert_oracle_behavior(code: str) -> int:
+    """Validate a code against its asserted oracle cases.
+
+    assertedOracleCases mixes positive cases (rejected -> the code must fire) and
+    control cases (accepted -> the code must NOT fire). 'observe' cases carry no
+    firm assertion. Returns the number of cases checked.
+    """
+    checked = 0
+    for case in asserted_cases(code):
+        emitted = case_codes(case)
+        if case.expected == "rejected":
+            assert code in emitted, f"{case.id}: expected {code} to fire, got {sorted(emitted)}"
+        elif case.expected == "accepted":
+            assert code not in emitted, f"{case.id}: {code} must not fire on an accepted control"
+        checked += 1
+    return checked

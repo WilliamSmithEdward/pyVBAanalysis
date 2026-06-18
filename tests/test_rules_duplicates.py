@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from oracle_support import accepted_cases, asserted_cases, case_codes
+from oracle_support import accepted_cases, assert_oracle_behavior, asserted_cases, case_codes
 
 from pyvbaanalysis.diagnostics import analyze_module
 
@@ -63,12 +63,10 @@ def test_duplicate_type_field() -> None:
 
 
 @pytest.mark.parametrize("code", _DUP_CODES)
-def test_oracle_asserted_cases_fire(code: str) -> None:
-    cases = asserted_cases(code)
-    if not cases:
+def test_oracle_asserted_cases(code: str) -> None:
+    if not asserted_cases(code):
         pytest.skip(f"{code} has no asserted corpus cases")
-    for case in cases:
-        assert code in case_codes(case), f"{case.id}: expected {code}"
+    assert assert_oracle_behavior(code) > 0
 
 
 def test_no_duplicate_false_positives_on_accepted_cases() -> None:
