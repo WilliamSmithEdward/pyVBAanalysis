@@ -50,6 +50,7 @@ from .rules.duplicates import (
     check_duplicate_type_fields,
 )
 from .rules.lexical import check_invalid_line_continuations, check_unterminated_strings
+from .rules.numeric_literals import check_suffixed_literal_overflow
 from .walker import ProcedureStatementVisitor
 
 
@@ -134,4 +135,8 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="malformedStatements", run=lambda ctx, push: check_malformed_statements(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="elseWithoutIf", run=lambda ctx, push: check_else_without_if(ctx.source, ctx.mod, ctx.activity, push)),
     # Position 61 forEachLoopTypes deferred (needs type inference + host).
+    # Positions 62-68 deferred: arrays/object-state (M7), member-not-found,
+    # non-callable, argument count/types, runtime values, assignment types
+    # (call extraction + type inference + host, M8/M9).
+    DiagnosticRuleEntry(name="suffixedLiteralOverflow", run=lambda ctx, push: check_suffixed_literal_overflow(ctx.source, ctx.activity, push)),
 )
