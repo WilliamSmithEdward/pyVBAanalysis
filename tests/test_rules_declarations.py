@@ -31,6 +31,9 @@ _DECL_CODES = (
     "property-accessor-signature-mismatch",
     "const-value-not-constant",
     "enum-member-not-constant",
+    "module-declaration-in-procedure",
+    "module-declaration-after-procedure",
+    "statement-outside-procedure",
 )
 
 
@@ -141,6 +144,17 @@ def test_non_constant_values() -> None:
     assert "const-value-not-constant" not in _codes("Const C As Long = OTHER")
     assert "enum-member-not-constant" in _codes("Enum E\n    A = Bar()\nEnd Enum")
     assert "enum-member-not-constant" not in _codes("Enum E\n    A = 1\n    B\nEnd Enum")
+
+
+def test_module_declaration_placement() -> None:
+    assert "module-declaration-in-procedure" in _codes("Sub S\n    Public X As Long\nEnd Sub")
+    assert "module-declaration-in-procedure" in _codes("Sub S\n    Option Explicit\nEnd Sub")
+    assert "module-declaration-in-procedure" not in _codes("Sub S\n    Dim x As Long\nEnd Sub")
+    assert "module-declaration-after-procedure" in _codes("Sub S\nEnd Sub\nPublic X As Long")
+    assert "module-declaration-after-procedure" not in _codes("Public X As Long\nSub S\nEnd Sub")
+    assert "statement-outside-procedure" in _codes("MsgBox 1")
+    # Def* statements and Implements are legal module-level statement forms.
+    assert "statement-outside-procedure" not in _codes("DefInt A-Z")
 
 
 @pytest.mark.parametrize("code", _DECL_CODES)

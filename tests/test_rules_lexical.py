@@ -20,8 +20,8 @@ def test_unterminated_string_fires() -> None:
 
 
 def test_terminated_string_is_clean() -> None:
-    assert _codes('s = "abc"') == []
-    assert _codes('s = "he said ""hi"""') == []  # doubled quotes are escapes
+    assert "unterminated-string" not in _codes('s = "abc"')
+    assert "unterminated-string" not in _codes('s = "he said ""hi"""')  # doubled quotes are escapes
 
 
 def test_mid_line_continuation_underscore_fires() -> None:
@@ -29,12 +29,12 @@ def test_mid_line_continuation_underscore_fires() -> None:
 
 
 def test_valid_line_continuation_is_clean() -> None:
-    assert _codes("x = 1 + _\n    2") == []
+    assert "invalid-line-continuation" not in _codes("x = 1 + _\n    2")
 
 
 def test_trailing_identifier_underscore_is_clean() -> None:
     # `x_` is a valid identifier; the underscore is not a continuation marker.
-    assert _codes("Dim x_ As Long\nDim y As Long") == []
+    assert "invalid-line-continuation" not in _codes("Dim x_ As Long\nDim y As Long")
 
 
 def test_continuation_inside_string_ignored() -> None:

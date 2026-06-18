@@ -27,6 +27,9 @@ from .rules.declarations import (
     check_empty_type,
     check_identifier_too_long,
     check_invalid_identifier_starts,
+    check_module_declarations_after_procedures,
+    check_module_declarations_in_procedure_bodies,
+    check_module_level_statements_outside_procedures,
     check_non_constant_const_values,
     check_non_constant_enum_member_values,
     check_option_placement,
@@ -103,8 +106,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="duplicateOption", run=lambda ctx, push: check_duplicate_options(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="procedureHeader", run=lambda ctx, push: check_procedure_header(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="invalidIdentifierStarts", run=lambda ctx, push: check_invalid_identifier_starts(ctx.source, ctx.mod, ctx.activity, push)),
-    # Positions 20-22 deferred: the module-declaration-placement rules (need the
-    # scan-cc-branch-order / module-declaration shared helpers).
+    DiagnosticRuleEntry(name="moduleDeclarationsInProcedureBodies", run=lambda ctx, push: check_module_declarations_in_procedure_bodies(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="moduleDeclarationsAfterProcedures", run=lambda ctx, push: check_module_declarations_after_procedures(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="moduleLevelStatementsOutsideProcedures", run=lambda ctx, push: check_module_level_statements_outside_procedures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="reservedDeclarationNames", run=lambda ctx, push: check_reserved_declaration_names(ctx.source, ctx.mod, ctx.activity, push)),
     # Position 24 deferred: propertySetterValueParameters (object-value branch needs
     # resolveKnownObjectAssignmentType / host, M9).

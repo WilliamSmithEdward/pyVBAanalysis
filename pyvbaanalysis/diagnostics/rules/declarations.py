@@ -17,22 +17,31 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Union
 
-from ...conditional import ConditionalActivity, ConditionalActivityTracker
+from ...conditional import (
+    ConditionalActivity,
+    ConditionalActivityTracker,
+    collect_conditional_directives,
+)
 from ...lexer.keyword_table import OPERATOR_IDENTIFIERS, is_reserved_identifier
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize
 from ...parser.fixed_length_string import parse_fixed_length_string_type
 from ...parser.nodes import (
     AttributeNode,
+    ConditionalDirectiveKind,
     ConditionalDirectiveNode,
     DeclareNode,
     EnumNode,
+    EventNode,
+    LeafStatementNode,
+    ModuleMember,
     ModuleNode,
     OptionNode,
     ParameterNode,
     ProcedureNode,
     ProcKind,
     Span,
+    StatementNode,
     TypeFieldNode,
     TypeNode,
     VariableDeclNode,
@@ -46,16 +55,26 @@ from ..walker import (
     active_module_members,
     declared_name_span,
     first_token_span,
+    for_each_body_statement,
     for_each_variable_group,
     is_inactive_node,
     match_paren_from,
     pluralize_count,
+    statement_tokens_after_leading_label,
     strip_header_brackets,
     token_name,
     token_text,
     top_level_operator_index,
 )
-from .shared import NameTokenHit, declaration_name_hit, name_token_hit
+from .shared import (
+    DEFTYPE_KEYWORDS,
+    NameTokenHit,
+    declaration_name_hit,
+    leading_declaration_modifier_count,
+    module_declaration_statement_in_procedure,
+    name_token_hit,
+    scan_conditional_compilation_branch_order,
+)
 
 # Access/storage modifiers that may lead a procedure declaration.
 _PROC_MODIFIERS: frozenset[str] = frozenset({"public", "private", "friend", "global", "static"})
@@ -926,3 +945,182 @@ def check_non_constant_enum_member_values(source: str, mod: ModuleNode, activity
                 f"{label} is not constant.",
                 hit_span,
             )
+
+
+# -- module-declaration placement rules ------------------------------------
+
+
+def _contains_span(container: Span, inner: Span) -> bool:
+    return inner.start >= container.start and inner.end <= container.end
+
+
+def _keyword_span(source: str, span: Span, *keywords: str) -> Span:
+    expected = set(keywords)
+    for tok in statement_tokens_after_leading_label(source, span):
+        if token_text(tok) in expected:
+            return absolute_span(span, tok)
+    return first_token_span(source, span)
+
+
+def _deftype_module_declaration_hit(source: str, span: Span) -> tuple[str, Span] | None:
+    toks = statement_tokens_after_leading_label(source, span)
+    first = toks[0] if toks else None
+    if first is None or token_text(first) not in DEFTYPE_KEYWORDS:
+        return None
+    label = (first.canonical_text if first.canonical_text is not None else first.raw_text) + " statements"
+    return (label, absolute_span(span, first))
+
+
+def _module_declaration_after_procedure_hit(source: str, member: ModuleMember) -> tuple[str, Span] | None:
+    if isinstance(member, DeclareNode):
+        return ("Declare statements", _keyword_span(source, member.span, "declare"))
+    if isinstance(member, EventNode):
+        return ("Event declarations", _keyword_span(source, member.span, "event"))
+    if isinstance(member, VariableGroupNode):
+        if member.is_const:
+            return ("Const declarations", _keyword_span(source, member.span, "const"))
+        return ("Module variable declarations", first_token_span(source, member.span))
+    if isinstance(member, TypeNode):
+        return ("Type declarations", _keyword_span(source, member.span, "type"))
+    if isinstance(member, EnumNode):
+        return ("Enum declarations", _keyword_span(source, member.span, "enum"))
+    if isinstance(member, StatementNode):
+        return _deftype_module_declaration_hit(source, member.span)
+    return None
+
+
+def _is_inside_module_conditional_compilation_block(mod: ModuleNode, span: Span) -> bool:
+    depth = 0
+    for occ in collect_conditional_directives(mod):
+        if occ.container.kind != "module":
+            continue
+        directive = occ.directive
+        if directive.span.start >= span.start:
+            break
+        if directive.directive_kind is ConditionalDirectiveKind.IF:
+            depth += 1
+        elif directive.directive_kind is ConditionalDirectiveKind.END_IF:
+            depth = max(0, depth - 1)
+    return depth > 0
+
+
+def _module_declaration_after_procedure_message(
+    label: str, mod: ModuleNode, member: ModuleMember, activity: ConditionalActivityTracker | None
+) -> str:
+    if not _is_inside_module_conditional_compilation_block(mod, member.span):
+        return f"{label} belong in the module declarations section, before procedures."
+    branch_status = activity.activity_for_span(member.span) if activity is not None else None
+    if branch_status is ConditionalActivity.ACTIVE:
+        return (
+            f"{label} in the active conditional-compilation branch belong in the module "
+            "declarations section, before procedures."
+        )
+    return (
+        f"{label} in a conditional-compilation branch belong in the module declarations section, "
+        "before procedures."
+    )
+
+
+def _is_alternative_procedure_header_statement(source: str, span: Span, procedure: ProcedureNode) -> bool:
+    toks = statement_tokens_after_leading_label(source, span)
+    i = leading_declaration_modifier_count(toks)
+    head = token_text(_at(toks, i))
+    kind: ProcKind | None = None
+    if head == "property":
+        accessor = token_text(_at(toks, i + 1))
+        if accessor == "get":
+            kind = ProcKind.PROPERTY_GET
+        elif accessor == "let":
+            kind = ProcKind.PROPERTY_LET
+        elif accessor == "set":
+            kind = ProcKind.PROPERTY_SET
+        i += 2
+    elif head == "function":
+        kind = ProcKind.FUNCTION
+        i += 1
+    elif head == "sub":
+        kind = ProcKind.SUB
+        i += 1
+    name_tok = _at(toks, i)
+    name = token_name(name_tok) if name_tok is not None else None
+    return (
+        kind is not None
+        and kind == procedure.proc_kind
+        and name is not None
+        and name.lower() == procedure.name.lower()
+    )
+
+
+def check_module_declarations_in_procedure_bodies(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+    def inspect_statement(stmt: LeafStatementNode) -> None:
+        hit = module_declaration_statement_in_procedure(source, stmt.span)
+        if hit is None:
+            return
+        label, hit_span = hit
+        push(
+            "moduleDeclarationInProcedure",
+            f"{label} must appear in the module declarations section, not inside a procedure.",
+            hit_span,
+        )
+
+    def inspect_procedure_body(procedure: ProcedureNode) -> None:
+        saw_conditional_directive = False
+        for node in procedure.body:
+            if isinstance(node, ConditionalDirectiveNode):
+                saw_conditional_directive = True
+                continue
+            if is_inactive_node(activity, node):
+                continue
+            if isinstance(node, StatementNode):
+                if saw_conditional_directive and _is_alternative_procedure_header_statement(source, node.span, procedure):
+                    continue
+                inspect_statement(node)
+                continue
+            child = getattr(node, "body", None)
+            if isinstance(child, list):
+                for_each_body_statement(child, inspect_statement, activity)
+
+    for member in active_module_members(mod, activity):
+        if isinstance(member, ProcedureNode):
+            inspect_procedure_body(member)
+
+
+def check_module_declarations_after_procedures(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+    procedure_seen = False
+    malformed_conditional_blocks = scan_conditional_compilation_branch_order(mod).malformed_block_spans
+    for member in active_module_members(mod, activity):
+        if isinstance(member, ProcedureNode):
+            procedure_seen = True
+            continue
+        if not procedure_seen:
+            continue
+        hit = _module_declaration_after_procedure_hit(source, member)
+        if hit is None:
+            continue
+        label, hit_span = hit
+        if any(_contains_span(block, member.span) for block in malformed_conditional_blocks):
+            continue
+        push(
+            "moduleDeclarationAfterProcedure",
+            _module_declaration_after_procedure_message(label, mod, member, activity),
+            hit_span,
+        )
+
+
+def check_module_level_statements_outside_procedures(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, StatementNode):
+            continue
+        toks = statement_tokens_after_leading_label(source, member.span)
+        first = toks[0] if toks else None
+        if first is None:
+            continue
+        head = token_text(first)
+        if head in DEFTYPE_KEYWORDS or head == "implements":
+            continue
+        label = (first.canonical_text if first.canonical_text is not None else first.raw_text) + " statement"
+        push(
+            "statementOutsideProcedure",
+            f"{label} is invalid outside a Sub, Function, or Property procedure.",
+            absolute_span(member.span, first),
+        )

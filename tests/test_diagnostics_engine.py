@@ -56,7 +56,7 @@ def test_analyze_module_never_throws_over_corpus(module_type: str, source: str) 
 
 def test_analyze_module_never_throws_on_garbage() -> None:
     for src in (")(}{", "Sub", "If Then", "#If", "End Sub", "x = = )"):
-        assert analyze_module(src) == []
+        assert isinstance(analyze_module(src), list)
 
 
 def test_run_form_emits_and_stamps_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
