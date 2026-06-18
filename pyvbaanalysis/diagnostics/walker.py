@@ -49,6 +49,7 @@ __all__ = [
     "token_name",
     "strip_header_brackets",
     "absolute_span",
+    "span_for_tokens",
     "bare_assignment_target",
     "set_assignment_target",
     "block_header_line_span",
@@ -247,6 +248,11 @@ def token_name(tok: VbaToken) -> str | None:
 
 def absolute_span(base: Span, token: VbaToken) -> Span:
     return Span(base.start + token.start, base.start + token.end)
+
+
+def span_for_tokens(toks: Sequence[VbaToken], slice_start: int) -> Span:
+    """Absolute span covering a non-empty token slice (first.start .. last.end)."""
+    return Span(slice_start + toks[0].start, slice_start + toks[-1].end)
 
 
 def bare_assignment_target(

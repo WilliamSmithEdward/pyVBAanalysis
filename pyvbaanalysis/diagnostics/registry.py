@@ -27,8 +27,12 @@ from .rules.declarations import (
     check_empty_type,
     check_identifier_too_long,
     check_invalid_identifier_starts,
+    check_non_constant_const_values,
+    check_non_constant_enum_member_values,
     check_option_placement,
+    check_parameter_order,
     check_procedure_header,
+    check_property_accessor_signatures,
     check_reserved_declaration_names,
     check_too_many_parameters,
     check_type_declaration_character_as_clause,
@@ -102,9 +106,14 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # Positions 20-22 deferred: the module-declaration-placement rules (need the
     # scan-cc-branch-order / module-declaration shared helpers).
     DiagnosticRuleEntry(name="reservedDeclarationNames", run=lambda ctx, push: check_reserved_declaration_names(ctx.source, ctx.mod, ctx.activity, push)),
-    # Positions 24-33 deferred: property accessor/setter (type inference + host),
-    # parameter order (normalizeType), parameter defaults (memberCtx), non-constant
-    # values (spanForTokens), and the expressions family.
+    # Position 24 deferred: propertySetterValueParameters (object-value branch needs
+    # resolveKnownObjectAssignmentType / host, M9).
+    DiagnosticRuleEntry(name="propertyAccessorSignatures", run=lambda ctx, push: check_property_accessor_signatures(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="parameterOrder", run=lambda ctx, push: check_parameter_order(ctx.source, ctx.mod, ctx.activity, push)),
+    # Positions 27-28 deferred: parameter defaults (memberCtx + inferArgumentType, M8).
+    DiagnosticRuleEntry(name="constValueNotConstant", run=lambda ctx, push: check_non_constant_const_values(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="enumMemberNotConstant", run=lambda ctx, push: check_non_constant_enum_member_values(ctx.source, ctx.mod, ctx.activity, push)),
+    # Positions 31-33 deferred: the expressions family (call extraction / type inference).
     DiagnosticRuleEntry(name="dimInitializer", run=lambda ctx, push: check_dim_initializer(ctx.source, ctx.mod, ctx.activity, push)),
     # Positions 35-40 deferred: the arrays family (M7).
     DiagnosticRuleEntry(name="typeDeclarationCharacterAsClause", run=lambda ctx, push: check_type_declaration_character_as_clause(ctx.mod, ctx.activity, push)),

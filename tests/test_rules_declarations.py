@@ -23,6 +23,14 @@ _DECL_CODES = (
     "identifier-too-long",
     "optional-udt-parameter",
     "byval-udt-parameter",
+    "required-param-after-optional",
+    "paramarray-non-variant",
+    "paramarray-with-optional",
+    "paramarray-not-last",
+    "parameter-array-as-type-syntax",
+    "property-accessor-signature-mismatch",
+    "const-value-not-constant",
+    "enum-member-not-constant",
 )
 
 
@@ -102,6 +110,37 @@ def test_udt_parameter_constraints() -> None:
     assert "optional-udt-parameter" in _codes(udt + "Sub S(Optional p As T)\nEnd Sub")
     # ByRef UDT is fine.
     assert "byval-udt-parameter" not in _codes(udt + "Sub S(ByRef p As T)\nEnd Sub")
+
+
+def test_parameter_order() -> None:
+    assert "required-param-after-optional" in _codes("Sub S(Optional a As Long, b As Long)\nEnd Sub")
+    assert "required-param-after-optional" not in _codes("Sub S(a As Long, Optional b As Long)\nEnd Sub")
+    assert "paramarray-non-variant" in _codes("Sub S(ParamArray a() As Long)\nEnd Sub")
+    assert "paramarray-non-variant" not in _codes("Sub S(ParamArray a() As Variant)\nEnd Sub")
+    assert "paramarray-not-last" in _codes("Sub S(ParamArray a() As Variant, b As Long)\nEnd Sub")
+    assert "paramarray-with-optional" in _codes("Sub S(Optional a As Long, ParamArray b() As Variant)\nEnd Sub")
+
+
+def test_property_accessor_signatures() -> None:
+    mismatch = (
+        "Property Get X(i As Long) As Long\nEnd Property\n"
+        "Property Let X(i As String, v As Long)\nEnd Property"
+    )
+    assert "property-accessor-signature-mismatch" in _codes(mismatch)
+    ok = (
+        "Property Get X(i As Long) As Long\nEnd Property\n"
+        "Property Let X(i As Long, v As Long)\nEnd Property"
+    )
+    assert "property-accessor-signature-mismatch" not in _codes(ok)
+
+
+def test_non_constant_values() -> None:
+    assert "const-value-not-constant" in _codes("Const C As Long = Foo()")
+    assert "const-value-not-constant" not in _codes("Const C As Long = 5 + 3")
+    # Bare/qualified identifiers may be constants; stay quiet.
+    assert "const-value-not-constant" not in _codes("Const C As Long = OTHER")
+    assert "enum-member-not-constant" in _codes("Enum E\n    A = Bar()\nEnd Enum")
+    assert "enum-member-not-constant" not in _codes("Enum E\n    A = 1\n    B\nEnd Enum")
 
 
 @pytest.mark.parametrize("code", _DECL_CODES)

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Union
 
 from ...conditional import ConditionalActivity, ConditionalActivityTracker
-from ...lexer.keyword_table import is_reserved_identifier
+from ...lexer.keyword_table import OPERATOR_IDENTIFIERS, is_reserved_identifier
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize
 from ...parser.fixed_length_string import parse_fixed_length_string_type
@@ -39,16 +39,21 @@ from ...parser.nodes import (
     VariableGroupNode,
 )
 from ...parser.type_declaration_suffix import is_type_declaration_suffix
+from ...types.type_names import is_known_scalar_type, normalize_type
 from ..context import PushFn, statement_tokens
 from ..walker import (
     absolute_span,
     active_module_members,
+    declared_name_span,
     first_token_span,
     for_each_variable_group,
     is_inactive_node,
+    match_paren_from,
+    pluralize_count,
     strip_header_brackets,
     token_name,
     token_text,
+    top_level_operator_index,
 )
 from .shared import NameTokenHit, declaration_name_hit, name_token_hit
 
@@ -682,3 +687,242 @@ def check_udt_parameter_constraints(mod: ModuleNode, activity: ConditionalActivi
                     "cannot be passed ByVal; pass it ByRef.",
                     param.name_span if param.name_span is not None else param.span,
                 )
+
+
+# -- checkParameterOrder ---------------------------------------------------
+
+
+def check_parameter_order(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode):
+            continue
+        params = member.params
+        has_optional = any(p.optional for p in params)
+        optional_seen = False
+        for i, p in enumerate(params):
+            array_as_type = _parameter_array_as_type_syntax_hit(source, p)
+            if array_as_type is not None:
+                array_span, type_name = array_as_type
+                push(
+                    "parameterArrayAsTypeSyntax",
+                    f"Array parameter '{p.name}' must place parentheses after the parameter name, "
+                    f"before the As clause; use '{p.name}() As {type_name}'.",
+                    array_span,
+                )
+                if p.optional:
+                    optional_seen = True
+                continue
+            if p.param_array:
+                if p.as_type and normalize_type(p.as_type) != "variant":
+                    push(
+                        "paramArrayNonVariant",
+                        f"ParamArray '{p.name}' elements must be Variant, but this parameter "
+                        f"is declared As {p.as_type}.",
+                        declared_name_span(source, p.span, p.name),
+                    )
+                if has_optional:
+                    push(
+                        "paramArrayWithOptional",
+                        f"ParamArray '{p.name}' cannot be used in the same parameter list as "
+                        "Optional arguments.",
+                        declared_name_span(source, p.span, p.name),
+                    )
+                if i != len(params) - 1:
+                    push(
+                        "paramArrayNotLast",
+                        f"ParamArray '{p.name}' must be the last parameter.",
+                        declared_name_span(source, p.span, p.name),
+                    )
+                continue
+            if p.optional:
+                optional_seen = True
+                continue
+            if optional_seen:
+                push(
+                    "requiredParamAfterOptional",
+                    f"Parameter '{p.name}' must be Optional because it follows an Optional parameter.",
+                    declared_name_span(source, p.span, p.name),
+                )
+
+
+# -- checkPropertyAccessorSignatures ---------------------------------------
+
+_PROPERTY_KINDS = (ProcKind.PROPERTY_GET, ProcKind.PROPERTY_LET, ProcKind.PROPERTY_SET)
+
+
+@dataclass(slots=True)
+class _PropertyAccessorGroup:
+    name: str
+    gets: list[ProcedureNode]
+    setters: list[ProcedureNode]
+
+
+def _effective_passing_mode(param: ParameterNode) -> str:
+    return "byval" if param.by_val else "byref"
+
+
+def _property_procedure_label(kind: ProcKind) -> str:
+    if kind is ProcKind.PROPERTY_GET:
+        return "Property Get"
+    if kind is ProcKind.PROPERTY_LET:
+        return "Property Let"
+    if kind is ProcKind.PROPERTY_SET:
+        return "Property Set"
+    return "Property"
+
+
+def _property_parameter_type_mismatch(
+    expected: ParameterNode, actual: ParameterNode, index: int
+) -> str | None:
+    expected_type = normalize_type(expected.as_type) or "variant"
+    actual_type = normalize_type(actual.as_type) or "variant"
+    if expected_type == actual_type:
+        return None
+    scalar_or_variant = (expected_type == "variant" or is_known_scalar_type(expected_type)) and (
+        actual_type == "variant" or is_known_scalar_type(actual_type)
+    )
+    if not scalar_or_variant:
+        return None
+    return (
+        f"Index parameter {index} type must match: expected {expected.as_type or 'Variant'}, "
+        f"found {actual.as_type or 'Variant'}."
+    )
+
+
+def _property_index_parameter_mismatch(
+    get_params: list[ParameterNode], setter_index_params: list[ParameterNode]
+) -> str | None:
+    if len(get_params) != len(setter_index_params):
+        return (
+            f"Expected {pluralize_count(len(get_params), 'index parameter')}, "
+            f"but found {len(setter_index_params)}."
+        )
+    for i in range(len(get_params)):
+        expected = get_params[i]
+        actual = setter_index_params[i]
+        if expected.is_array != actual.is_array:
+            return f"Index parameter {i + 1} array shape must match."
+        if _effective_passing_mode(expected) != _effective_passing_mode(actual):
+            return f"Index parameter {i + 1} passing mode must match."
+        type_reason = _property_parameter_type_mismatch(expected, actual, i + 1)
+        if type_reason:
+            return type_reason
+    return None
+
+
+def check_property_accessor_signatures(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+    groups: dict[str, _PropertyAccessorGroup] = {}
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode) or member.proc_kind not in _PROPERTY_KINDS:
+            continue
+        key = member.name.lower()
+        group = groups.get(key)
+        if group is None:
+            group = _PropertyAccessorGroup(name=member.name, gets=[], setters=[])
+            groups[key] = group
+        if member.proc_kind is ProcKind.PROPERTY_GET:
+            group.gets.append(member)
+        else:
+            group.setters.append(member)
+
+    for group in groups.values():
+        if len(group.gets) != 1:
+            continue
+        getter = group.gets[0]
+        for setter in group.setters:
+            if len(setter.params) == 0:
+                continue
+            reason = _property_index_parameter_mismatch(getter.params, setter.params[:-1])
+            if reason is None:
+                continue
+            push(
+                "propertyAccessorSignatureMismatch",
+                f"{_property_procedure_label(setter.proc_kind)} '{setter.name}' argument list "
+                f"must match Property Get '{getter.name}' before the final value parameter. {reason}",
+                declared_name_span(source, setter.span, setter.name),
+            )
+
+
+# -- checkNonConstantConstValues / checkNonConstantEnumMemberValues --------
+
+# Operator keywords (And, Or, Not, Mod, ...) lex as keyword but are never callable
+# names; exclude them from the call heuristic so `6 And (3)` is not read as a call.
+_OPERATOR_KEYWORD_WORDS: frozenset[str] = frozenset(w.lower() for w in OPERATOR_IDENTIFIERS)
+
+
+def _non_constant_default_element(
+    tokens: list[VbaToken], base_offset: int
+) -> tuple[str, Span] | None:
+    for i, tok in enumerate(tokens):
+        word = (tok.canonical_text if tok.canonical_text is not None else tok.raw_text).lower()
+        if tok.kind is TokenKind.KEYWORD and (word == "new" or word == "addressof"):
+            return (f"'{tok.raw_text}'", Span(base_offset + tok.start, base_offset + tokens[-1].end))
+        is_name = tok.kind in (TokenKind.IDENTIFIER, TokenKind.KEYWORD, TokenKind.BRACKETED_IDENTIFIER)
+        is_operator_keyword = tok.kind is TokenKind.KEYWORD and word in _OPERATOR_KEYWORD_WORDS
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+        if is_name and not is_operator_keyword and nxt is not None and nxt.raw_text == "(":
+            close_index = match_paren_from(tokens, i + 1)
+            end_tok = tokens[close_index] if close_index >= 0 else tokens[i + 1]
+            return (f"the call '{tok.raw_text}(...)'", Span(base_offset + tok.start, base_offset + end_tok.end))
+    return None
+
+
+def _value_tokens_after_equals(source: str, span: Span) -> list[VbaToken] | None:
+    toks = [
+        t
+        for t in tokenize(source[span.start : span.end])
+        if t.kind is not TokenKind.COMMENT and t.kind is not TokenKind.NEWLINE
+    ]
+    eq = top_level_operator_index(toks, "=")
+    if eq < 0 or eq + 1 >= len(toks):
+        return None
+    return toks[eq + 1 :]
+
+
+def check_non_constant_const_values(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+    def inspect_group(group: VariableGroupNode) -> None:
+        if not group.is_const:
+            return
+        for decl in group.declarations:
+            if decl.default_raw is None or is_inactive_node(activity, decl):
+                continue
+            tokens = _value_tokens_after_equals(source, decl.span)
+            if tokens is None:
+                continue
+            non_constant = _non_constant_default_element(tokens, decl.span.start)
+            if non_constant is None:
+                continue
+            label, hit_span = non_constant
+            push(
+                "constValueNotConstant",
+                f"Const '{decl.name}' value must be a constant expression; {label} is not constant.",
+                hit_span,
+            )
+
+    for member in active_module_members(mod, activity):
+        if isinstance(member, VariableGroupNode):
+            inspect_group(member)
+        elif isinstance(member, ProcedureNode):
+            for_each_variable_group(member.body, inspect_group, activity)
+
+
+def check_non_constant_enum_member_values(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, EnumNode):
+            continue
+        for enum_member in member.members:
+            if enum_member.value_raw is None or is_inactive_node(activity, enum_member):
+                continue
+            tokens = _value_tokens_after_equals(source, enum_member.span)
+            if tokens is None:
+                continue
+            non_constant = _non_constant_default_element(tokens, enum_member.span.start)
+            if non_constant is None:
+                continue
+            label, hit_span = non_constant
+            push(
+                "enumMemberNotConstant",
+                f"Enum member '{enum_member.name}' value must be a constant expression; "
+                f"{label} is not constant.",
+                hit_span,
+            )
