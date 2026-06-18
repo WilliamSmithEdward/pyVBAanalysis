@@ -38,6 +38,15 @@ Out of scope:
   span heuristics. Port only the resolver cores that diagnostics depend on (see
   Risk 7), not the editor wrapping.
 
+Dependencies: the only runtime dependency is pyOpenVBA
+(https://pypi.org/project/pyOpenVBA/, version 3.0.1, requires Python >=3.10),
+used to read VBA modules directly from Excel, Word, and PowerPoint files.
+pyOpenVBA is itself pure Python with no transitive dependencies, so the whole
+runtime tree stays pure Python; everything else is the standard library. The
+analysis core operates on source text and never imports pyOpenVBA. Only the
+reader layer (Section 3) imports it, so the core is testable without any Office
+file. Dev-only tooling (pytest, ruff, mypy) is not a runtime dependency.
+
 The hard part is already done. XLIDE is a proven reference implementation and it
 carries a language-agnostic evidence corpus (397 oracle-verified cases plus a
 provenance audit and an MS-VBAL verification map). That turns this from research
@@ -99,7 +108,9 @@ via lowercased keys (VBA is case-insensitive).
 
 ```
 pyvbaanalysis/
-  __init__.py                  # public API: analyze_module, parse_module, tokenize, ProjectIndex
+  __init__.py                  # public API: analyze_module, parse_module, tokenize, ProjectIndex, analyze_workbook
+  reader/
+    workbook.py                # read VBA modules from .xlsm/.docm/.pptm via pyOpenVBA -> source; the ONLY pyOpenVBA import
   lexer/
     token_kinds.py             # TokenKind, TriviaKind (Enum); VbaToken, Trivia (dataclass)
     tokenize.py                # tokenize(), tokenize_cached(), date-literal validator
@@ -155,6 +166,13 @@ tests/
 Do not over-split (UM-04): one module per rule family, not one per rule. Do not
 let any file become a monolith (UM-03): the 8900-line `excelReferenceMembers.ts`
 must land as JSON data plus a thin resolver, never as a giant `.py`.
+
+The reader layer (`reader/workbook.py`) is the only place pyOpenVBA is imported.
+It turns an Office file (.xlsm/.docm/.pptm) into module source text and feeds the
+pure analyzer; `analyze_module(source)` and everything below it stays stdlib-only
+(UM-01), so the core is testable from plain strings without any Office file. The
+import name is most likely `pyopenvba` (per the wheel `pyopenvba-3.0.1`); confirm
+at first use.
 
 ---
 
@@ -326,6 +344,9 @@ bump.
 - No-false-positive discipline is the prime directive. If a construct is not
   provably wrong via the audit plus its oracle/spec evidence, the analyzer stays
   quiet. A false positive is a worse failure than a missed diagnostic.
+- Dependencies (RG-10): pyOpenVBA is the only runtime dependency, and only the
+  reader layer imports it. Everything else is the Python standard library. Do not
+  add a runtime dependency; if you think you need one, stop and ask (UM-09).
 - Plain ASCII only (UM-07). Use `->` not an arrow glyph, straight quotes, no em
   dashes, no emoji, spelled-out spec references.
 - Mark generated and vendored content. `pyvbaanalysis/data/` and
