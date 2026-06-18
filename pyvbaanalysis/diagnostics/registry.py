@@ -50,6 +50,16 @@ from .rules.duplicates import (
     check_duplicate_type_fields,
 )
 from .rules.lexical import check_invalid_line_continuations, check_unterminated_strings
+from .rules.module_kind import (
+    check_declare_ptr_safe_for_win64,
+    check_event_declaration_module_kind,
+    check_friend_declarations,
+    check_implements_statement_placement,
+    check_me_outside_object_module,
+    check_object_module_public_members,
+    check_raise_event_targets,
+    check_with_events_declarations,
+)
 from .rules.numeric_literals import check_suffixed_literal_overflow
 from .walker import ProcedureStatementVisitor
 
@@ -123,10 +133,20 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # Positions 35-40 deferred: the arrays family (M7).
     DiagnosticRuleEntry(name="typeDeclarationCharacterAsClause", run=lambda ctx, push: check_type_declaration_character_as_clause(ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="unexpectedDeclarationTokens", run=lambda ctx, push: check_unexpected_declaration_tokens(ctx.source, ctx.mod, ctx.activity, push)),
-    # Positions 43-52 deferred: fixed-length-string bounds (constExpr), the arrays
-    # family (M7), the moduleKind family (M9), invalid-As-type-name (M9), and the
-    # parenthesized-call rules (memberCtx / call extraction, M8).
-    # -- control-flow family (positions 53-61, self-contained subset) --
+    # Position 45 deferred: fixedLengthStringBounds (constExpr); positions 35-42
+    # (arrays / object-state, M7) precede it and are also deferred.
+    # -- moduleKind family (positions 46-53, self-contained subset) --
+    DiagnosticRuleEntry(name="objectModulePublicMembers", run=lambda ctx, push: check_object_module_public_members(ctx.source, ctx.mod, ctx.module_kind, ctx.activity, push)),
+    DiagnosticRuleEntry(name="eventDeclarationModuleKind", run=lambda ctx, push: check_event_declaration_module_kind(ctx.source, ctx.mod, ctx.module_kind, ctx.activity, push)),
+    DiagnosticRuleEntry(name="meOutsideObjectModule", procedure_statements=lambda ctx, push: check_me_outside_object_module(ctx.module_kind, ctx.source, push)),
+    DiagnosticRuleEntry(name="withEventsDeclarations", run=lambda ctx, push: check_with_events_declarations(ctx.source, ctx.mod, ctx.module_kind, ctx.activity, push)),
+    DiagnosticRuleEntry(name="friendDeclarations", run=lambda ctx, push: check_friend_declarations(ctx.source, ctx.mod, ctx.module_kind, ctx.activity, push)),
+    DiagnosticRuleEntry(name="implementsStatementPlacement", run=lambda ctx, push: check_implements_statement_placement(ctx.source, ctx.mod, ctx.module_kind, ctx.activity, push)),
+    DiagnosticRuleEntry(name="raiseEventTargets", run=lambda ctx, push: check_raise_event_targets(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="declarePtrSafeForWin64", run=lambda ctx, push: check_declare_ptr_safe_for_win64(ctx.source, ctx.mod, ctx.opts.conditional_compilation, ctx.activity, push)),
+    # Positions 54-58 deferred: eventHandlerModuleScope (completion), invalidAsTypeNames
+    # (M9), and the parenthesized-call rules (memberCtx / call extraction, M8).
+    # -- control-flow family (positions 59-66, self-contained subset) --
     DiagnosticRuleEntry(name="exitStatements", procedure_statements=lambda ctx, push: check_exit_statements(ctx.source, push)),
     # Positions 54-56 deferred: duplicate/undefined labels (flow/procedureLabels),
     # elseBranchOrder (shared conditional-compilation branch-order helper).
