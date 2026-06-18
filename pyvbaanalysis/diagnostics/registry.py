@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from .context import PushFn, RulePassContext
 from .exprwalk import ProcedureExpressionVisitor
+from .rules.lexical import check_invalid_line_continuations, check_unterminated_strings
 from .walker import ProcedureStatementVisitor
 
 
@@ -27,5 +28,16 @@ class DiagnosticRuleEntry:
     procedure_expressions: Callable[[RulePassContext, PushFn], ProcedureExpressionVisitor] | None = None
 
 
-# The ordered table of all active rules. Empty until rule families are ported.
-DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = ()
+# The ordered table of active rules. The ORDER is the diagnostic output-order
+# contract; entries are placed at their registry.ts positions as families are
+# ported (gaps remain for not-yet-ported families).
+DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
+    DiagnosticRuleEntry(
+        name="unterminatedStrings",
+        run=lambda ctx, push: check_unterminated_strings(ctx.source, push),
+    ),
+    DiagnosticRuleEntry(
+        name="invalidLineContinuations",
+        run=lambda ctx, push: check_invalid_line_continuations(ctx.source, push),
+    ),
+)

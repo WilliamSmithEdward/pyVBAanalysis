@@ -47,9 +47,11 @@ _NON_ERROR_RULE = next(n for n, m in DIAGNOSTIC_RULES.items() if m.default_sever
     [(mt, s) for _, mt, s in _SOURCES],
     ids=[i for i, _, _ in _SOURCES],
 )
-def test_empty_registry_returns_empty_over_corpus(module_type: str, source: str) -> None:
+def test_analyze_module_never_throws_over_corpus(module_type: str, source: str) -> None:
     opts = AnalyzeModuleOptions(module_name="M", module_kind=_MODULE_KIND.get(module_type, ModuleSymbolKind.STANDARD))
-    assert analyze_module(source, opts) == []
+    result = analyze_module(source, opts)
+    assert isinstance(result, list)
+    assert all(d.code for d in result)
 
 
 def test_analyze_module_never_throws_on_garbage() -> None:
