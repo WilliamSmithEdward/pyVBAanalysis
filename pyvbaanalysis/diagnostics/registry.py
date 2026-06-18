@@ -42,6 +42,7 @@ from .rules.declarations import (
     check_udt_parameter_constraints,
     check_unexpected_declaration_tokens,
 )
+from .rules.expressions import check_unbalanced_parens
 from .rules.duplicates import (
     check_duplicate_declarations,
     check_duplicate_enum_members,
@@ -128,7 +129,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # Positions 27-28 deferred: parameter defaults (memberCtx + inferArgumentType, M8).
     DiagnosticRuleEntry(name="constValueNotConstant", run=lambda ctx, push: check_non_constant_const_values(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="enumMemberNotConstant", run=lambda ctx, push: check_non_constant_enum_member_values(ctx.source, ctx.mod, ctx.activity, push)),
-    # Positions 31-33 deferred: the expressions family (call extraction / type inference).
+    DiagnosticRuleEntry(name="unbalancedParens", run=lambda ctx, push: check_unbalanced_parens(ctx.source, push)),
+    # Positions 32-33 deferred: invalid-expression-syntax + division-by-zero
+    # (call extraction / type inference, M8).
     DiagnosticRuleEntry(name="dimInitializer", run=lambda ctx, push: check_dim_initializer(ctx.source, ctx.mod, ctx.activity, push)),
     # Positions 35-40 deferred: the arrays family (M7).
     DiagnosticRuleEntry(name="typeDeclarationCharacterAsClause", run=lambda ctx, push: check_type_declaration_character_as_clause(ctx.mod, ctx.activity, push)),
