@@ -1,0 +1,41 @@
+"""Conditional-compilation activity (MS-VBAL 3.4)."""
+
+from .conditional_compilation import (
+    DEFAULT_COMPILER_CONSTANTS,
+    ConditionalActivity,
+    ConditionalActivityTracker,
+    ConditionalCompilationEnvironment,
+    ConditionalCompilationIndex,
+    ConditionalConstDefinition,
+    ConditionalContainer,
+    ConditionalDirectiveOccurrence,
+    ConditionalValue,
+    collect_conditional_directives,
+    conditional_activity_at_offset,
+    conditional_activity_for_span,
+    conditional_compiler_constants,
+    create_conditional_activity_tracker,
+    evaluate_conditional_expression,
+    index_conditional_compilation,
+    module_has_conditional_directives,
+)
+
+__all__ = [
+    "ConditionalActivity",
+    "ConditionalActivityTracker",
+    "ConditionalCompilationEnvironment",
+    "ConditionalCompilationIndex",
+    "ConditionalConstDefinition",
+    "ConditionalContainer",
+    "ConditionalDirectiveOccurrence",
+    "ConditionalValue",
+    "DEFAULT_COMPILER_CONSTANTS",
+    "collect_conditional_directives",
+    "conditional_activity_at_offset",
+    "conditional_activity_for_span",
+    "conditional_compiler_constants",
+    "create_conditional_activity_tracker",
+    "evaluate_conditional_expression",
+    "index_conditional_compilation",
+    "module_has_conditional_directives",
+]
