@@ -14,6 +14,13 @@ from dataclasses import dataclass
 
 from .context import PushFn, RulePassContext
 from .exprwalk import ProcedureExpressionVisitor
+from .rules.duplicates import (
+    check_duplicate_declarations,
+    check_duplicate_enum_members,
+    check_duplicate_module_members,
+    check_duplicate_procedures,
+    check_duplicate_type_fields,
+)
 from .rules.lexical import check_invalid_line_continuations, check_unterminated_strings
 from .walker import ProcedureStatementVisitor
 
@@ -40,4 +47,26 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
         name="invalidLineContinuations",
         run=lambda ctx, push: check_invalid_line_continuations(ctx.source, push),
     ),
+    DiagnosticRuleEntry(
+        name="duplicateProcedures",
+        run=lambda ctx, push: check_duplicate_procedures(ctx.symbols.root.children or [], push),
+    ),
+    DiagnosticRuleEntry(
+        name="duplicateDeclarations",
+        run=lambda ctx, push: check_duplicate_declarations(ctx.symbols.root.children or [], push),
+    ),
+    DiagnosticRuleEntry(
+        name="duplicateModuleMembers",
+        run=lambda ctx, push: check_duplicate_module_members(ctx.symbols.root.children or [], push),
+    ),
+    DiagnosticRuleEntry(
+        name="duplicateEnumMembers",
+        run=lambda ctx, push: check_duplicate_enum_members(ctx.source, ctx.mod, ctx.activity, push),
+    ),
+    DiagnosticRuleEntry(
+        name="duplicateTypeFields",
+        run=lambda ctx, push: check_duplicate_type_fields(ctx.source, ctx.mod, ctx.activity, push),
+    ),
+    # NOTE: ambiguousEnumMemberReferences (registry position 12) is deferred -
+    # it needs type inference + host + runtime resolution (M8/M9).
 )
