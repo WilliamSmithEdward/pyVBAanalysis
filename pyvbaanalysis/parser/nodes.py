@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
-from typing import ClassVar, Union
+from typing import ClassVar, TypeGuard, Union
 
 
 @dataclass(frozen=True, slots=True)
@@ -716,6 +716,6 @@ ModuleMember = Union[
 ]
 
 
-def is_leaf_statement(node: object) -> bool:
+def is_leaf_statement(node: object) -> TypeGuard[LeafStatementNode]:
     """True for the leaf statement nodes (Assignment / Call / raw Statement)."""
     return isinstance(node, (AssignmentNode, CallNode, StatementNode))

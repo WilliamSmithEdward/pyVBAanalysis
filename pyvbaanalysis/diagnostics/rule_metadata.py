@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeGuard
 
 from ..evidence import DATA_DIR
 from .model import (
@@ -89,10 +89,102 @@ def rule_metadata_by_code() -> dict[str, DiagnosticRuleMetadata]:
     return {meta.code: meta for meta in DIAGNOSTIC_RULES.values()}
 
 
+# The two structural block-balance diagnostics are emitted by the parser pass, not
+# the rule catalogue, so they are not in rule_metadata.json. They are part of the
+# audited code set and are looked up by code (e.g. by the suppression subsystem),
+# so they are registered here as metadata.
+STRUCTURAL_DIAGNOSTIC_RULES: dict[str, DiagnosticRuleMetadata] = {
+    "missingBlockCloser": DiagnosticRuleMetadata(
+        rule_name="missingBlockCloser",
+        code="missing-block-closer",
+        title="Missing block closer",
+        default_severity=DiagnosticSeverity.ERROR,
+        category=DiagnosticCategory.SYNTAX,
+        vbe_compile_equivalent=True,
+        diagnostic_kind=DiagnosticEvidenceKind.COMPILE_ERROR,
+        source="XLIDE",
+        confidence="high",
+        spec_reference="MS-VBAL 5.4 (block statements) / VBE compile structure",
+    ),
+    "unmatchedBlockCloser": DiagnosticRuleMetadata(
+        rule_name="unmatchedBlockCloser",
+        code="unmatched-block-closer",
+        title="Unmatched block closer",
+        default_severity=DiagnosticSeverity.ERROR,
+        category=DiagnosticCategory.SYNTAX,
+        vbe_compile_equivalent=True,
+        diagnostic_kind=DiagnosticEvidenceKind.COMPILE_ERROR,
+        source="XLIDE",
+        confidence="high",
+        spec_reference="MS-VBAL 5.4 (block statements) / VBE compile structure",
+    ),
+}
+
+XLIDE_DIAGNOSTIC_SOURCE = "XLIDE"
+
+_METADATA_BY_CODE: dict[str, DiagnosticRuleMetadata] = {
+    meta.code: meta
+    for meta in (*DIAGNOSTIC_RULES.values(), *STRUCTURAL_DIAGNOSTIC_RULES.values())
+}
+
+_SEVERITY_OVERRIDE_VALUES: frozenset[str] = frozenset({"off", "information", "warning", "error"})
+
+
+def _normalize_code(code: object) -> str | None:
+    return (code.strip().lower() or None) if isinstance(code, str) else None
+
+
+def diagnostic_metadata_for_code(code: str | None) -> DiagnosticRuleMetadata | None:
+    """Metadata for a semantic or structural diagnostic code (case-insensitive)."""
+    normalized = _normalize_code(code)
+    if not normalized:
+        return None
+    return _METADATA_BY_CODE.get(normalized)
+
+
+def is_diagnostic_severity_override(value: object) -> TypeGuard[str]:
+    """True when a raw value is part of the severity-override vocabulary."""
+    return value in _SEVERITY_OVERRIDE_VALUES
+
+
+def allowed_diagnostic_severity_overrides_for_code(code: str | None) -> list[str]:
+    """Severity-override choices allowed for one diagnostic code."""
+    meta = diagnostic_metadata_for_code(code)
+    if meta is None:
+        return []
+    if meta.default_severity is DiagnosticSeverity.ERROR:
+        return ["warning"] if meta.allow_severity_downgrade else []
+    return ["off"]
+
+
+def normalize_diagnostic_severity_override(code: str | None, value: object) -> str | None:
+    """Normalize one guarded override; invalid or disallowed values become None."""
+    if not is_diagnostic_severity_override(value):
+        return None
+    return value if value in allowed_diagnostic_severity_overrides_for_code(code) else None
+
+
+def diagnostic_suppression_scopes_for_code(
+    code: str | None,
+) -> tuple[DiagnosticSuppressionScope, ...]:
+    """Rule-level suppression scopes before narrowing by source position."""
+    meta = diagnostic_metadata_for_code(code)
+    if meta is None or meta.suppression_scopes is None:
+        return DEFAULT_DIAGNOSTIC_SUPPRESSION_SCOPES
+    return meta.suppression_scopes
+
+
 __all__ = [
     "DiagnosticRuleMetadata",
     "DIAGNOSTIC_RULES",
+    "STRUCTURAL_DIAGNOSTIC_RULES",
     "DEFAULT_DIAGNOSTIC_SUPPRESSION_SCOPES",
+    "XLIDE_DIAGNOSTIC_SOURCE",
     "load_rule_metadata",
     "rule_metadata_by_code",
+    "diagnostic_metadata_for_code",
+    "is_diagnostic_severity_override",
+    "allowed_diagnostic_severity_overrides_for_code",
+    "normalize_diagnostic_severity_override",
+    "diagnostic_suppression_scopes_for_code",
 ]
