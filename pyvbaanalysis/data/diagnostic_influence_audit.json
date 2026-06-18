@@ -1,0 +1,1786 @@
+{
+  "version": 1,
+  "notes": [
+    "This file tracks whether current active diagnostics are driven by corpus material, MS-VBAL/spec evidence, or oracle observations.",
+    "Legacy Markdown corpus files are pending-verification and must not be used as sole evidence for hard diagnostics.",
+    "Observed-only oracle cases may guide discovery, but they do not justify hard analyzer behavior until promoted."
+  ],
+  "diagnostics": [
+    {
+      "code": "unterminated-string",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 3.3.4",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error",
+      "notes": "Project-backed unknown-call uses ProjectIndex.visibleProcedureNames(moduleName), so only same-module procedures and exported standard-module procedures are treated as bare callable names. Private procedures in other modules and object-module members do not suppress the diagnostic."
+    },
+    {
+      "code": "invalid-line-continuation",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 3.2.2 line-continuation = 1*WSC underscore line-terminator",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_limits_boundary_cases.md",
+        "xlide_vba_visible_analysis_corpus_recommendations.md"
+      ],
+      "notes": "Promotes the settled invalid continuation shapes only: a likely continuation underscore with trailing text/comment, or a likely continuation underscore at a physical line break without required leading whitespace. Dangling final continuations remain a realtime recovery/save-validation candidate.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "duplicate-procedure",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.3",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "duplicate-declaration",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.2 / 5.3",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "duplicate-module-variable",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.2.3",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "duplicate-enum-member",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.2.3.4 Enum member declarations",
+      "corpusInfluence": "legacy-corpus-promoted",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage reports the second and later case-insensitive duplicate member names within one active top-level Enum block. Only provably-active members collide: whole Enum blocks in inactive conditional-compilation branches stay quiet, and conditional directives nested inside an Enum body are now modeled by the parser, so members in an inactive or not-provably-active (#If on an unknown constant, including the two arms of an #If/#Else) branch are skipped.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "duplicate-type-field",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.2.3.3 user-defined Type field declarations plus the VBE 'Duplicate declaration in current scope' compile error",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Reports the second and later case-insensitive duplicate field names within one active top-level Type (UDT) block. Mirrors duplicate-enum-member: only provably-active fields collide, so fields in an inactive or not-provably-active conditional-compilation branch (including the two arms of an #If/#Else, now modeled by the parser inside Type bodies) are skipped - no false positive.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "ambiguous-enum-member",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "VBE compile oracle: duplicate member names across separate Enum blocks compile until referenced unqualified; the unqualified read is rejected as Ambiguous name detected",
+      "corpusInfluence": "legacy-corpus-promoted",
+      "assertedOracleCases": [
+        "enum_member_same_name_across_enums_declaration_compile",
+        "enum_member_same_name_across_enums_unqualified_read_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage reports value-position bare reads whose shared source-resolver binding is enum-member-only ambiguous across distinct visible Enum containers. Local/module non-enum bindings and procedure locals/parameters shadow exported ambiguity, qualified reads stay quiet, and declaration-only same-name members remain quiet per the accepted oracle control.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "const-assignment",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.4.3.1",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Active coverage reports bare assignment targets whose shared assignment-target binding resolves to a non-ambiguous local, module-level, or project-visible Const. Local declarations shadow module-level constants, member/indexed targets are outside the rule, inactive branches stay quiet, and ambiguous exported constants remain deferred.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "declare-missing-ptrsafe",
+      "status": "spec-derived",
+      "sourceOfTruth": "VBA 7 Declare statement PtrSafe requirement for 64-bit Office",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_additional_edge_cases.md"
+      ],
+      "notes": "Enabled only when supplied compiler constants prove Win64; unknown platform branches stay silent until an oracle-backed platform profile is configured.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "option-explicit-missing",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.2.4.1.1 plus XLIDE style policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "style-policy"
+    },
+    {
+      "code": "analysis-suppression-directive",
+      "status": "spec-derived",
+      "sourceOfTruth": "docs/xlide_vba_analysis_suppression_comments.md plus XLIDE style policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Directive diagnostics report malformed XLIDE analysis suppression comments, unknown diagnostic codes, and first-slice scope placement errors. They are not VBA compile behavior and are intentionally not suppressible by analysis suppression directives.",
+      "diagnosticKind": "style-policy"
+    },
+    {
+      "code": "vba-test-directive",
+      "status": "spec-derived",
+      "sourceOfTruth": "docs/xlide_vba_com_test_runner.md plus XLIDE test discovery contract",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Directive diagnostics report malformed XLIDE VBA test comments, metadata syntax issues, and markers that cannot discover a runnable standard-module zero-argument Sub. They are product workflow guidance, not VBA compile behavior.",
+      "diagnosticKind": "style-policy"
+    },
+    {
+      "code": "undeclared-variable",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.2.4.1.1 plus Excel/VBE compile oracle",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "option_explicit_undeclared_assignment_compile",
+        "implicit_variant_assignment_without_option_explicit_compile",
+        "option_explicit_declared_assignment_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "syntax_corpus/excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active rule covers project-backed Option Explicit write/read positions: bare assignment and Set targets, RHS and call-argument reads, control-flow block headers, member receivers, and indexed bases. Runtime constants and generated Excel enum constants suppress false positives. Type-name, label, named-argument, and unresolved external-style call positions remain intentionally silent until the binder can prove broader reference shapes without false positives.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "invalid-proc-header",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.3.1",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "invalid-identifier-start",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 3.3.5 lex-identifier names cannot start with a digit",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "corpus_type_003_compile",
+        "corpus_name_rule_002_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "xlide_vba_visible_analysis_corpus_recommendations.md",
+        "excel_vba_analysis_limits_boundary_cases.md"
+      ],
+      "notes": "Active coverage is deliberately limited to digit-start declaration names in declaration contexts. Leading underscore, Unicode, and illegal-character identifier cases remain pending oracle/spec follow-up.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "module-declaration-in-procedure",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.2 module/procedure metadata and declarations plus Excel/VBE compile oracle",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "indented_attribute_inside_procedure_compile",
+        "type_inside_procedure_compile",
+        "enum_inside_procedure_compile",
+        "corpus_event_002_compile",
+        "corpus_edges_002_deftype_in_proc_compile",
+        "corpus_canary_006_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md",
+        "xlide_vba_legacy_visible_corpus_edges.md"
+      ],
+      "notes": "Active coverage has two layers: semantic body scans catch completed module-only statement forms that remain inside parsed procedure bodies, including Option, Attribute lines outside exported-source metadata mode, DefType family statements, and Public/Private/Friend/Global declaration forms; parser recovery consumes nested Type and Enum blocks as invalid procedure-body statements so the Type/Enum diagnostic supersedes misleading End Sub cascade errors, while structural analysis still catches nested Declare and procedure declarations that otherwise look block-balanced or break parser recovery. Related verified AddFromString/live-style probes member_attribute_after_header_addfromstring_compile and member_attribute_after_executable_addfromstring_compile reject visible member Attribute lines as Syntax error; focused Type/Enum probes reject as Invalid inside procedure. XLIDE's exported-source parser policy accepts only unindented Attribute CurrentMember.VB_* metadata in the member metadata slot before executable body statements, and preserves accepted attributes on the procedure symbol; wrong-target, indented, and post-body Attribute lines remain diagnostic. Same-indent next members remain treated as missing-closer recovery to avoid noisy false positives.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "module-declaration-after-procedure",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.2 module declarations precede 5.3 procedure declarations plus Excel/VBE compile oracle",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "conditional_const_after_procedure_active_elseif_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage scans top-level parsed module members in active conditional branches. Once an active procedure is seen, later active Declare, Event, Const/module variable, Type, Enum, and DefType declarations are reported on the declaration keyword. Later procedures remain accepted; inactive conditional branches stay silent. In a valid #If/#ElseIf/#Else block after a procedure, only the active declaration branch is reported; declarations inside a conditional-compilation block with malformed branch order are suppressed as cascade noise because else-branch-order owns the primary compile error. Option placement remains owned by option-after-declaration and Implements placement by implements-statement-placement.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "statement-outside-procedure",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.2 module body structure and 5.4 statements",
+      "corpusInfluence": "legacy-corpus-promoted",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage scans active top-level parser Statement nodes and reports executable/call/expression shapes that appear in the module body instead of inside a Sub, Function, or Property procedure. DefType statements are accepted in the declaration section and routed to module-declaration-after-procedure after a procedure; Implements statements are owned by implements-statement-placement.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "invalid-declaration-name",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 3.3.5.2 reserved identifiers are not IDENTIFIER tokens",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags unbracketed reserved identifiers in declaration-name positions, including reserved-for-implementation-use names such as Attribute and VB_Name. Bracketed FOREIGN-NAME forms remain accepted.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "unbalanced-parens",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 3.3.1",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "argument-count",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.4.2.1 plus asserted Excel/VBE oracle cases plus deterministic project signature graph",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "missing_trailing_required_argument",
+        "missing_leading_required_argument",
+        "duplicate_named_argument_compile",
+        "positional_after_named_argument_compile",
+        "positional_after_named_paren_call_compile",
+        "positional_after_named_paramarray_compile",
+        "positional_then_named_argument_ok_compile",
+        "named_then_named_argument_ok_compile",
+        "omit_trailing_after_named_compile",
+        "omit_middle_between_named_compile",
+        "omit_leading_before_named_compile",
+        "omit_positional_then_omit_then_named_compile",
+        "omit_baseline_no_named_compile",
+        "normal_function_call"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error",
+      "notes": "Same-module signatures come from the AST, including external Declare metadata. Cross-module checks run only for exported standard-module Sub/Function/Declare signatures supplied by ProjectIndex. Ambiguous bare exported names stay silent; module-qualified calls resolve through the named standard module only. Named-argument checks report unknown parameter names and duplicate named parameters case-insensitively, with duplicate behavior backed by the VBE oracle's Named argument already specified compile error. PCEC_008 + omitted-after-named: nothing positional may follow a named argument - VBE rejects at compile (regardless of the signature) both a positional VALUE after a named arg (oracle positional_after_named_argument_compile, plus the paren-call and ParamArray forms positional_after_named_paren_call_compile / positional_after_named_paramarray_compile) AND an omitted/empty slot after a named arg (oracle omit_trailing_after_named_compile f(a:=1, ) and omit_middle_between_named_compile f(a:=1, , c:=3)). Pure slot-order syntax (independent of the resolved signature): once a named slot is seen, the FIRST subsequent non-named slot is the violation (a positional value or an omitted slot). Omissions BEFORE the first named arg stay legal (oracle omit_leading_before_named_compile f(, b:=2), omit_positional_then_omit_then_named_compile f(1, , c:=3), and the omission-without-named baseline omit_baseline_no_named_compile f(1, , 3)), as do the legal positional-then-named and all-named orderings (positional_then_named_argument_ok_compile / named_then_named_argument_ok_compile). Runs inside validateArity, so it is naturally scoped to resolved callees (unknown callees stay silent - an accepted no-FP false negative). Source-backed and host member signatures are validated through the shared member binder for parenthesized calls and parenless member call statements, including leading-dot calls inside simple or nested With receiver stacks. Bare runtime signatures are runtime-last and stay silent when visible non-callable source names shadow the runtime name."
+    },
+    {
+      "code": "argument-type-mismatch",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile and runtime oracle plus deterministic XLIDE literal, return-type, numeric-expression, string-concatenation, and project signature model",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "nonnumeric_string_to_currency_argument",
+        "nonnumeric_string_to_currency_argument_runtime",
+        "numeric_string_to_currency_argument_runtime",
+        "left_length_nonnumeric_string_runtime",
+        "left_length_numeric_string_runtime",
+        "byte_argument_max_literal_runtime",
+        "byte_argument_overflow_literal_runtime",
+        "integer_argument_max_literal_runtime",
+        "integer_argument_overflow_literal_runtime",
+        "byte_argument_min_literal_runtime",
+        "byte_argument_negative_literal_runtime",
+        "integer_argument_min_literal_runtime",
+        "integer_argument_below_min_literal_runtime",
+        "long_argument_max_literal_runtime",
+        "long_argument_overflow_literal_runtime",
+        "currency_argument_max_literal_runtime",
+        "currency_argument_overflow_literal_runtime",
+        "cverr_to_long_argument_runtime",
+        "cverr_to_variant_argument_runtime",
+        "null_to_long_argument_runtime",
+        "null_to_variant_argument_runtime"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "This is not a VBE compile-equivalent error: the focused compile oracle case compiles successfully. It is red because focused runtime oracle cases deterministically raise runtime error 13 for nonnumeric string literals passed to numeric parameters and intrinsic CVErr Error Variants passed to scalar parameters, runtime error 94 for Null passed to scalar parameters, and runtime error 6 for decimal literals outside Byte/Integer/Long/Currency argument bounds, while numeric-string, Variant CVErr, Variant Null, and min/max boundary controls run successfully. Cross-module checks use exported standard-module project Sub/Function/Declare signatures; ambiguous bare names stay silent, while module-qualified calls resolve through the named standard module only. Source-backed and host member signatures feed the same argument type path for parenthesized calls and parenless member call statements, including leading-dot calls inside simple or nested With receiver stacks. Argument inference also consumes bare local/module/unique-exported value declarations resolved through the shared expression resolver, module-qualified source-backed value reads such as ModuleName.ValueName, zero-argument Function/Property Get value references, Null literals, intrinsic CVErr Error Variant returns when not source-shadowed, explicit VBA.CVErr calls, and proven source-backed/host member return expressions when source/project/runtime/member metadata proves the return type. Runtime parameter and return metadata is skipped for bare names shadowed by visible source declarations, including untyped locals.",
+      "diagnosticKind": "deterministic-runtime-error"
+    },
+    {
+      "code": "argument-object-type-mismatch",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle plus deterministic XLIDE object-parameter compatibility model",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "string_literal_to_object_argument"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "This is a VBE compile-equivalent error: the focused oracle case is rejected with Type mismatch. The active argument inference can also prove scalar arguments through bare local/module/unique-exported value declarations resolved through the shared expression resolver, module-qualified source-backed value reads such as ModuleName.ValueName, zero-argument Function/Property Get value references, proven source-backed/host member return expressions, and verified VBA runtime/generated host constants when no source binding shadows the constant name, while local shadows, ambiguous exported globals, unknown module qualifiers, ambiguous bare project functions, source-shadowed runtime names, untyped/Variant values, and bare member functions with required arguments stay silent.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "byref-argument-type-mismatch",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle plus deterministic XLIDE source-backed callable signatures and shared expression value resolver",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "byref_long_variable_compile",
+        "byref_long_literal_compile",
+        "byref_long_parenthesized_variable_compile",
+        "byref_long_integer_variable_compile",
+        "byref_long_expression_compile",
+        "byref_long_range_value_compile",
+        "byref_string_object_variable_compile",
+        "byval_long_integer_variable_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "The active rule is intentionally narrow: it fires only when a source-backed same-module or unique exported project callable has a ByRef parameter with a known exact type and the argument is an unparenthesized known non-Variant variable with a different normalized type. Bare argument variables resolve through the shared expression resolver before local type-map fallback, and module-qualified variables resolve through the matching source-backed module surface, so visible exported standard-module variables participate while local shadows, ambiguous exported globals, unknown module qualifiers, untyped values, and Variant values stay quiet. Oracle controls prove that literals, parenthesized Long variable expressions, arithmetic expressions, and Range.Value member expressions are compile-accepted, while an Object variable passed to ByRef String is rejected.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "assignment-type-mismatch",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile and runtime oracle plus deterministic XLIDE scalar assignment compatibility model",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "number_to_string_assignment",
+        "number_to_string_assignment_runtime",
+        "nonnumeric_string_to_double_assignment",
+        "nonnumeric_string_to_double_assignment_runtime",
+        "double_assignment_numeric_string_runtime",
+        "integer_assignment_nonnumeric_string_runtime",
+        "integer_assignment_numeric_string_runtime",
+        "boolean_assignment_nonboolean_string_runtime",
+        "boolean_assignment_true_string_runtime",
+        "byte_assignment_max_literal_runtime",
+        "byte_assignment_overflow_literal_runtime",
+        "integer_assignment_max_literal_runtime",
+        "integer_assignment_overflow_literal_runtime",
+        "byte_assignment_min_literal_runtime",
+        "byte_assignment_negative_literal_runtime",
+        "integer_assignment_min_literal_runtime",
+        "integer_assignment_below_min_literal_runtime",
+        "long_assignment_max_literal_runtime",
+        "long_assignment_overflow_literal_runtime",
+        "long_assignment_min_literal_runtime",
+        "long_assignment_below_min_literal_runtime",
+        "currency_assignment_max_literal_runtime",
+        "currency_assignment_overflow_literal_runtime",
+        "currency_assignment_clear_overflow_literal_runtime",
+        "currency_assignment_min_literal_runtime",
+        "currency_assignment_below_min_literal_runtime",
+        "class_property_integer_nonnumeric_string_runtime",
+        "class_property_integer_numeric_string_runtime",
+        "class_public_field_integer_nonnumeric_string_runtime",
+        "class_public_field_integer_numeric_string_runtime",
+        "cverr_to_long_assignment_runtime",
+        "cverr_to_variant_assignment_runtime",
+        "null_to_long_assignment_runtime",
+        "null_to_variant_assignment_runtime"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "This is not a VBE compile-equivalent error: focused compile oracle cases compile successfully. It is red when XLIDE proves a value cannot be coerced or fit into the target scalar type because focused runtime oracle cases deterministically raise runtime error 13 for type mismatch, runtime error 94 for Null assigned to scalar targets, and runtime error 6 for decimal Byte/Integer/Long/Currency overflow, while numeric/string/Boolean/property/public-field, Variant CVErr, Variant Null, and min/max boundary controls run successfully. Function, Property Get return-name assignments, and visible exported standard-module scalar globals use the same deterministic scalar path. Bare assignment targets ask the shared assignment-target resolver first, so local untyped shadows and ambiguous exported globals suppress type guessing. Intrinsic CVErr calls infer an Error Variant for scalar assignment compatibility when the bare runtime name is not source-shadowed, explicit VBA.CVErr remains runtime-bound, and Null literals infer the dedicated Null value type.",
+      "diagnosticKind": "deterministic-runtime-error"
+    },
+    {
+      "code": "array-assignment-to-scalar",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle plus VBA array/scalar assignment binding",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "assign_array_to_scalar_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage uses shared source resolver-backed shape lookup before falling back to procedure declaration-shape environments, so visible exported standard-module arrays participate while local shadows and ambiguous exported globals stay quiet. It reports simple RHS names declared as dynamic or fixed arrays when assigned to known intrinsic scalar targets. Variant targets, array targets, indexed element reads, unresolved names, object targets, and inactive branches stay silent.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "array-bound-requires-array",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle plus VBA LBound/UBound array argument semantics",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "lbound_scalar_argument_compile",
+        "ubound_scalar_argument_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage scans LBound and UBound calls and reports simple first-argument names declared as known intrinsic scalars, using shared source resolver-backed shape lookup before falling back to procedure declaration-shape environments. Visible exported standard-module scalars participate while local shadows and ambiguous exported globals stay quiet. Dynamic and fixed arrays, Variant, unresolved names, member-expression arguments, non-VBA-qualified member calls, and inactive branches stay silent until broader argument binding is proven.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "missing-return-assignment",
+      "status": "spec-derived",
+      "sourceOfTruth": "VBA Function/Property Get return-variable semantics plus XLIDE type-safety policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "VBA permits a Function or Property Get to fall through without assigning its return variable, which returns the default value for the declared type. XLIDE surfaces this as a warning, not a compile-equivalent error.",
+      "diagnosticKind": "runtime-risk"
+    },
+    {
+      "code": "assignment-object-type-mismatch",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.4.3 Set statement plus Excel/VBE compile oracle controls plus deterministic XLIDE object assignment compatibility model",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "excel_collection_default_item_assignment_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Only known object variable, Function/Property Get return-name, and member targets with deterministic RHS types are flagged. RHS inference includes bare local/module/unique-exported value declarations resolved through the shared expression resolver, module-qualified source-backed value reads such as ModuleName.ValueName, zero-argument Function/Property Get value references, proven source-backed/host member return expressions, verified VBA runtime/generated host constants, and verified host globals such as Application, ActiveSheet, and ActiveCell when no source binding shadows the external name. Host collection property calls with arguments, such as Worksheet.ListObjects(\"Tests\"), use the collection default Item return type only when metadata proves the returned collection exposes Item and the property itself has no parameter signature. Same project class, Nothing, generic Object, Variant/unknown types, local shadows, ambiguous exported globals, unknown module qualifiers, and explicit Implements compatibility remain accepted.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "readonly-member-assignment",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle plus deterministic source-backed project class member model",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "class_readonly_property_assignment_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "This is a VBE compile-equivalent error when the receiver resolves to a workbook class and source proves the member has no setter. Public constants are not object members in VBE; public constant declarations in object modules fail at the declaration. Leading-dot assignments inside simple or nested With receiver stacks use the same source-backed member resolver.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "member-not-found",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle plus deterministic source-backed project class member model",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "class_unknown_property_assignment_compile",
+        "class_unknown_method_call_compile",
+        "class_known_property_assignment_compile",
+        "class_public_field_assignment_compile",
+        "workbook_event_member_call_compile",
+        "late_bound_object_unknown_member_compile",
+        "late_bound_variant_unknown_member_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "This is a VBE compile-equivalent error for workbook class receivers whose source-backed member surface is known and unambiguous. Public fields are valid members. Deterministic parenthesized receivers and leading-dot receivers inside simple or nested With stacks use the same resolver as ordinary member chains. Source declarations resolve before runtime objects, host globals, workbook code names, or standard-module qualifier fallbacks, so typed or untyped local declarations named like Excel globals use the source binding. Host/object-model and ambiguous receiver cases remain silent unless the receiver surface is exhaustive. Host events are not callable object members, so event names are excluded from object-member surfaces and can be reported absent when the receiver surface is exhaustive. Object and Variant receivers remain silent even when completion can refine them from simple Set assignments because VBE leaves those calls late-bound.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "object-variable-not-set",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE runtime oracle plus deterministic XLIDE straight-line local object initialization model",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "object_variable_not_set_runtime"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Active coverage is intentionally narrow: local non-Static object-valued variables start as Nothing, straight-line Set assignments mark them initialized, Set ... = Nothing resets them, and nested block assignments or helper-call arguments make the local state unknown rather than guessed. Parameters, module-level object variables, Static locals, Variant values, unresolved object types, and inactive conditional-compilation branches stay quiet. The legacy invalid_semantics_089 object-not-set case is covered by the focused runtime oracle fixture. This is separate from member-not-found: late-bound Object receivers still suppress member-surface absence diagnostics, but a definitely uninitialized local Object receiver can still produce runtime error 91.",
+      "diagnosticKind": "deterministic-runtime-error"
+    },
+    {
+      "code": "string-arithmetic-coercion",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE runtime oracle plus deterministic XLIDE numeric-expression compatibility model",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "numeric_plus_nonnumeric_string_assignment",
+        "numeric_plus_nonnumeric_string_assignment_runtime",
+        "numeric_plus_nonnumeric_string_left_runtime",
+        "numeric_plus_nonnumeric_string_parenthesized_runtime",
+        "numeric_multiply_nonnumeric_string_runtime",
+        "numeric_plus_numeric_string_runtime",
+        "string_concat_nonnumeric_string_runtime",
+        "string_plus_string_literals_runtime"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "This is an error but not VBE compile-equivalent: the focused compile oracle case compiles successfully, while runtime oracle probes for nonnumeric string arithmetic deterministically raise runtime error 13. Operand-order, grouping, and multiplication variants reject; numeric-string, &-concatenation, and string-plus-string + controls run successfully.",
+      "diagnosticKind": "deterministic-runtime-error"
+    },
+    {
+      "code": "division-by-zero",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE runtime oracle plus deterministic XLIDE integer-divisor expression scan",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "division_by_zero_literal_runtime",
+        "integer_division_by_zero_literal_runtime",
+        "mod_by_zero_literal_runtime",
+        "division_by_nonzero_literal_runtime",
+        "hex_division_by_zero_literal_runtime",
+        "octal_integer_division_by_zero_literal_runtime",
+        "mod_by_hex_nonzero_literal_runtime",
+        "division_by_module_const_zero_runtime",
+        "division_by_local_const_zero_runtime",
+        "division_by_const_expression_zero_runtime",
+        "division_by_const_expression_nonzero_runtime",
+        "division_by_hex_const_zero_runtime",
+        "integer_division_by_octal_const_zero_runtime",
+        "mod_by_hex_const_nonzero_runtime",
+        "division_by_hex_const_expression_zero_runtime",
+        "division_by_enum_zero_runtime",
+        "integer_division_by_implicit_enum_zero_runtime",
+        "mod_by_enum_nonzero_runtime",
+        "division_by_enum_expression_zero_runtime",
+        "division_by_cross_module_const_zero_runtime",
+        "division_by_cross_module_const_nonzero_runtime",
+        "division_by_cross_module_enum_zero_runtime",
+        "division_by_cross_module_enum_nonzero_runtime",
+        "division_by_module_qualified_const_zero_runtime",
+        "division_by_module_qualified_const_nonzero_runtime",
+        "division_by_module_qualified_enum_zero_runtime",
+        "division_by_module_qualified_enum_nonzero_runtime",
+        "division_by_cross_module_const_private_helper_zero_runtime",
+        "division_by_cross_module_const_private_helper_nonzero_runtime"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "This is an error but not VBE compile-equivalent: focused runtime oracle cases show /, integer division, and Mod by decimal, hexadecimal, octal, module-Const, local-Const, reducible integer Const-expression, current-module Enum member, bare/module-qualified visible exported standard-module Const/Enum, verified numeric VBA runtime constants, generated Excel/Office host enum constants, and exported Const-through-private-helper zero divisors compile successfully and deterministically raise runtime error 11, while nonzero literal, Const-expression, and Enum member controls run. Const/Enum folding includes decimal/hex/octal integer literals and implicit Enum successor values where the expression remains deterministic. Bare source names are folded only when the shared expression resolver proves a non-ambiguous Const or Enum-member binding, so local/module variable shadows suppress exported and external constant values. The active rule scans settled procedure statements, including nested expressions, and remains conservative for variables, unresolved constants, direct private helper references, ambiguous source bindings, nonnumeric external constants, and broader expression folding until flow/reachability handling is broader.",
+      "diagnosticKind": "deterministic-runtime-error"
+    },
+    {
+      "code": "runtime-argument-value",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE runtime oracle plus deterministic XLIDE runtime-call value-bound scan",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "left_string_suffix_negative_length_runtime",
+        "left_negative_length_runtime",
+        "left_string_suffix_zero_length_runtime",
+        "string_suffix_negative_repeat_runtime",
+        "string_negative_repeat_runtime",
+        "string_suffix_zero_repeat_runtime",
+        "right_string_suffix_negative_length_runtime",
+        "right_negative_length_runtime",
+        "right_string_suffix_zero_length_runtime",
+        "space_string_suffix_negative_count_runtime",
+        "space_negative_count_runtime",
+        "space_string_suffix_zero_count_runtime",
+        "mid_string_suffix_zero_start_runtime",
+        "mid_negative_start_runtime",
+        "mid_string_suffix_negative_length_runtime",
+        "mid_string_suffix_zero_length_runtime",
+        "replace_zero_start_runtime",
+        "replace_negative_start_runtime",
+        "replace_one_start_runtime",
+        "replace_negative_two_count_runtime",
+        "replace_negative_one_count_runtime",
+        "replace_zero_count_runtime",
+        "instr_zero_start_runtime",
+        "instr_negative_start_runtime",
+        "instr_one_start_runtime",
+        "chr_negative_charcode_runtime",
+        "chr_zero_charcode_runtime",
+        "chr_255_charcode_runtime",
+        "chr_256_charcode_runtime",
+        "chrw_negative_one_charcode_runtime",
+        "chrw_65535_charcode_runtime",
+        "chrw_65536_charcode_runtime",
+        "runtime_arg_const_negative_left_length_runtime",
+        "runtime_arg_const_zero_left_length_runtime",
+        "runtime_arg_expression_negative_left_length_runtime",
+        "runtime_arg_expression_zero_right_length_runtime",
+        "runtime_arg_local_const_replace_zero_start_runtime",
+        "runtime_arg_local_const_replace_negative_two_count_runtime",
+        "runtime_arg_local_const_replace_negative_one_count_runtime",
+        "runtime_arg_enum_zero_mid_start_runtime",
+        "runtime_arg_cross_module_const_negative_left_length_runtime",
+        "runtime_arg_cross_module_const_zero_left_length_runtime",
+        "runtime_arg_cross_module_enum_zero_mid_start_runtime",
+        "runtime_arg_module_qualified_const_negative_left_length_runtime",
+        "runtime_arg_module_qualified_const_zero_left_length_runtime",
+        "runtime_arg_module_qualified_enum_zero_mid_start_runtime",
+        "runtime_arg_module_qualified_enum_one_mid_start_runtime",
+        "runtime_arg_cross_module_const_private_helper_negative_left_length_runtime",
+        "runtime_arg_cross_module_const_private_helper_zero_left_length_runtime"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "This is an error but not VBE compile-equivalent: focused runtime oracle cases show out-of-bound integer values for Left/Left$, Right/Right$, String/String$, Space/Space$, Mid/Mid$, Replace, three-or-more-argument InStr, Chr, and ChrW compile successfully and deterministically raise runtime error 5, while proven in-bound controls run. The active rule is deliberately narrow: it scans settled procedure statements for integer literals, reducible integer expressions, same-module/procedure Const values, current-module Enum members, bare/module-qualified visible exported standard-module Const/Enum members, verified numeric VBA runtime constants, generated Excel/Office host enum constants, and exported Const-through-private-helper values outside proven runtime bounds; bare source names are folded only when the shared expression resolver proves a non-ambiguous Const or Enum-member binding, so local/module variable shadows suppress exported and external constant values; maps named argument slots where the intrinsic syntax supports them; respects bare-call shadowing by source symbols and local declarations; treats ambiguous or direct private helper references as unknown; and still allows explicit VBA-qualified calls to bind to intrinsic runtime functions.",
+      "diagnosticKind": "deterministic-runtime-error"
+    },
+    {
+      "code": "runtime-conversion-value",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE runtime oracle plus deterministic XLIDE runtime conversion-value scan",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "cdate_invalid_plain_text_runtime",
+        "cdate_numeric_date_string_runtime"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "This is an error but not VBE compile-equivalent: focused runtime oracle cases show CDate(\"not a date\") compiles successfully and raises runtime error 13, while CDate(\"1/2/2020\") runs under the oracle environment. Active coverage is intentionally narrow: it reports bare or VBA-qualified CDate calls only when the first argument is an empty string literal or plain ASCII word text with no digits and no recognized English month token. Date-looking strings, non-ASCII/localized-looking text, variables, expressions, non-CDate conversion functions, source-shadowed bare CDate names, and inactive conditional-compilation branches stay quiet.",
+      "diagnosticKind": "deterministic-runtime-error"
+    },
+    {
+      "code": "unknown-call",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.4.2.1 plus project symbol graph",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "non-callable-call",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.4.2.1 plus asserted Excel/VBE oracle case for bare variable statement",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "bare_variable_statement",
+        "local_string_with_argument_statement"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "The argument-bearing local-variable call shape is observed-only until promoted; the active rule remains justified by call-statement target resolution.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "dim-initializer",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.2.3.1",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "fixed-array-redim",
+      "status": "spec-derived",
+      "sourceOfTruth": "VBA ReDim statement semantics: fixed-size arrays cannot be resized",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage uses parser-backed arrayBounds metadata carried on variable symbols to distinguish `Dim a()` dynamic arrays from fixed-bound declarations such as `Dim a(1 To 3)`. ReDim targets ask the shared assignment-target resolver first, so visible exported standard-module fixed arrays participate while local dynamic shadows and ambiguous exported globals stay quiet. Dynamic arrays, undeclared ReDim targets, local dynamic shadows, and inactive conditional branches stay silent.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "scalar-redim",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle plus VBA ReDim statement semantics: scalar variables cannot be resized",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "redim_scalar_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage resolves ReDim targets through the shared assignment-target resolver before falling back to local/module maps. It reports non-Variant scalar declarations such as `Dim Value As Long`, including visible exported standard-module scalars, while dynamic arrays, scalar Variant and implicit Variant targets, undeclared ReDim targets, local dynamic shadows of module/project scalars, ambiguous exported globals, and inactive conditional branches stay silent.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "redim-preserve-dimension-change",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE runtime oracle plus VBA ReDim Preserve runtime semantics: only the last dimension may be resized",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "redim_preserve_nonfinal_dimension_runtime",
+        "redim_preserve_final_dimension_lower_bound_runtime",
+        "redim_preserve_last_dimension_runtime"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Active coverage tracks prior ReDim shapes through straight-line active statements in the same body. It reports ReDim Preserve when the known dimension count changes, when comparable literal-style non-final bounds change, or when a comparable final-dimension lower bound changes. Focused runtime oracle fixtures prove a non-final dimension resize and a final-dimension lower-bound change raise runtime errors while resizing only the last dimension's upper bound runs successfully. Shapes learned inside nested blocks are available inside that nested body but do not leak outward, and variable/constant bound comparison remains deferred.",
+      "diagnosticKind": "deterministic-runtime-error"
+    },
+    {
+      "code": "redim-impossible-bounds",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE runtime oracle plus VBA ReDim lower/upper bound semantics",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "redim_impossible_bounds_runtime",
+        "redim_equal_bounds_runtime"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Active coverage reports ReDim and ReDim Preserve dimensions whose explicit literal-style lower and upper bounds are both known and the lower bound is greater than the upper bound. It points at the impossible dimension span and maps the deterministic runtime case to runtime error 9. Equal, increasing, variable/Const-backed, upper-only, and inactive-branch bounds remain quiet; known scalar or fixed-array ReDim targets keep their compile-error diagnostics instead of also receiving this runtime diagnostic.",
+      "diagnosticKind": "deterministic-runtime-error"
+    },
+    {
+      "code": "array-declaration-impossible-bounds",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.2.3.1 array declaration bounds; a static array declaration's bounds are constant expressions evaluated at compile time, so a lower bound greater than its upper bound is a compile error (sibling of the runtime-phase redim-impossible-bounds)",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Reports a Dim/Static/Private/Public array declaration dimension whose explicit literal lower and upper bounds are both known and the lower bound is greater than the upper bound (e.g. Dim a(10 To 1)). Only literal lower To upper dimensions are reported; equal, increasing, upper-only, variable, Const-reference, and inactive-branch bounds stay quiet (no false positive). ReDim is covered separately by redim-impossible-bounds (a runtime check, since ReDim bounds may be dynamic). Classified compile-error because static declaration bounds are compile-time constants; oracle confirmation of the exact phase is pending but the lower>upper impossibility is deterministic.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "unallocated-dynamic-array-access",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE runtime oracle plus VBA dynamic array allocation semantics",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "unallocated_dynamic_array_index_runtime",
+        "unallocated_dynamic_array_lbound_runtime"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Active coverage is intentionally straight-line: local non-Static dynamic arrays start unallocated, active ReDim statements allocate them, Erase resets them, and simple indexed access or intrinsic LBound/UBound calls while unallocated report runtime error 9. Module-level arrays, parameters, Static locals, fixed-size arrays, helper-call arguments, assignment-touched arrays, nested runtime-block touches, unresolved names, non-intrinsic member calls, dot or bang ('!') member access (d!b(N) = d.Item(\"b\"), not the local array b), and inactive conditional-compilation branches stay quiet. The legacy invalid_semantics_090 uninitialized dynamic array index case and invalid_semantics_091 LBound uninitialized array case are covered by focused runtime oracle fixtures.",
+      "diagnosticKind": "deterministic-runtime-error"
+    },
+    {
+      "code": "array-subscript-out-of-bounds",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE runtime oracle (runtime006_* probes: a literal subscript outside a fixed array's declared bounds raises Run-time error 9) plus VBA fixed-array bound semantics",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "runtime006_upper_over_rejected",
+        "runtime006_explicit_lower_under_rejected",
+        "runtime006_default_upper_over_rejected",
+        "runtime006_negative_rejected",
+        "runtime006_upper_max_accepted",
+        "runtime006_default_base_low_accepted"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "RUNTIME_006: a constant subscript proven outside a LOCAL single-dimension fixed-size array's declared bounds raises runtime error 9 (compiles, then faults at runtime). No-FP scope: only local fixed arrays (Dim/Static) with a literal upper bound and a literal/folded-signed-integer subscript are checked. Fires on subscript > upper bound, subscript < an EXPLICIT literal lower bound, or a negative subscript. Stays quiet for: dynamic / ReDim'd arrays (owned by unallocated-dynamic-array-access), variable or Const subscripts, multi-dimension arrays, ByRef array parameters, module-level arrays, and the Option-Base-dependent low region of single-bound `Dim a(n)` declarations (oracle runtime006_default_base_low_accepted proves a(0) on `Dim a(5)` is valid under default Option Base 0, so low subscripts are flagged only when negative or below an explicit literal lower bound). Option Base is unmodeled, which is why only the upper bound and explicit literal lower bounds drive flags. Bounds parsing reuses comparableArrayBoundKey; access detection mirrors checkUnallocatedDynamicArrayAccess. Member access via '.' or the bang '!' operator (d!b(N) = d.Item(\"b\")) is excluded so a dictionary/member key that matches a local array name is not mis-bound (adversarial FP-hunt finding). Like every sibling deterministic-runtime-error rule, On Error Resume Next / handlers are not modeled — the subscript still raises error 9, it is merely suppressed at runtime, so the (downgradeable) diagnostic is consistent with the roadmap's deferred On Error policy.",
+      "diagnosticKind": "deterministic-runtime-error"
+    },
+    {
+      "code": "mid-statement-literal-target",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle (mid_stmt_*_probe: a Mid/Mid$ replacement statement whose target is a string literal is a compile error in both the $-suffixed and bare forms; the String-variable-target control compiles and runs) plus MS-VBAL 5.4.3.4 Mid/MidB statement semantics",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "mid_stmt_literal_target_probe",
+        "mid_stmt_no_suffix_literal_target_probe",
+        "midb_stmt_literal_target_probe",
+        "mid_stmt_variable_target_probe"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "The left-hand target of a Mid/Mid$/MidB/MidB$ replacement statement must be a writable String variable; a string-literal target (Mid$(\"abc\", 2, 3) = \"XY\") is a VBE compile error (oracle mid_stmt_literal_target_probe, mid_stmt_no_suffix_literal_target_probe, and midb_stmt_literal_target_probe all reject at compile; mid_stmt_variable_target_probe with a String variable target is accepted and runs). No-FP scope: fires only when a statement's first executable token is mid/midb (optionally followed by the $ type-character), immediately followed by '(', whose matching ')' is followed by a top-level '=', and whose first argument slot is exactly one string-literal token. The parser already routes this shape to the dedicated Mid-statement form (parseModule.isMidStatementTarget leaves it raw rather than an assignment), so the token check mirrors that disambiguation. Conservative shadowing guard: if the module names mid/midb in ANY declaration form — a symbol-table entry (Dim/Static/Const/parameter/Function/Property, via symbols.all) or an implicit ReDim array declaration (which the symbol builder does not model) — the rule stays silent for the whole module. Adversarial FP-hunt + oracle finding: there is NO shadow form that makes a literal-target Mid valid — mid_shadow_dim_array_probe (explicit Dim array), mid_shadow_redim_implicit_probe (ReDim-only array), and mid_shadow_property_let_probe (user Property Let Mid) are ALL compile errors. So the guard cannot prevent a real false positive; it is belt-and-suspenders that keeps the rule from touching any module that even mentions a user Mid without a binder. Compile-error diagnosticKind: VBE rejects at compile, so this is a hard (non-downgradeable) diagnostic.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "invalid-erase-target",
+      "status": "spec-derived",
+      "sourceOfTruth": "VBA Erase statement target-list syntax",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage is syntax-shaped and rejects target-list entries that are plainly expressions, including literals and operator expressions. Variable-like unresolved names stay silent because proving that a target is actually an array belongs to a later binder-backed slice.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "erase-requires-array",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle plus VBA Erase target semantics",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "erase_object_scalar_compile",
+        "erase_long_scalar_compile",
+        "erase_variant_scalar_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage uses shared assignment-target resolver-backed shape lookup before falling back to procedure declaration-shape environments. It reports simple bare Erase targets declared as known non-Variant scalar/object values, including visible exported standard-module globals. Arrays, scalar Variant, implicit Variant, local shadows, ambiguous exported globals, unresolved names, non-simple member/index targets, and inactive branches stay silent. Oracle controls prove scalar Variant compiles while Object and Long scalar targets reject as Expected array.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "type-declaration-character-as-clause",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle plus MS-VBAL declaration syntax for legacy type-declaration characters and As clauses",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "dim_type_suffix_as_clause_compile",
+        "const_type_suffix_as_clause_compile",
+        "parameter_type_suffix_as_clause_compile",
+        "type_field_type_suffix_as_clause_compile",
+        "function_type_suffix_as_clause_compile",
+        "property_get_type_suffix_as_clause_compile",
+        "dim_type_suffix_only_compile",
+        "function_type_suffix_only_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Parser-backed coverage normalizes suffix-only declaration names to their base identifier and infers the legacy suffix type for variables, constants, parameters, UDT fields, Functions, Property Gets, and Declare Functions. The diagnostic fires for VBE-rejected suffix-plus-As forms: variable declarations, Const declarations, parameters, UDT fields, and Functions. Focused oracle controls show Property Gets with suffix-plus-As compile, and suffix-only variable and Function declarations compile.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "unexpected-declaration-token",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.2.3.1 plus asserted Excel/VBE oracle case for a trailing identifier after an As type name",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "dim_as_type_trailing_identifier_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "The active rule only fires after XLIDE parses a complete declaration type name and then sees an additional same-statement token outside valid declaration separators/defaults. Recognized fixed-length string suffixes (`As String * n` or `As String * constantName`) are consumed by the shared suffix parser before trailing-token detection; size bounds are owned by `fixed-length-string-size`, while compound length expressions and runtime assignment/truncation behavior remain separate verification work.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "fixed-length-string-size",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle for fixed-length String literal and Const-name size bounds, matching the MS-VBAL 1 to 65,526 range",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "fixed_length_string_length_one_compile",
+        "fixed_length_string_length_max_compile",
+        "fixed_length_string_length_zero_compile",
+        "fixed_length_string_length_above_max_compile",
+        "fixed_length_string_const_length_compile",
+        "fixed_length_string_const_length_above_max_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "The active rule evaluates decimal integer literal suffixes and same-module/procedure Const aliases whose value is also a decimal integer literal. Unknown constants, duplicate constants, string constants, and compound constant expressions remain deferred until broader constant-expression semantics are verified.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "object-module-public-member",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle for public object-module declaration restrictions",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "class_public_constant_declaration_compile",
+        "class_public_array_declaration_compile",
+        "class_public_fixed_string_declaration_compile",
+        "class_public_type_declaration_compile",
+        "class_public_declare_declaration_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "The active rule is module-kind-sensitive and only fires for explicit Public constants, arrays, fixed-length strings, user-defined Types, and Declare statements in object modules. Standard modules and non-public declarations remain outside this rule.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "event-declaration-module-kind",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.2.5 Event declarations are object-module declarations, paired with XLIDE module-kind metadata",
+      "corpusInfluence": "pending-corpus-reviewed",
+      "assertedOracleCases": [
+        "corpus_event_004_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "26_class_and_userform_deep_edges.md",
+        "excel_vba_analysis_additional_edge_cases.md",
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "The active rule is deliberately narrow: it flags parsed Event declarations only when the current module kind is standard, accepts class/document/UserForm modules, and respects conditional-compilation activity. WithEvents source binding, event-handler authoring, and broader event declaration semantics remain separate verification work.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "withevents-declaration",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.2.3 WithEvents object variable declarations plus XLIDE parser/module-kind metadata",
+      "corpusInfluence": "pending-corpus-reviewed",
+      "assertedOracleCases": [
+        "corpus_withevents_003_compile",
+        "corpus_withevents_004_compile",
+        "corpus_cls_010_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "26_class_and_userform_deep_edges.md",
+        "27_semantic_runtime_resolution_edges.md",
+        "excel_vba_realtime_analysis_test_corpus.md",
+        "excel_vba_analysis_additional_edge_cases.md"
+      ],
+      "notes": "The active rule is deliberately narrow: it flags WithEvents declarations only when parsed declaration facts prove a standard-module declaration, a procedure-local declaration, an As New declarator, or an array declarator. Module-level object-module WithEvents declarations stay quiet, and event-source type compatibility such as generic Object remains deferred until reference/object metadata can prove it.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "friend-declaration",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL Friend procedure visibility plus XLIDE parser/module-kind metadata",
+      "corpusInfluence": "pending-corpus-reviewed",
+      "assertedOracleCases": [
+        "corpus_friend_003_compile",
+        "corpus_friend_004_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "26_class_and_userform_deep_edges.md",
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "The active rule is deliberately narrow: it flags Friend only when parsed declaration facts prove a standard-module procedure or a module variable declaration. Object-module Friend procedures stay quiet, inactive conditional branches are skipped, and cross-module Friend visibility/binding semantics remain deferred to the project binder.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "implements-statement-placement",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "VBA Implements statement module-level object-module placement plus XLIDE parser/module-kind metadata",
+      "corpusInfluence": "pending-corpus-reviewed",
+      "assertedOracleCases": [
+        "corpus_implements_002_compile",
+        "corpus_implements_003_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "26_class_and_userform_deep_edges.md",
+        "excel_vba_analysis_additional_edge_cases.md",
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "The active rule is deliberately narrow: it flags Implements statements only when statement tokens prove a standard-module declaration, a procedure-body statement, or an object-module statement after a procedure. Object-module declaration-section Implements statements stay quiet, inactive conditional branches are skipped, and interface member completeness remains deferred to the project binder.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "raiseevent-undeclared-event",
+      "status": "spec-derived",
+      "sourceOfTruth": "VBA RaiseEvent statement target resolution against active same-module Event declarations",
+      "corpusInfluence": "pending-corpus-reviewed",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "26_class_and_userform_deep_edges.md",
+        "excel_vba_realtime_analysis_test_corpus.md",
+        "excel_vba_analysis_additional_edge_cases.md"
+      ],
+      "notes": "The active rule is deliberately narrow: it token-scans procedure body lines for settled RaiseEvent statements and flags only when the target name is not an active Event declaration in the same module. Declared same-module events stay quiet, inactive conditional branches are skipped, partial RaiseEvent statements stay quiet, and event argument/signature validation remains deferred.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "event-handler-module-scope",
+      "status": "spec-derived",
+      "sourceOfTruth": "Excel document-module event binding model plus XLIDE guidance policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Information-only guidance for known workbook/worksheet event-handler-shaped Sub declarations outside the matching document module. The procedure may still compile as an ordinary procedure, so this is not a compile-equivalent red diagnostic.",
+      "diagnosticKind": "style-policy"
+    },
+    {
+      "code": "invalid-as-type-name",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle plus MS-VBAL reserved-name/type-identifier distinction",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "runtime_function_as_type_name_int"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Broad unknown type-name diagnostics are deferred to the project-wide binder and external-reference story. The active rule uses the shared type-position scanner/resolver and only flags unresolved reserved/runtime names, visible project declarations known not to be types, and ambiguous visible project type names.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "invalid-new-type-name",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL New object creation semantics plus deterministic XLIDE project/primitive/host type resolution",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "The active rule only fires when the type resolver proves the New target is a known non-creatable type, such as a primitive, document module, Enum, or user-defined Type. Excel host object-model types and unknown external/reference-library class names remain deferred until creatability metadata or oracle evidence proves the target. This mirrors the deterministic VBE 'Invalid use of New keyword' compile error; the classification is spec/resolver-derived (no asserted oracle case) because the non-creatable target set is proven by XLIDE's type resolver, not probed.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "set-required",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.4.3 Set statement plus deterministic XLIDE object type binding",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Only known object variables, Function/Property Get return names, visible exported standard-module object globals, and unambiguous source-backed object-valued members are flagged. Bare assignment targets ask the shared assignment-target resolver first, so local shadows win and Variant, unknown, and ambiguous project targets remain silent until the binder can prove the target shape.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "typeof-is-always-false",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.6 TypeOf...Is semantics plus deterministic XLIDE object-type binding and the shared object-assignment compatibility tables (host identity and project Implements)",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Reads the parsed §5.6 TypeOfIsExpr nodes (notably If-branch conditions). Fires only when the operand is a simple identifier whose declared type is a known, concrete object type - a host type, or a project class that no project class Implements - that is mutually assignment-incompatible with a known target object type. Object/Variant/unknown/scalar operands or targets, same-type checks, and interface-typed operands (which could hold a target-compatible subtype) all stay quiet.",
+      "diagnosticKind": "runtime-risk"
+    },
+    {
+      "code": "is-operator-non-object",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.6 (the Is object-identity operator requires object-reference operands) plus the Excel/VBE compile oracle (Object required) and the deterministic §5.6 expression AST + declared-type environment",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "is_scalar_long_var_compile",
+        "is_scalar_string_var_compile",
+        "is_two_scalar_vars_compile",
+        "is_array_var_compile",
+        "is_literal_integer_operands_probe",
+        "is_literal_string_operands_probe",
+        "is_variant_var_ok_compile",
+        "is_object_var_vs_nothing_probe"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "The binary Is operator requires object-reference operands on both sides; a provably non-object operand makes a Is b a VBE compile error ('Object required'). This is the first rule to consume the §5.6 BinaryExpr AST for the Is operator (distinct from TypeOf x Is Y, which is a TypeOfIsExpr and is owned by typeof-is-always-false). No-FP scope: fires only when an operand is PROVABLY scalar - a value literal of scalar kind (integer/float/string/date/boolean), or a simple identifier whose declared type resolves (via the procedure type environment + isKnownScalarType) to a known scalar (numeric / String / Boolean / Date). Stays quiet for Variant (can hold an object - control is_variant_var_ok_compile compiles), Object/class-typed operands (control is_object_var_vs_nothing_probe compiles), Nothing/Null/Empty literals, member access, call results, arrays, New, parenthesized/unary operands, and any undeclared/unresolved identifier. Oracle-verified rejected at compile: is_scalar_long_var_compile, is_scalar_string_var_compile, is_two_scalar_vars_compile, is_literal_integer_operands_probe, is_literal_string_operands_probe. A bare array variable is also non-object (is_array_var_compile rejected). Scalar matching uses the RAW declared type name (only a trailing array () stripped), NOT normalizeType, whose leading-vb strip would collapse a user class named vbLong/vbString to a scalar word and wrongly fire (adversarial FP-hunt finding; VBE compiles `Dim x As vbLong` + `x Is Nothing`). Resolves the long-deferred EXPR_013 (Is on non-objects): the literal subset was deferred as marginal and the variable subset as binder-gated; both now ship together off the §5.6 binder.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "parameter-default-not-constant",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.3.1.5 (an Optional default-value is a constant-expression) plus the VBE 'Constant expression required' compile error",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags an Optional parameter default that is provably non-constant: a function/array call (name(...)), New, or AddressOf. Bare identifiers and member references (Module.CONST, MyEnum.Value) stay quiet because they may be constants. Object-typed parameters are skipped - their defaults are owned by parameter-default-type-mismatch's 'must be Nothing' check - so the two rules never double-report.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "const-value-not-constant",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.2.4 (a Const declaration value is a constant-expression) plus the VBE 'Constant expression required' compile error",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags a Const value that is provably non-constant: a function/array call (name(...)), New, or AddressOf, at module level and procedure-local (incl. nested blocks). Bare and qualified identifiers (OTHER_CONST, Module.CONST, MyEnum.Value) stay quiet because they may reference constants. Literals, string concatenation, and arithmetic/grouping are constant expressions and never flagged. Shares the nonConstantDefaultElement gate with parameter-default-not-constant.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "enum-member-not-constant",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.2.3.4 (an Enum member value is a constant-expression) plus the VBE 'Constant expression required' compile error",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags an Enum member initializer that is provably non-constant: a function/array call (name(...)), New, or AddressOf. Bare and qualified identifiers stay quiet (they may be constants). Implicit members (no '=') are auto-numbered and never checked. Shares the nonConstantDefaultElement gate with parameter-default-not-constant.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "set-requires-object",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle plus deterministic XLIDE scalar variable and assignment-target binding",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "set_scalar_integer_assignment",
+        "set_scalar_string_new_object_assignment_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Only known intrinsic scalar targets, including visible exported standard-module scalar globals, are flagged; unknown host/class object types are deferred to the object binder. Bare Set targets ask the shared assignment-target resolver first, so local shadows win and ambiguous exported globals stay quiet. The target type owns the error even when the right-hand side is an object expression such as New Collection.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "scalar-member-access",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile and runtime oracle plus deterministic XLIDE scalar member-receiver binding",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "string_scalar_member_access_compile",
+        "integer_scalar_trailing_dot_compile",
+        "string_scalar_named_member_compile",
+        "integer_scalar_named_member_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Named member access on declared intrinsic scalar variables is rejected by VBE Compile as Invalid qualifier. Bare trailing-dot scalar statements are rejected by VBE Compile as Syntax error after explicit focus retesting. Only known intrinsic scalar bare receivers are flagged, including visible exported standard-module scalar globals resolved through the shared member-receiver resolver. Local shadows, ambiguous exported globals, qualified/member-chain tokens, Variant, Object, class, UDT, and unknown receiver types stay silent while they may be incomplete member-access completion contexts.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "call-requires-parens",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.4.2.1; confirmed by the Excel/VBE oracle (explicit_call_missing_argument_parentheses: compile rejected: Syntax error)",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "explicit_call_missing_argument_parentheses"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "invalid-explicit-call-target",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle plus verified runtime metadata for explicit Call compatibility",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "explicit_call_doevents_bare_compile",
+        "explicit_call_doevents_parentheses_compile",
+        "standalone_doevents_statement_compile",
+        "doevents_expression_call_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "VBE rejects DoEvents as an explicit Call target both with and without empty parentheses, but accepts bare DoEvents as a statement and DoEvents() in expression context. XLIDE records this as runtime-call metadata so diagnostics, identifier completion, and signature help share one rule. The runtime-only check is skipped when a source/project callable or visible source shadow owns the bare name.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "call-statement-forbids-parens",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.4.2.1 plus asserted Excel/VBE oracle cases for standalone empty-parentheses calls without Call",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "implicit_member_call_parentheses_compile",
+        "implicit_member_call_expression_parentheses_compile",
+        "explicit_call_member_parentheses_compile",
+        "standalone_member_call_with_args_compile",
+        "standalone_zero_arg_method_call_compile",
+        "standalone_range_property_with_arg_compile",
+        "standalone_range_property_empty_compile",
+        "standalone_doevents_empty_parentheses_compile",
+        "doevents_expression_call_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "VBE rejects standalone zero-argument calls such as myFunction(), DoEvents(), ThisWorkbook.CanCheckIn(), Application.Calculate(), and ActiveSheet.Range() when they use empty parentheses without Call, while the same parenthesized call is valid in expression context. Known same-module and exported standard-module procedures are resolved through the project procedure surface; unknown bare Foo() calls stay silent to avoid external-reference false positives. Explicit Call remains valid for ordinary procedures and member calls, but runtime entries can opt out through shared runtime metadata when oracle evidence proves a special form such as DoEvents. Source-shadowed runtime names stay silent on runtime-only empty-parentheses handling. VBE also accepts non-empty standalone member/property forms such as Application.DeleteCustomList(1) and ActiveSheet.Range(\"A1\"), so the active member-call rule is deliberately scoped to the empty-parentheses form.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "expression-call-requires-parens",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.6.9; confirmed by the Excel/VBE oracle (expression_call_without_parentheses_in_assignment: compile rejected: Syntax error)",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "expression_call_without_parentheses_in_assignment"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "The rule binds same-module, unique exported project, module-qualified standard-module, and runtime functions only when the bare expression name is not shadowed by a visible non-callable source declaration.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "invalid-expression-syntax",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.6 expression syntax plus VBE Syntax error behavior for impossible operator sequences and incomplete member access",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "thisworkbook_trailing_dot_compile",
+        "bare_leading_member_access_inside_with_compile",
+        "c_style_ternary_operator_compile",
+        "iif_expression_compile",
+        "corpus_tok_003_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Active coverage is deliberately narrow: consecutive non-unary binary operators such as ***, statements ending with a binary operator, unsupported '?' conditional-operator syntax, and oracle-backed incomplete member access forms such as ThisWorkbook. or a bare . inside an active With block. Generic trailing-dot incomplete member diagnostics ask the shared member-receiver resolver first and stay quiet when scalar-member-access owns a known scalar receiver, including visible exported standard-module scalar globals; local shadows, ambiguous exported globals, object-like receivers, and unknown receivers continue through the syntax fallback. The IIf compile-valid oracle control confirms the supported inline conditional form remains accepted; separate runtime oracle cases prove IIf branch evaluation behavior for future deterministic-runtime diagnostics. Live diagnostics suppress incomplete member-access errors while the cursor remains on the active edit line; current-module and workbook validation still report the settled final source.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "required-param-after-optional",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.3.1.5",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "parameter-array-as-type-syntax",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.3.1.5 parameter declarator shape: array parentheses belong on the parameter name before the As clause",
+      "corpusInfluence": "legacy-corpus-promoted",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage reports the misplaced empty array marker in parameter declarations such as ByVal values As Long(). The generic unexpected-declaration-token recovery rule suppresses itself for the same parameter so users see the clearer parameter-list error instead of a bare parenthesis diagnostic. Valid array parameters such as ByVal values() As Long remain accepted.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "paramarray-not-last",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.3.1.6",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "paramarray-with-optional",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.3.1.5 Optional parameters plus 5.3.1.6 ParamArray parameter-list restrictions",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage uses parsed procedure parameter flags and reports the ParamArray name when the same parameter list contains any Optional parameter. The final-position rule remains owned by paramarray-not-last.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "paramarray-non-variant",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.3.1.6 ParamArray elements are Variant",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage uses parsed procedure parameter flags and reports the ParamArray name when an explicit As type is present and does not normalize to Variant. Omitted As type and explicit As Variant stay accepted.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "property-setter-missing-value",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.3.1.4 Property Let/Set procedures require a final value parameter",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "corpus_prop_005_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage uses parsed procedure kind and parameter lists. Property Let and Property Set declarations with zero parameters report on the property name; Property Get and setters with at least one value parameter remain accepted. Pairwise Get/Let/Set parameter-shape compatibility remains deferred.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "property-set-scalar-value",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.3.1.4 Property Set procedures assign object references plus deterministic XLIDE scalar type model",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage reports only when the final Property Set value parameter has a known intrinsic scalar As type. Object, project/host-looking class names, unknown types, Variant, and omitted As type remain silent in this rule to avoid turning unresolved type knowledge into red squiggles.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "property-let-object-value",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.3.1.4 Property Let procedures assign non-object values; object references use Property Set",
+      "corpusInfluence": "legacy-corpus-promoted",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage reports only when the final Property Let value parameter resolves to a known object-reference type: explicit Object, host object aliases, or visible project class/document/UserForm surfaces. Intrinsic scalar types, Variant, omitted As type, user-defined Type, Enum, unresolved names, and ambiguous names remain silent until deeper type binding can prove them.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "property-setter-return-type",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.3.1.4 Property Let/Set procedures do not declare return types",
+      "corpusInfluence": "legacy-corpus-promoted",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage uses parsed Property Let/Set procedure metadata and reports an explicit return As clause after the parameter list. Property Get return types remain valid, and setter value-parameter shape remains owned by property-setter-missing-value, property-set-scalar-value, and property-let-object-value.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "property-accessor-signature-mismatch",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.3.1.4 paired Property Get/Let/Set procedure signature consistency",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md",
+        "excel_vba_analysis_additional_edge_cases.md"
+      ],
+      "notes": "Active coverage groups active same-module Property Get/Let/Set procedures by name, requires exactly one active getter before pairing, and reports setters whose leading index parameters differ from the getter by count, array shape, effective ByVal/ByRef mode, or known scalar/Variant type. The setter's final value parameter is intentionally excluded from index-argument comparison. Return/value type consistency and object type alias comparison remain deferred to avoid false positives before deeper binder support.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "parameter-default-type-mismatch",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle plus deterministic XLIDE parameter default literal model",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "optional_long_numeric_default_compile",
+        "optional_long_numeric_string_default_compile",
+        "optional_long_nonnumeric_string_default_compile",
+        "optional_string_string_default_compile",
+        "optional_boolean_true_default_compile",
+        "optional_boolean_nonnumeric_string_default_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "The active rule is intentionally narrow: scalar coverage fires only when an Optional parameter default is a deterministic string literal that VBE rejects for the declared scalar type, array coverage fires when an Optional array parameter has a deterministic scalar default such as values() As Long = 0, and object coverage fires when the declared type resolves to Object, a host object, or a visible project object and the deterministic default is not Nothing. Oracle controls prove numeric and numeric-string Long defaults, String defaults, True Boolean defaults, and Nothing object defaults remain accepted; broader default-expression diagnostics remain pending.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "exit-wrong-proc",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.4.1.3",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "undefined-label",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.4.1 plus Excel/VBE compile oracle",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "procedure_goto_missing_label_compile",
+        "procedure_goto_existing_label_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Active coverage is procedure-local and deliberately scoped to simple named and decimal numeric targets for GoTo, GoSub, Resume, On Error GoTo, On n GoTo, and On n GoSub. On Error Resume Next, On Error GoTo 0, and On Error GoTo -1 are explicit non-label forms.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "duplicate-label",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.4.1 procedure label scope and uniqueness",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage uses the shared procedure-label collector and reports the second and later active declaration for the same named label or normalized decimal line label in one procedure. Labels in separate procedures and inactive conditional-compilation branches remain accepted.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "option-after-declaration",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.2.1",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "if-missing-then",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.4.2.1; confirmed by the Excel/VBE oracle (if_statement_missing_then: compile rejected: Syntax error)",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "if_statement_missing_then"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error",
+      "notes": "Suppression boundary: an If-headed statement is flagged for a missing Then only in a provably-active region; an If whose Then sits on a continued (`_`) line, a single-line `If ... Then stmt`, and any If inside a proven-inactive conditional-compilation branch are not flagged (activity gate)."
+    },
+    {
+      "code": "case-outside-select",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.4.2.4; confirmed by the Excel/VBE oracle (case_statement_outside_select: compile rejected: Case without Select Case)",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "case_statement_outside_select"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error",
+      "notes": "Suppression boundary: Case is flagged only when the selectDepth counter proves no enclosing Select Case block is open; a Case inside an open Select Case at any nesting depth, and Case statements inside proven-inactive conditional-compilation branches, stay quiet."
+    },
+    {
+      "code": "member-access-outside-with",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.4.2.6 plus VBE compile oracle",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "leading_member_access_outside_with"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error",
+      "notes": "Suppression boundary: a leading-dot member access is flagged only when the withDepth counter proves no enclosing With block is open; leading-dot access inside an open With (including nested With receiver stacks) and inside proven-inactive conditional-compilation branches stays quiet."
+    },
+    {
+      "code": "exit-outside-block",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.4.1.3; confirmed by the Excel/VBE oracle (exit_do_outside_loop: compile rejected: Exit Do not within Do...Loop)",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "exit_do_outside_loop"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error",
+      "notes": "Suppression boundary: Exit For / Exit Do is flagged only when the forDepth / doDepth counter proves no enclosing loop of that kind is open; an exit inside its matching loop and any exit inside a proven-inactive conditional-compilation branch stay quiet."
+    },
+    {
+      "code": "else-branch-order",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 3.4 and 5.4.2.1 branch ordering plus VBE compile oracle",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "conditional_elseif_after_else_compile",
+        "conditional_duplicate_else_compile",
+        "conditional_elseif_before_else_compile",
+        "if_elseif_after_else_compile",
+        "if_duplicate_else_compile",
+        "if_elseif_before_else_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_additional_edge_cases.md"
+      ],
+      "notes": "Active coverage reports peer #ElseIf/ElseIf branches and duplicate #Else/Else branches after the same conditional block has already reached its final else branch. Conditional-compilation directives are checked structurally regardless of branch activity; normal If blocks respect inactive conditional-compilation regions. Nested conditional blocks keep independent branch-order state.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "next-variable-mismatch",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.4.2.5 For / For Each ... Next control-variable matching",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage uses parser-backed ForBlock metadata for simple opener and closer control variables. The rule reports a supplied simple Next variable that differs from the active For/For Each control variable. Omitted Next variables, matching names, nested loops, inactive closer branches, and complex/recovered variable shapes remain silent.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "for-each-control-variable-type",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.4.2.5 For Each control-variable semantics plus VBE compile oracle",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "for_each_long_control_variable_compile",
+        "for_each_array_control_variable_compile",
+        "for_each_udt_control_variable_compile",
+        "for_each_variant_control_variable_compile",
+        "for_each_object_control_variable_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "27_semantic_runtime_resolution_edges.md",
+        "excel_vba_analysis_additional_edge_cases.md"
+      ],
+      "notes": "Active coverage uses parser-backed ForBlock metadata and shared assignment-target resolver-backed shape lookup before falling back to procedure declaration-shape environments. The rule reports For Each control variables declared as known intrinsic scalars, arrays, and project UDT/Enum types when project type metadata is available, including visible exported standard-module bindings. Variant, Object, host/project object-looking types, implicit Variant, local shadows, ambiguous exported globals, and inactive branches stay silent.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "for-each-source-type",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.4.2.5 For Each source-expression semantics plus VBE compile oracle",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "for_each_scalar_source_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [
+        "excel_vba_analysis_final_hardening_cases.md"
+      ],
+      "notes": "Active coverage uses parser-backed ForBlock source-expression metadata and shared expression resolver-backed shape lookup before falling back to procedure declaration-shape environments. The rule reports simple source names declared as known intrinsic scalars, including visible exported standard-module bindings. Arrays, Variant, Object, object-looking or unresolved sources, local shadows, ambiguous exported globals, member chains, and inactive branches stay silent until deeper enumerable inference is proven.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "empty-type",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (empty_type_block_compile: compile rejected, 'User-defined type without members not allowed') plus MS-VBAL 5.2.3.3",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "empty_type_block_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags a user-defined Type with no active members. A Type whose only fields are in an inactive #If branch is also empty; unknown branches keep it quiet. Sibling to duplicate-type-field. Oracle asymmetry: an empty Enum is accepted but an empty Type is rejected.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "duplicate-option",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (duplicate_option_explicit_compile: compile rejected, 'Duplicate Option statement') plus MS-VBAL 5.2.1",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "duplicate_option_explicit_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags a repeated module Option of the same category (Explicit/Compare/Base/Private), so two Option Compare collide even with different arguments. Option Explicit is oracle-verified; other categories follow from MS-VBAL 5.2.1 (one Option per module).",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "duplicate-case-else",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (duplicate_case_else_compile: compile rejected, 'Case without Select Case') plus MS-VBAL 5.4.2.10",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "duplicate_case_else_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags a second Case Else within one Select Case block (VBE reports the later one as Case without Select Case). Counts only the block direct Case Else clauses; nested Selects are independent and inactive-branch clauses are skipped.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "me-outside-object-module",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (corpus_me_004_compile: compile rejected, 'Invalid use of Me keyword') plus MS-VBAL 5.6.2.2",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "corpus_me_004_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags any use of the Me keyword in a standard module (Me is only valid in class/document/UserForm modules). A Me that follows a dot is a member name and is left alone. Scans procedure statements; module-kind gated so object modules stay quiet.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "too-many-parameters",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (corpus_arg_limit_001b_compile: 61 parameters compile rejected, 'Too many arguments') plus the documented VBA maximum of 60 parameters",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "corpus_arg_limit_001b_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags a procedure declaring more than 60 parameters (the documented VBA maximum; VBE rejects the 61st with Too many arguments). Pure parameter count, no binder needed.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "else-without-if",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (corpus_ctrl_if_004_compile: compile rejected, 'Else without If') plus MS-VBAL 5.4.2.1",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "corpus_ctrl_if_004_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags an Else or ElseIf clause that is not inside an If block (the parser places legit clauses directly under an IfBlock; a stray one sits under the procedure or a non-If block). A stray End If is covered separately by the block-balance pass (unmatched-block-closer).",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "too-many-array-dimensions",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (corpus_array_limit_001b_compile: 61 dimensions compile rejected, 'Too many dimensions') plus the documented VBA maximum of 60 array dimensions",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "corpus_array_limit_001b_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags a Dim/Static/Private/Public array declaration with more than 60 dimensions (the documented VBA maximum). Pure dimension count over the declaration bounds; binder-independent. Shares the array-declaration inspection with array-declaration-impossible-bounds.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "identifier-too-long",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (corpus_name_limit_001b_compile: a >255-char name compile rejected, 'Identifier too long') plus MS-VBAL 3.3.5.1",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "corpus_name_limit_001b_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags a declared identifier longer than 255 characters (variables, procedures, parameters, Type/Enum names and members). Pure length check; binder-independent.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "optional-udt-parameter",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (corpus_sig_007_compile + corpus_bp_optional_pubudt_param: compile rejected, 'Invalid optional parameter') plus MS-VBAL 5.3.1",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "corpus_sig_007_compile",
+        "corpus_bp_optional_pubudt_param"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags an Optional parameter whose type is a Type declared in this module (a UDT cannot be Optional). Oracle confirmed this holds for public and private UDTs alike. Cross-module type names are not resolved (stay quiet). No false positives.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "byval-udt-parameter",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (corpus_api_vis_003_compile + corpus_bp_nonopt_pubudt_param + corpus_bp_priv_udt_privproc_param rejected; corpus_bp_priv_udt_byref_pubparam accepted) confirms a UDT parameter may not be passed ByVal (must be ByRef); independent of type/procedure visibility",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "corpus_api_vis_003_compile",
+        "corpus_bp_nonopt_pubudt_param",
+        "corpus_bp_priv_udt_privproc_param"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags a non-optional ByVal parameter whose type is a Type declared in this module (a UDT must be passed ByRef). Oracle probes proved the rule is about ByVal, not type visibility (ByRef UDT params are accepted). An Optional ByVal UDT param reports only optional-udt-parameter. Cross-module type names stay quiet.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "invalid-identifier-character",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (corpus_id_003_compile hyphen, corpus_name_rule_003_compile dot: compile rejected) plus MS-VBAL 3.3.5 identifier grammar",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "corpus_id_003_compile",
+        "corpus_name_rule_003_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags a declared identifier whose name token is directly followed by a hyphen or a dot (e.g. user-name, bad.name). The parser keeps the first token as the name and drops the rest, so the malformation is detected in the token stream. Bracketed [names] are exempt.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "invalid-assignment-target",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (corpus_bad_005_compile: 1 = x compile rejected, 'Syntax error') plus MS-VBAL 5.4.3 assignment",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "corpus_bad_005_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags a statement of the form <literal> = ... (assigning to a literal, e.g. 1 = x). A line number is never directly followed by =, so this does not collide with line-numbered statements (1 x = 5 stays quiet).",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "open-missing-for",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (corpus_edges_005_malformed_open_compile: Open without For compile rejected, 'Expected: For') plus the Open statement grammar (For mode is mandatory)",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "corpus_edges_005_malformed_open_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags an Open statement with no For clause (For <mode> is mandatory in the Open grammar). A valid Open always contains For, so a missing For is always invalid.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "typeof-missing-operand",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (corpus_excel_syntax_006_compile: TypeOf Is ... compile rejected, 'Syntax error') plus MS-VBAL 5.6 TypeOf...Is grammar",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "corpus_excel_syntax_006_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags a TypeOf token directly followed by Is (the object operand is missing). Whole-source scan; inactive conditional-compilation regions are skipped. An operand always sits between TypeOf and Is in valid code.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "suffixed-literal-overflow",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle (suffix_integer_pct_*_compile: over-range %-suffixed Integer literals compile-rejected as 'Syntax error'; in-range and negated-min probes prove the boundary) plus MS-VBAL 3.3.2 number-token type suffixes",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "suffix_integer_pct_overflow_literal_compile",
+        "suffix_integer_pct_exact_over_compile",
+        "suffix_integer_pct_negated_min_compile",
+        "suffix_integer_pct_max_literal_compile",
+        "suffix_long_amp_glued_concat_accepted"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Flags a pure-decimal integer literal carrying the % (Integer) type suffix whose magnitude exceeds 32767. VBE rejects the over-range %-suffixed token at compile time as a Syntax error, independent of context and of any leading sign — the negated-min probe -32768% is also rejected, so the check is magnitude-vs-Integer-max with no sign special-casing. SCOPED TO % ONLY: the & (Long) suffix is deliberately excluded because & is also the concatenation operator — when an over-range digit run is glued to & before an operand VBE re-parses & as concat and ACCEPTS it (oracle suffix_long_amp_glued_concat_accepted: s = 3000000000&\"x\" is accepted). The lexer greedily glues the trailing & into the number token, so flagging &-suffix overflow would false-positive on that valid concat; & overflow is a deferred (conservative) false negative even though it is a real compile error in isolation (oracle suffix_long_amp_overflow_literal_compile). Hex/octal (start with &) and the ^/!/#/@ suffixes are also out of scope; the Integer bound comes from the shared numericLiteralBounds. Whole-source scan; inactive conditional-compilation regions are skipped.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "missing-block-closer",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.4 (block statements: Sub/Function/Property, If, For, Do, While, With, Select, Type, Enum require a matching closer) / VBE compile structure",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Structural block-balance diagnostic emitted by analyzeVbaStructure (src/vbaStructuralDiagnostics.ts), surfaced through vbaModuleAnalysis; not a registry rule. Reports a block opener (procedure/If/For/Do/While/With/Select/Type/Enum) with no matching closer. Suppression boundary: block keywords inside strings and comments (including a `: Rem ...` trailing comment after the audit-#74 stripVba fix) are blanked before matching; single-line `If ... Then stmt`, `Declare Sub/Function`, line-continued headers, and inactive conditional-compilation headers do not open a block; colon one-liners are split. Verified against the dual-engine comparison harness (tests/structuralEngineComparison.test.ts) and tests/vbaStructuralAnalysis.test.ts.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "unmatched-block-closer",
+      "status": "spec-derived",
+      "sourceOfTruth": "MS-VBAL 5.4 (block statements) / VBE compile structure: a block closer (End If/End Sub/Next/Loop/Wend/End With/End Select/#End If/#Else) requires a matching opener",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Structural block-balance diagnostic emitted by analyzeVbaStructure (src/vbaStructuralDiagnostics.ts), surfaced through vbaModuleAnalysis; not a registry rule. Reports a stray block closer with no matching opener. Suppression boundary: closers inside strings and comments are blanked — including a `: Rem ...` trailing comment, whose leak was a fixed false positive (audit #74: stripVba now blanks Rem at any statement start, pinned by tests/vbaStructuralAnalysis.test.ts and the convergence repro in tests/structuralEngineComparison.test.ts). Mismatched procedure closers are folded into a single repairable missing-block-closer instead.",
+      "diagnosticKind": "compile-error"
+    },
+    {
+      "code": "non-scalar-binary-operand",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.6 (binary operators require scalar operands) plus the Excel/VBE compile oracle (array operand 'Type mismatch') and the deterministic 5.6 expression AST + declared-array shape environment (DeclaredValueShape.isArray)",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "nonscalar_array_concat_probe",
+        "nonscalar_array_arith_plus_probe",
+        "nonscalar_array_comparison_lt_probe",
+        "nonscalar_array_bool_and_probe",
+        "nonscalar_scalar_long_concat_control",
+        "nonscalar_variant_concat_control",
+        "nonscalar_array_element_concat_control",
+        "nonscalar_range_concat_control",
+        "nonscalar_udt_concat_probe",
+        "nonscalar_udt_comparison_lt_probe",
+        "nonscalar_udt_arith_plus_probe"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error",
+      "notes": "A bare array variable used as an operand of a scalar-requiring binary operator is a VBE compile error ('Type mismatch'). Oracle-verified rejected at compile across all four operator classes - & concatenation, arithmetic +, comparison <, and Boolean/bitwise And (one representative per class; the array-operand mechanism is operator-independent and generalizes to the rest of each class: arithmetic - * / \\ ^ Mod, comparisons = <> > <= >=, and Or Xor Eqv Imp). No-FP scope mirrors is-operator-non-object: fires only on a plain IdentifierExpr operand whose declaration shape isArray is true. Stays quiet for scalars, Variant, Object/host receivers (a default member may coerce - control nonscalar_range_concat_control compiles), a same-module user-defined Type value reuses the same compile rejection (oracle-verified nonscalar_udt_concat_probe / _comparison_lt_probe / _arith_plus_probe). An indexed array element a(0) (an IndexExpr scalar element - control nonscalar_array_element_concat_control compiles), member access, calls, parenthesized operands, undeclared names, and statement-level array-copy assignment a = b (an Assignment node, not a comparison BinaryExpr). Is (object operands, owned by is-operator-non-object) and Like (operands coerced to String) are out of scope. The UDT branch matches the operand's declared type against this module's Type symbol names (Type names are always user identifiers, never scalar keywords, so there is no scalar-strip collision); an Object/class instance is not a module Type symbol and stays quiet, and cross-module UDTs are a tracked follow-up."
+    },
+    {
+      "code": "argument-shape-mismatch",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "MS-VBAL 5.3.1 (argument passing by reference/value) plus the Excel/VBE compile oracle (array/UDT-into-scalar 'ByRef argument type mismatch' / 'Type mismatch'; scalar-into-array 'Type mismatch: array or user-defined type expected') and the deterministic declared-shape resolver (SourceDeclaredShape.isArray plus same-module Type symbol names)",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "argshape_array_to_scalar_byref_compile",
+        "argshape_array_to_scalar_byval_compile",
+        "argshape_udt_to_scalar_byref_compile",
+        "argshape_scalar_to_array_param_compile",
+        "argshape_variant_scalar_to_array_param_compile",
+        "argshape_array_to_variant_param_control",
+        "argshape_udt_to_udt_match_control",
+        "argshape_array_to_array_match_control",
+        "argshape_paramarray_mixed_types_control"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error",
+      "notes": "A bare array variable, or a same-module user-defined Type value, passed where a parameter is a scalar - or a scalar (including a Variant) passed where a parameter is declared an array - is a VBE compile error. Decides on declared SHAPE only (array-ness / Type-ness), never element-type coercion. Oracle-verified rejected at compile: array->scalar ByRef ('ByRef argument type mismatch'), array->scalar ByVal ('Type mismatch'), UDT->scalar ByRef, scalar->array param and Variant-scalar->array param ('Type mismatch: array or user-defined type expected'); with accepted controls array->Variant param (an array boxes into a Variant), UDT->matching UDT, array->matching array, and ParamArray mixed types all staying quiet. No-FP scope: fires only on a single bare identifier argument whose declared shape RESOLVES to a provable array or same-module Type, against a parameter that is the proven-incompatible shape; quiet on Variant/matching/ParamArray parameters, object/class arguments, member access / indexed a(i) / call / parenthesized / multi-token arguments, and unresolved or ambiguous names. Disjoint from byref-argument-type-mismatch (which owns element-type mismatch on ByRef scalars): this rule defers whenever that rule would fire, so the two never double-report. Object-parameter and both-arrays-different-element-type variants are tracked deferrals (untested by the oracle)."
+    }
+  ]
+}
