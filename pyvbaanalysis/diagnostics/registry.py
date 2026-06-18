@@ -14,6 +14,13 @@ from dataclasses import dataclass
 
 from .context import PushFn, RulePassContext
 from .exprwalk import ProcedureExpressionVisitor
+from .rules.control_flow import (
+    check_duplicate_case_else,
+    check_else_without_if,
+    check_exit_statements,
+    check_malformed_statements,
+    check_statement_context,
+)
 from .rules.declarations import (
     check_dim_initializer,
     check_duplicate_options,
@@ -102,4 +109,16 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # Positions 35-40 deferred: the arrays family (M7).
     DiagnosticRuleEntry(name="typeDeclarationCharacterAsClause", run=lambda ctx, push: check_type_declaration_character_as_clause(ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="unexpectedDeclarationTokens", run=lambda ctx, push: check_unexpected_declaration_tokens(ctx.source, ctx.mod, ctx.activity, push)),
+    # Positions 43-52 deferred: fixed-length-string bounds (constExpr), the arrays
+    # family (M7), the moduleKind family (M9), invalid-As-type-name (M9), and the
+    # parenthesized-call rules (memberCtx / call extraction, M8).
+    # -- control-flow family (positions 53-61, self-contained subset) --
+    DiagnosticRuleEntry(name="exitStatements", procedure_statements=lambda ctx, push: check_exit_statements(ctx.source, push)),
+    # Positions 54-56 deferred: duplicate/undefined labels (flow/procedureLabels),
+    # elseBranchOrder (shared conditional-compilation branch-order helper).
+    DiagnosticRuleEntry(name="statementContext", run=lambda ctx, push: check_statement_context(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="duplicateCaseElse", run=lambda ctx, push: check_duplicate_case_else(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="malformedStatements", run=lambda ctx, push: check_malformed_statements(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="elseWithoutIf", run=lambda ctx, push: check_else_without_if(ctx.source, ctx.mod, ctx.activity, push)),
+    # Position 61 forEachLoopTypes deferred (needs type inference + host).
 )
