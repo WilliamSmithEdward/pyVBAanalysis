@@ -20,6 +20,7 @@ from .rules.arrays import (
     check_redim_impossible_bounds,
     check_redim_preserve_dimensions,
 )
+from .rules.assignments import check_mid_statement_literal_target
 from .rules.control_flow import (
     check_duplicate_case_else,
     check_duplicate_labels,
@@ -150,7 +151,8 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="redimPreserveDimensions", run=lambda ctx, push: check_redim_preserve_dimensions(ctx.source, ctx.mod, ctx.activity, push)),
     # Position 39 deferred: unallocated-dynamic-array-access.
     DiagnosticRuleEntry(name="arraySubscriptOutOfBounds", run=lambda ctx, push: check_fixed_array_subscript_bounds(ctx.source, ctx.mod, ctx.activity, push)),
-    # Positions 41-42 deferred: mid-statement, erase (M7, porting in progress).
+    DiagnosticRuleEntry(name="midStatementLiteralTarget", run=lambda ctx, push: check_mid_statement_literal_target(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
+    # Position 42 deferred: erase (M7, porting in progress).
     DiagnosticRuleEntry(name="typeDeclarationCharacterAsClause", run=lambda ctx, push: check_type_declaration_character_as_clause(ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="unexpectedDeclarationTokens", run=lambda ctx, push: check_unexpected_declaration_tokens(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="fixedLengthStringBounds", run=lambda ctx, push: check_fixed_length_string_bounds(ctx.source, ctx.mod, ctx.activity, push)),
