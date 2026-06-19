@@ -174,7 +174,10 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="tooManyParameters", run=lambda ctx, push: check_too_many_parameters(ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="identifierTooLong", run=lambda ctx, push: check_identifier_too_long(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="udtParameterConstraints", run=lambda ctx, push: check_udt_parameter_constraints(ctx.mod, ctx.activity, push)),
-    # Position 12 deferred: ambiguousEnumMemberReferences (M9, needs project + host surfaces).
+    # Position 12 deferred: ambiguousEnumMemberReferences (M10). The only rule not yet
+    # active: it needs a project-type registry (cross-module enum-member visibility +
+    # ambiguous-binding resolution) that the host model does not provide; shipping a
+    # partial form would risk a false positive, so it waits for the M10 foundation.
     DiagnosticRuleEntry(name="constAssignment", procedure_statements=lambda ctx, push: check_const_assignment(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="optionExplicit", run=lambda ctx, push: check_option_explicit(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="undeclaredVariables", run=lambda ctx, push: check_undeclared_variables(ctx.source, ctx.mod, ctx.symbols, ctx.activity, ctx.opts.known_identifiers, ctx.opts.project_procedures, ctx.opts.project_class_members, ctx.opts.project_visible_symbols, push)),
