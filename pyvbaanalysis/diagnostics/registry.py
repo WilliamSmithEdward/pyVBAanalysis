@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from .context import PushFn, RulePassContext
 from .exprwalk import ProcedureExpressionVisitor
+from .rules.argument_shape import check_argument_shape
 from .rules.argument_types import check_argument_types
 from .rules.arrays import (
     check_array_bound_intrinsic_arguments,
@@ -221,7 +222,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # Position 80 deferred: isOperatorNonObject (implemented; blocked by a lexer
     # parity gap where Debug.X / Me.X receivers do not parse as expressions).
     DiagnosticRuleEntry(name="nonScalarBinaryOperand", procedure_expressions=lambda ctx, push: check_binary_operand_scalar(ctx.symbols, push)),
-    # Position 82 deferred: argumentShapeMismatch (call extraction + inference).
+    DiagnosticRuleEntry(name="argumentShapeMismatch", procedure_statements=lambda ctx, push: check_argument_shape(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="suffixedLiteralOverflow", run=lambda ctx, push: check_suffixed_literal_overflow(ctx.source, ctx.activity, push)),
     # Position 82 deferred: argumentShapeMismatch (memberCtx, M9).
     DiagnosticRuleEntry(name="missingReturnAssignments", run=lambda ctx, push: check_missing_return_assignments(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.activity, push)),
