@@ -94,6 +94,7 @@ from .rules.module_kind import (
 )
 from .rules.numeric_literals import check_suffixed_literal_overflow
 from .rules.object_state import check_object_variable_not_set, check_scalar_member_access
+from .rules.parameter_defaults import check_parameter_default_values
 from .rules.runtime_values import check_runtime_argument_values, check_runtime_conversion_values
 from .rules.type_of_is import check_typeof_missing_operand
 from .walker import ProcedureStatementVisitor
@@ -161,7 +162,8 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # resolveKnownObjectAssignmentType / host, M9).
     DiagnosticRuleEntry(name="propertyAccessorSignatures", run=lambda ctx, push: check_property_accessor_signatures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="parameterOrder", run=lambda ctx, push: check_parameter_order(ctx.source, ctx.mod, ctx.activity, push)),
-    # Positions 27-28 deferred: parameter defaults (memberCtx + inferArgumentType, M8).
+    DiagnosticRuleEntry(name="parameterDefaultValues", run=lambda ctx, push: check_parameter_default_values(ctx.source, ctx.mod, ctx.activity, push)),
+    # Position 28 deferred: parameterDefaultNotConstant (memberCtx object-skip, M9).
     DiagnosticRuleEntry(name="constValueNotConstant", run=lambda ctx, push: check_non_constant_const_values(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="enumMemberNotConstant", run=lambda ctx, push: check_non_constant_enum_member_values(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="unbalancedParens", run=lambda ctx, push: check_unbalanced_parens(ctx.source, push)),
