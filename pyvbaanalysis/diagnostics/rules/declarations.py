@@ -48,7 +48,11 @@ from ...parser.nodes import (
     VariableGroupNode,
 )
 from ...parser.type_declaration_suffix import is_type_declaration_suffix
-from ...types.type_names import is_known_scalar_type, normalize_type
+from ...types.type_names import (
+    is_known_object_assignment_type,
+    is_known_scalar_type,
+    normalize_type,
+)
 from ..const_expr import (
     collect_body_literal_integer_constants,
     collect_module_literal_integer_constants,
@@ -962,6 +966,37 @@ def _value_tokens_after_equals(source: str, span: Span) -> list[VbaToken] | None
     if eq < 0 or eq + 1 >= len(toks):
         return None
     return toks[eq + 1 :]
+
+
+def check_non_constant_parameter_defaults(
+    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    """An Optional parameter default must be a constant expression (no call/New/AddressOf).
+
+    Object-typed parameters are skipped: their defaults are owned by the
+    parameter-default-type-mismatch rule (\"must be Nothing\"). Host-class object
+    typing resolves to None here (M9), so those parameters are still scanned —
+    sound, since a non-constant default is invalid regardless of the object type.
+    """
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode):
+            continue
+        for param in member.params:
+            if not param.default_raw or is_known_object_assignment_type(param.as_type):
+                continue
+            tokens = _value_tokens_after_equals(source, param.span)
+            if tokens is None:
+                continue
+            non_constant = _non_constant_default_element(tokens, param.span.start)
+            if non_constant is None:
+                continue
+            label, hit_span = non_constant
+            push(
+                "parameterDefaultNotConstant",
+                f"Optional parameter '{param.name}' default must be a constant expression; "
+                f"{label} is not constant.",
+                hit_span,
+            )
 
 
 def check_non_constant_const_values(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:

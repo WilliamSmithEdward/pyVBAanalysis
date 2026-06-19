@@ -57,6 +57,7 @@ from .rules.declarations import (
     check_module_level_statements_outside_procedures,
     check_non_constant_const_values,
     check_non_constant_enum_member_values,
+    check_non_constant_parameter_defaults,
     check_option_placement,
     check_parameter_order,
     check_procedure_header,
@@ -163,7 +164,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="propertyAccessorSignatures", run=lambda ctx, push: check_property_accessor_signatures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="parameterOrder", run=lambda ctx, push: check_parameter_order(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="parameterDefaultValues", run=lambda ctx, push: check_parameter_default_values(ctx.source, ctx.mod, ctx.activity, push)),
-    # Position 28 deferred: parameterDefaultNotConstant (memberCtx object-skip, M9).
+    DiagnosticRuleEntry(name="parameterDefaultNotConstant", run=lambda ctx, push: check_non_constant_parameter_defaults(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="constValueNotConstant", run=lambda ctx, push: check_non_constant_const_values(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="enumMemberNotConstant", run=lambda ctx, push: check_non_constant_enum_member_values(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="unbalancedParens", run=lambda ctx, push: check_unbalanced_parens(ctx.source, push)),
