@@ -42,6 +42,28 @@ def is_known_scalar_type(type_name: str) -> bool:
     )
 
 
+def is_string_concatenation_operand_type(type_name: str) -> bool:
+    return (
+        type_name == "string"
+        or type_name == "boolean"
+        or type_name == "date"
+        or is_numeric_type(type_name)
+    )
+
+
+_HAS_DIGIT = re.compile(r"[0-9]")
+_BOOLEAN_STRING = re.compile(r"^(true|false|0|-?1)$", re.IGNORECASE)
+
+
+def is_provably_non_numeric_string(value: str) -> bool:
+    trimmed = value.strip()
+    return bool(trimmed) and _HAS_DIGIT.search(trimmed) is None
+
+
+def is_boolean_string(value: str) -> bool:
+    return _BOOLEAN_STRING.match(value.strip()) is not None
+
+
 def is_known_object_assignment_type(type_name: str | None) -> bool:
     """True when a declared type names an object that Set-binds and supports members.
 

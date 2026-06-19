@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 
 from ...parser.nodes import LeafStatementNode, ProcedureNode
+from ...runtime.vba_runtime import resolve_runtime_function
 from ...symbols.symbol_model import ModuleSymbols, VbaProcedureSignature, VbaSymbol
 from ..call_extraction import (
     CallableTypeSignature,
@@ -28,6 +29,8 @@ from ..callable_signatures import (
     bare_callable_source_shadowed,
     callable_type_signatures_for,
     expression_calls,
+    runtime_arity_signature,
+    runtime_callable_source_shadowed,
     same_module_callable_signatures,
     source_name_scope_for,
     unique_project_type_signatures,
@@ -92,7 +95,14 @@ def _validate_callable_arity(
     project_signature = project_signatures.get(lower)
     if project_signature is not None:
         validate_arity(source, project_signature, call, push)
-    # Runtime (host) arity signatures are deferred (M9).
+        return
+    if not call.qualifier:
+        if runtime_callable_source_shadowed(call.name, source_names):
+            return
+        runtime = resolve_runtime_function(call.name)
+        runtime_signature = runtime_arity_signature(runtime) if runtime is not None else None
+        if runtime_signature is not None:
+            validate_arity(source, runtime_signature, call, push)
 
 
 def _same_call_target(a: CallArguments, b: CallArguments | None) -> bool:

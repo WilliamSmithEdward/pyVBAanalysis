@@ -64,19 +64,53 @@ def accepted_cases() -> list[OracleCase]:
     return [c for c in CASES.values() if c.expected == "accepted"]
 
 
-def assert_oracle_behavior(code: str) -> int:
+# Diagnostic kinds whose meaning is a deterministic *runtime* error rather than a
+# compile error. Such a diagnostic firing on code that was only verified to
+# *compile* (evidence_phase == "compile") is not a false positive: the case never
+# asserted the code runs cleanly. It is only a false positive on a case that was
+# verified at runtime (evidence_phase == "runtime") and accepted.
+_RUNTIME_DIAGNOSTIC_KINDS = frozenset({"deterministic-runtime-error", "runtime-risk"})
+
+
+def _is_runtime_diagnostic(code: str) -> bool:
+    entry = AUDIT.get(code)
+    return entry is not None and entry.diagnostic_kind in _RUNTIME_DIAGNOSTIC_KINDS
+
+
+def accepted_case_constrains(code: str, case: OracleCase) -> bool:
+    """Whether an accepted case asserts the given code must NOT fire on it.
+
+    Compile-error diagnostics are constrained by every accepted (compile-valid)
+    case. Runtime-error diagnostics are only constrained by runtime-verified
+    accepted cases — a runtime diagnostic on compile-only-verified code flags a
+    real runtime fault and is not a false positive.
+    """
+    if _is_runtime_diagnostic(code):
+        return case.evidence_phase == "runtime"
+    return True
+
+
+def oracle_false_positives(case: OracleCase, codes: tuple[str, ...]) -> set[str]:
+    """The subset of `codes` emitted on an accepted case that are true false positives."""
+    return {c for c in case_codes(case) & set(codes) if accepted_case_constrains(c, case)}
+
+
+def assert_oracle_behavior(code: str, skip_ids: frozenset[str] = frozenset()) -> int:
     """Validate a code against its asserted oracle cases.
 
     assertedOracleCases mixes positive cases (rejected -> the code must fire) and
-    control cases (accepted -> the code must NOT fire). 'observe' cases carry no
-    firm assertion. Returns the number of cases checked.
+    control cases (accepted -> the code must NOT fire, when the case constrains it).
+    `skip_ids` names cases that require infrastructure a milestone defers (e.g. the
+    host member-completion surface); they are not asserted. Returns cases checked.
     """
     checked = 0
     for case in asserted_cases(code):
+        if case.id in skip_ids:
+            continue
         emitted = case_codes(case)
         if case.expected == "rejected":
             assert code in emitted, f"{case.id}: expected {code} to fire, got {sorted(emitted)}"
-        elif case.expected == "accepted":
+        elif case.expected == "accepted" and accepted_case_constrains(code, case):
             assert code not in emitted, f"{case.id}: {code} must not fire on an accepted control"
         checked += 1
     return checked

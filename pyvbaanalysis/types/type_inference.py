@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from ..parser.nodes import ProcedureNode, ProcKind
 from ..symbols.name_resolution import (
     BareIdentifierContext,
+    BareIdentifierResolution,
     BareIdentifierResolutionInput,
     BareIdentifierResolutionScope,
     resolve_bare_identifier_binding,
@@ -43,6 +44,12 @@ class DeclaredValueShape:
 class SourceDeclaredShape:
     resolved: bool
     shape: DeclaredValueShape | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SourceDeclaredType:
+    resolved: bool
+    as_type: str | None = None
 
 
 _VALUE_DECLARATION_KINDS = frozenset(
@@ -161,3 +168,88 @@ def declared_shape_for_source_binding(
             is_fixed_array=shaped.array_bounds is not None,
         ),
     )
+
+
+def is_value_declaration_symbol(sym: VbaSymbol) -> bool:
+    return sym.kind in _VALUE_DECLARATION_KINDS
+
+
+def _source_identifier_binding(
+    symbols: ModuleSymbols,
+    proc_sym: VbaSymbol | None,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    name: str,
+    context: BareIdentifierContext,
+) -> BareIdentifierResolution:
+    return resolve_bare_identifier_binding(
+        BareIdentifierResolutionInput(
+            current_module=symbols,
+            name=name,
+            context=context,
+            enclosing_procedure=proc_sym,
+            project_visible_symbols=list(project_visible_symbols) if project_visible_symbols else [],
+        )
+    )
+
+
+def declared_type_for_source_binding(
+    symbols: ModuleSymbols,
+    proc_sym: VbaSymbol | None,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    name: str,
+    context: BareIdentifierContext,
+) -> SourceDeclaredType:
+    binding = _source_identifier_binding(symbols, proc_sym, project_visible_symbols, name, context)
+    if binding.scope in (
+        BareIdentifierResolutionScope.UNRESOLVED,
+        BareIdentifierResolutionScope.AMBIGUOUS,
+    ):
+        return SourceDeclaredType(resolved=binding.scope is BareIdentifierResolutionScope.AMBIGUOUS)
+    typed = next((d for d in binding.definitions if d.as_type), None)
+    return SourceDeclaredType(resolved=True, as_type=typed.as_type if typed is not None else None)
+
+
+def declared_value_type_for_source_binding(
+    symbols: ModuleSymbols,
+    proc_sym: VbaSymbol | None,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    name: str,
+) -> SourceDeclaredType:
+    binding = _source_identifier_binding(
+        symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.EXPRESSION
+    )
+    if binding.scope in (
+        BareIdentifierResolutionScope.UNRESOLVED,
+        BareIdentifierResolutionScope.AMBIGUOUS,
+    ):
+        return SourceDeclaredType(resolved=binding.scope is BareIdentifierResolutionScope.AMBIGUOUS)
+    value_definitions = [d for d in binding.definitions if is_value_declaration_symbol(d)]
+    if not value_definitions:
+        return SourceDeclaredType(resolved=False)
+    typed = next((d for d in value_definitions if d.as_type), None)
+    return SourceDeclaredType(resolved=True, as_type=typed.as_type if typed is not None else None)
+
+
+def declared_value_type_for_qualified_source_binding(
+    symbols: ModuleSymbols,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    qualifier: str,
+    name: str,
+) -> SourceDeclaredType:
+    qualifier_lower = qualifier.lower()
+    name_lower = name.lower()
+    candidates: list[VbaSymbol] = []
+    if symbols.module_name.lower() == qualifier_lower:
+        candidates.extend(symbols.root.children or [])
+    candidates.extend(
+        s for s in (project_visible_symbols or []) if s.module_name.lower() == qualifier_lower
+    )
+    if not candidates:
+        return SourceDeclaredType(resolved=False)
+    matching_values = [
+        s for s in candidates if s.name.lower() == name_lower and is_value_declaration_symbol(s)
+    ]
+    if not matching_values:
+        return SourceDeclaredType(resolved=True)
+    typed = next((d for d in matching_values if d.as_type), None)
+    return SourceDeclaredType(resolved=True, as_type=typed.as_type if typed is not None else None)

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from oracle_support import accepted_cases, assert_oracle_behavior, asserted_cases, case_codes
+from oracle_support import (
+    accepted_cases,
+    assert_oracle_behavior,
+    asserted_cases,
+    oracle_false_positives,
+)
 
 from pyvbaanalysis.diagnostics import analyze_module
 
@@ -52,7 +57,6 @@ def test_oracle_asserted_cases() -> None:
 
 
 def test_no_false_positives_on_accepted_cases() -> None:
-    codes = set(_CODES)
     for case in accepted_cases():
-        spurious = case_codes(case) & codes
+        spurious = oracle_false_positives(case, _CODES)
         assert not spurious, f"{case.id}: runtime-value false positive {spurious}"

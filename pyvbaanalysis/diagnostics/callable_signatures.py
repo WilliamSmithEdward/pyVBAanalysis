@@ -11,6 +11,7 @@ None, which is precision-only (never a false positive).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -18,6 +19,7 @@ from ..constants.integer_constant_expression import IntegerConstantLookup
 from ..lexer.token_helpers import match_paren_from
 from ..lexer.token_kinds import VbaToken
 from ..parser.nodes import ProcedureNode, Span
+from ..runtime.vba_runtime import VbaRuntimeFunction, resolve_runtime_function
 from ..symbols.name_resolution import (
     BareIdentifierContext,
     BareIdentifierResolutionInput,
@@ -198,15 +200,106 @@ def callable_signature_for(
     module_signatures: Mapping[str, CallableTypeSignature],
     source_names: SourceNameScope | None = None,
 ) -> CallableTypeSignature | None:
-    """The signature a bare callee resolves to, or None.
-
-    Runtime-function signatures are deferred (M9): a bare runtime call resolves to
-    None here, which is precision-only (it is never arity/type-checked, so never a
-    false positive).
-    """
+    """The signature a bare callee resolves to (user module, then VBA runtime), or None."""
     if bare_callable_source_shadowed(name, source_names):
         return None
-    return module_signatures.get(name.lower())
+    user = module_signatures.get(name.lower())
+    if user is not None:
+        return user
+    if runtime_callable_source_shadowed(name, source_names):
+        return None
+    runtime = resolve_runtime_function(name)
+    if runtime is None:
+        return None
+    return runtime_type_signature(runtime)
+
+
+# -- runtime-function signatures -------------------------------------------
+
+_AS_TYPE = re.compile(r"\bAs\s+([A-Za-z_][A-Za-z0-9_]*(?:\(\))?)", re.IGNORECASE)
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_LEADING_BRACKET = re.compile(r"^\[")
+_TRAILING_BRACKET = re.compile(r"\]$")
+_PARAM_ARRAY = re.compile(r"^ParamArray\b", re.IGNORECASE)
+_PARAM_ARRAY_PREFIX = re.compile(r"^ParamArray\b\s*", re.IGNORECASE)
+_PASSING_PREFIX = re.compile(r"^(?:ByVal|ByRef)\b\s*", re.IGNORECASE)
+_DEFAULT_SUFFIX = re.compile(r"\s*=\s*.*$")
+
+
+def runtime_type_signature(runtime: VbaRuntimeFunction) -> CallableTypeSignature:
+    if runtime.params is not None:
+        params = [
+            CallableParamType(
+                name=p.name, type_=p.type_, optional=p.optional, param_array=p.param_array
+            )
+            for p in runtime.params
+        ]
+        return CallableTypeSignature(name=runtime.name, params=params, return_type=runtime.returns)
+    return parse_runtime_display_signature(runtime.name, runtime.signature, runtime.returns)
+
+
+def runtime_arity_signature(runtime: VbaRuntimeFunction) -> CallableTypeSignature | None:
+    if runtime.params is not None or _runtime_signature_parameter_text(runtime.signature) is not None:
+        return runtime_type_signature(runtime)
+    return None
+
+
+def parse_runtime_display_signature(
+    name: str, signature: str, return_type: str | None = None
+) -> CallableTypeSignature:
+    inner = _runtime_signature_parameter_text(signature)
+    if inner is None:
+        return CallableTypeSignature(name=name, params=[], return_type=return_type)
+    params = [
+        p for p in (_parse_runtime_param_type(s) for s in _split_signature_top_level(inner)) if p is not None
+    ]
+    return CallableTypeSignature(name=name, params=params, return_type=return_type)
+
+
+def _runtime_signature_parameter_text(signature: str) -> str | None:
+    open_index = signature.find("(")
+    close_index = signature.rfind(")")
+    if open_index < 0 or close_index < open_index:
+        return None
+    return signature[open_index + 1 : close_index]
+
+
+def _parse_runtime_param_type(raw: str) -> CallableParamType | None:
+    text = raw.strip()
+    if not text:
+        return None
+    optional = text.startswith("[") and text.endswith("]")
+    text = _TRAILING_BRACKET.sub("", _LEADING_BRACKET.sub("", text)).strip()
+    param_array = _PARAM_ARRAY.match(text) is not None
+    text = _PARAM_ARRAY_PREFIX.sub("", text)
+    text = _PASSING_PREFIX.sub("", text)
+    text = _DEFAULT_SUFFIX.sub("", text).strip()
+    as_match = _AS_TYPE.search(text)
+    first_match = _IDENTIFIER.search(text)
+    if first_match is None:
+        return None
+    return CallableParamType(
+        name=first_match.group(0),
+        type_=as_match.group(1) if as_match is not None else None,
+        optional=optional,
+        param_array=param_array,
+    )
+
+
+def _split_signature_top_level(text: str) -> list[str]:
+    out: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(text):
+        if ch in ("(", "["):
+            depth += 1
+        elif ch in (")", "]"):
+            depth -= 1
+        elif ch == "," and depth == 0:
+            out.append(text[start:i])
+            start = i + 1
+    out.append(text[start:])
+    return out
 
 
 def callable_signature_for_call(

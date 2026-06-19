@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from .context import PushFn, RulePassContext
 from .exprwalk import ProcedureExpressionVisitor
+from .rules.argument_types import check_argument_types
 from .rules.arrays import (
     check_array_bound_intrinsic_arguments,
     check_array_declaration_bounds,
@@ -24,7 +25,13 @@ from .rules.arrays import (
     check_redim_preserve_dimensions,
     check_unallocated_dynamic_array_access,
 )
-from .rules.assignments import check_const_assignment, check_mid_statement_literal_target
+from .rules.assignments import (
+    check_assignment_types,
+    check_const_assignment,
+    check_mid_statement_literal_target,
+    check_missing_return_assignments,
+    check_set_assignments,
+)
 from .rules.binary_operand_scalar import check_binary_operand_scalar
 from .rules.call_arity import check_argument_count
 from .rules.control_flow import (
@@ -178,6 +185,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="declarePtrSafeForWin64", run=lambda ctx, push: check_declare_ptr_safe_for_win64(ctx.source, ctx.mod, ctx.opts.conditional_compilation, ctx.activity, push)),
     # Positions 54-58 deferred: eventHandlerModuleScope (completion), invalidAsTypeNames
     # (M9), and the parenthesized-call rules (memberCtx / call extraction, M8).
+    DiagnosticRuleEntry(name="setAssignments", procedure_statements=lambda ctx, push: check_set_assignments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     # -- control-flow family (positions 59-66, self-contained subset) --
     DiagnosticRuleEntry(name="exitStatements", procedure_statements=lambda ctx, push: check_exit_statements(ctx.source, push)),
     DiagnosticRuleEntry(name="duplicateLabels", run=lambda ctx, push: check_duplicate_labels(ctx.source, ctx.mod, ctx.activity, push)),
@@ -193,15 +201,17 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="objectVariableNotSet", run=lambda ctx, push: check_object_variable_not_set(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
     # Positions 71-72 deferred: memberNotFound / nonCallableCallStatement (M9 host).
     DiagnosticRuleEntry(name="argumentCount", procedure_statements=lambda ctx, push: check_argument_count(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
-    # Position 74 deferred: argumentTypes (inferArgumentType, M8 in progress).
+    DiagnosticRuleEntry(name="argumentTypes", procedure_statements=lambda ctx, push: check_argument_types(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="runtimeArgumentValues", procedure_statements=lambda ctx, push: check_runtime_argument_values(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_integer_constants, ctx.opts.project_visible_symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="runtimeConversionValues", procedure_statements=lambda ctx, push: check_runtime_conversion_values(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
-    # Positions 77-78 deferred: assignmentTypes / missingReturnAssignments (M8 in
-    # progress), and typeOfIsAlwaysFalse (M9 host).
+    DiagnosticRuleEntry(name="assignmentTypes", run=lambda ctx, push: check_assignment_types(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.activity, push)),
+    # Position 78 deferred: typeOfIsAlwaysFalse (M9 host).
     DiagnosticRuleEntry(name="typeofMissingOperand", run=lambda ctx, push: check_typeof_missing_operand(ctx.source, ctx.activity, push)),
     # Position 80 deferred: isOperatorNonObject (implemented; blocked by a lexer
     # parity gap where Debug.X / Me.X receivers do not parse as expressions).
     DiagnosticRuleEntry(name="nonScalarBinaryOperand", procedure_expressions=lambda ctx, push: check_binary_operand_scalar(ctx.symbols, push)),
     # Position 82 deferred: argumentShapeMismatch (call extraction + inference).
     DiagnosticRuleEntry(name="suffixedLiteralOverflow", run=lambda ctx, push: check_suffixed_literal_overflow(ctx.source, ctx.activity, push)),
+    # Position 82 deferred: argumentShapeMismatch (memberCtx, M9).
+    DiagnosticRuleEntry(name="missingReturnAssignments", run=lambda ctx, push: check_missing_return_assignments(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.activity, push)),
 )
