@@ -14,6 +14,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from ...conditional import ConditionalActivity, ConditionalActivityTracker
+from ...flow.procedure_labels import (
+    collect_procedure_label_declarations,
+    collect_procedure_label_references,
+    collect_procedure_labels,
+)
 from ...lexer.token_kinds import TokenKind
 from ...lexer.tokenize import tokenize
 from ...parser.nodes import (
@@ -218,6 +223,43 @@ def _check_context_body(
         elif isinstance(node, (IfBlockNode, WhileBlockNode)):
             _check_context_body(source, node.body, ctx, activity, push)
         # ConditionalDirective / VariableGroup: no context check.
+
+
+# -- checkDuplicateLabels / checkUndefinedLabels ---------------------------
+
+
+def check_duplicate_labels(
+    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode):
+            continue
+        seen: set[str] = set()
+        for label in collect_procedure_label_declarations(source, member, activity):
+            if label.key not in seen:
+                seen.add(label.key)
+                continue
+            push(
+                "duplicateLabel",
+                f"Label '{label.text}' is already defined in procedure '{member.name}'.",
+                label.span,
+            )
+
+
+def check_undefined_labels(
+    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode):
+            continue
+        labels = collect_procedure_labels(source, member, activity)
+        for ref in collect_procedure_label_references(source, member, activity):
+            if ref.key not in labels:
+                push(
+                    "undefinedLabel",
+                    f"Label '{ref.text}' is not defined in procedure '{member.name}'.",
+                    ref.span,
+                )
 
 
 # -- checkElseBranchOrder --------------------------------------------------

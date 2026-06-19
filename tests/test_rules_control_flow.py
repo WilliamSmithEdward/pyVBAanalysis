@@ -17,6 +17,8 @@ _CF_CODES = (
     "duplicate-case-else",
     "else-without-if",
     "else-branch-order",
+    "duplicate-label",
+    "undefined-label",
     "invalid-assignment-target",
     "open-missing-for",
 )
@@ -84,6 +86,32 @@ def test_malformed_statements() -> None:
     assert "invalid-assignment-target" not in _codes("Sub S\n    x = 1\nEnd Sub")
     assert "open-missing-for" in _codes('Sub S\n    Open "f.txt" As #1\nEnd Sub')
     assert "open-missing-for" not in _codes('Sub S\n    Open "f.txt" For Input As #1\nEnd Sub')
+
+
+def test_undefined_labels() -> None:
+    code = "undefined-label"
+    # GoTo / GoSub / On Error GoTo / On n GoTo targets must exist in the procedure.
+    assert code in _codes("Sub S\n    GoTo Missing\nEnd Sub")
+    assert code not in _codes("Sub S\n    GoTo Done\nDone:\nEnd Sub")
+    assert code in _codes("Sub S\n    On Error GoTo Handler\nEnd Sub")
+    assert code not in _codes("Sub S\n    On Error GoTo Handler\nHandler:\nEnd Sub")
+    # Decimal line labels are matched after leading-zero normalization.
+    assert code not in _codes("Sub S\n    GoTo 10\n10:\nEnd Sub")
+    # On Error Resume Next / GoTo 0 / GoTo -1 are non-label forms, never a target.
+    assert code not in _codes("Sub S\n    On Error Resume Next\nEnd Sub")
+    assert code not in _codes("Sub S\n    On Error GoTo 0\nEnd Sub")
+    assert code not in _codes("Sub S\n    On Error GoTo -1\nEnd Sub")
+    # Labels do not leak across procedures.
+    cross = "Sub A\n    GoTo Shared\nEnd Sub\nSub B\nShared:\nEnd Sub"
+    assert code in _codes(cross)
+
+
+def test_duplicate_labels() -> None:
+    code = "duplicate-label"
+    assert code in _codes("Sub S\nDup:\nDup:\nEnd Sub")
+    assert code not in _codes("Sub S\nA:\nB:\nEnd Sub")
+    # Same label name in two different procedures is fine.
+    assert code not in _codes("Sub A\nDone:\nEnd Sub\nSub B\nDone:\nEnd Sub")
 
 
 def test_else_branch_order() -> None:
