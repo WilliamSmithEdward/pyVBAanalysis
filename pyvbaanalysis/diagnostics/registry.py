@@ -219,11 +219,13 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="assignmentTypes", run=lambda ctx, push: check_assignment_types(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.activity, push)),
     # Position 78 deferred: typeOfIsAlwaysFalse (M9 host).
     DiagnosticRuleEntry(name="typeofMissingOperand", run=lambda ctx, push: check_typeof_missing_operand(ctx.source, ctx.activity, push)),
-    # Position 80 deferred: isOperatorNonObject (implemented; blocked by a lexer
-    # parity gap where Debug.X / Me.X receivers do not parse as expressions).
+    # Position 80 deferred: isOperatorNonObject. The rule is an expression visitor
+    # over `x Is y` BinaryExprs; its whole oracle corpus uses a `Debug.Print <expr>`
+    # receiver, but a statement led by a reserved-name receiver (Debug/Me) parses as
+    # a raw StatementNode, so its argument expressions never reach the expression
+    # walker. Unblocking it is a foundation parser slice, not a rule gap.
     DiagnosticRuleEntry(name="nonScalarBinaryOperand", procedure_expressions=lambda ctx, push: check_binary_operand_scalar(ctx.symbols, push)),
     DiagnosticRuleEntry(name="argumentShapeMismatch", procedure_statements=lambda ctx, push: check_argument_shape(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="suffixedLiteralOverflow", run=lambda ctx, push: check_suffixed_literal_overflow(ctx.source, ctx.activity, push)),
-    # Position 82 deferred: argumentShapeMismatch (memberCtx, M9).
     DiagnosticRuleEntry(name="missingReturnAssignments", run=lambda ctx, push: check_missing_return_assignments(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.activity, push)),
 )
