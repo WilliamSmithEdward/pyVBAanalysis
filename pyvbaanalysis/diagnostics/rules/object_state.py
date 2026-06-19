@@ -16,14 +16,21 @@ the same XLIDE family needs the type environment + member surface and lands in M
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 
 from ...conditional import ConditionalActivityTracker
 from ...flow.procedure_unstructured import procedure_has_unstructured_flow
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import BodyNode, LeafStatementNode, ModuleNode, ProcedureNode, Span, WithBlockNode
+from ...symbols.name_resolution import BareIdentifierContext
 from ...symbols.symbol_model import ModuleSymbols, SymbolVisibility, VbaSymbol, VbaSymbolKind
-from ...types.type_names import is_known_object_assignment_type
+from ...types.type_inference import (
+    SourceDeclaredType,
+    declared_type_for_source_binding,
+    procedure_symbol_for,
+    type_environment_for,
+)
+from ...types.type_names import is_known_object_assignment_type, is_known_scalar_type, normalize_type
 from ..context import PushFn, statement_tokens
 from ..dataflow import (
     DataflowHooks,
@@ -33,6 +40,7 @@ from ..dataflow import (
     walk_straight_line_body,
 )
 from ..walker import (
+    ProcedureStatementVisitor,
     active_module_members,
     block_header_line_span,
     is_inactive_node,
@@ -51,6 +59,68 @@ _PROCEDURE_KINDS = frozenset(
         VbaSymbolKind.PROPERTY_SET,
     }
 )
+
+
+def check_scalar_member_access(
+    source: str,
+    symbols: ModuleSymbols,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    push: PushFn,
+) -> ProcedureStatementVisitor:
+    """Member access on a known scalar (`x.Foo` where x As Long) is a VBE compile error."""
+
+    def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
+        env = type_environment_for(symbols, member)
+        proc_sym = procedure_symbol_for(symbols, member)
+
+        def resolve_declared_type(name: str) -> SourceDeclaredType:
+            return declared_type_for_source_binding(
+                symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.MEMBER_RECEIVER
+            )
+
+        def visitor(stmt: LeafStatementNode) -> None:
+            for name, as_type, span, vbe_error in _scalar_member_accesses(
+                source, stmt.span, env, resolve_declared_type
+            ):
+                push(
+                    "scalarMemberAccess",
+                    f"Member access on '{name}' is invalid because it is declared as {as_type}. "
+                    f"This is a VBE compile error: {vbe_error}.",
+                    span,
+                )
+
+        return visitor
+
+    return factory
+
+
+def _scalar_member_accesses(
+    source: str,
+    span: Span,
+    env: Mapping[str, str],
+    resolve_declared_type: Callable[[str], SourceDeclaredType],
+) -> list[tuple[str, str, Span, str]]:
+    toks = statement_tokens(source, span)
+    out: list[tuple[str, str, Span, str]] = []
+    for i in range(len(toks) - 1):
+        if toks[i + 1].raw_text != ".":
+            continue
+        if i > 0 and toks[i - 1].raw_text == ".":
+            continue
+        name = token_name(toks[i])
+        if not name:
+            continue
+        declared_type = resolve_declared_type(name)
+        as_type = declared_type.as_type if declared_type.resolved else env.get(name.lower())
+        normalized = normalize_type(as_type)
+        if not as_type or not normalized or not is_known_scalar_type(normalized):
+            continue
+        member_name = token_name(toks[i + 2]) if i + 2 < len(toks) else None
+        vbe_error = "Invalid qualifier" if member_name else "Syntax error"
+        out.append(
+            (name, as_type, Span(span.start + toks[i].start, span.start + toks[i + 1].end), vbe_error)
+        )
+    return out
 
 
 def _not_set_message(name: str, context: str) -> str:

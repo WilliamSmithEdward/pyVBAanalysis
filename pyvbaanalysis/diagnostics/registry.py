@@ -40,6 +40,7 @@ from .rules.control_flow import (
     check_else_branch_order,
     check_else_without_if,
     check_exit_statements,
+    check_for_each_loop_types,
     check_malformed_statements,
     check_statement_context,
     check_undefined_labels,
@@ -92,7 +93,7 @@ from .rules.module_kind import (
     check_with_events_declarations,
 )
 from .rules.numeric_literals import check_suffixed_literal_overflow
-from .rules.object_state import check_object_variable_not_set
+from .rules.object_state import check_object_variable_not_set, check_scalar_member_access
 from .rules.runtime_values import check_runtime_argument_values, check_runtime_conversion_values
 from .rules.type_of_is import check_typeof_missing_operand
 from .walker import ProcedureStatementVisitor
@@ -202,9 +203,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="duplicateCaseElse", run=lambda ctx, push: check_duplicate_case_else(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="malformedStatements", run=lambda ctx, push: check_malformed_statements(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="elseWithoutIf", run=lambda ctx, push: check_else_without_if(ctx.source, ctx.mod, ctx.activity, push)),
-    # forEachLoopTypes (67, type inference + host) and scalarMemberAccess (69, type
-    # env + member surface) are deferred to M8.
+    DiagnosticRuleEntry(name="forEachLoopTypes", run=lambda ctx, push: check_for_each_loop_types(ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="arrayBoundIntrinsicArguments", procedure_statements=lambda ctx, push: check_array_bound_intrinsic_arguments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
+    DiagnosticRuleEntry(name="scalarMemberAccess", procedure_statements=lambda ctx, push: check_scalar_member_access(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="objectVariableNotSet", run=lambda ctx, push: check_object_variable_not_set(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
     # Positions 71-72 deferred: memberNotFound / nonCallableCallStatement (M9 host).
     DiagnosticRuleEntry(name="argumentCount", procedure_statements=lambda ctx, push: check_argument_count(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),

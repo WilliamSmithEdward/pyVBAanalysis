@@ -10,7 +10,7 @@ conditional-compilation branch-order rule (shared cc helper) are deferred.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from ...conditional import ConditionalActivity, ConditionalActivityTracker
@@ -40,6 +40,16 @@ from ...parser.nodes import (
     WithBlockNode,
     is_leaf_statement,
 )
+from ...symbols.name_resolution import BareIdentifierContext
+from ...symbols.symbol_model import ModuleSymbols, VbaSymbol
+from ...types.type_inference import (
+    DeclaredValueShape,
+    SourceDeclaredShape,
+    declaration_shape_environment_for,
+    declared_shape_for_source_binding,
+    procedure_symbol_for,
+)
+from ...types.type_names import is_known_scalar_type, normalize_type
 from ..context import PushFn
 from ..walker import (
     ProcedureStatementVisitor,
@@ -53,6 +63,135 @@ from ..walker import (
     token_text,
 )
 from .shared import scan_conditional_compilation_branch_order
+
+# -- checkForEachLoopTypes -------------------------------------------------
+
+_BLOCK_NODES = (
+    ForBlockNode,
+    IfBlockNode,
+    DoBlockNode,
+    WhileBlockNode,
+    WithBlockNode,
+    SelectBlockNode,
+)
+
+_ShapeResolver = Callable[[str, BareIdentifierContext], SourceDeclaredShape]
+
+
+def check_for_each_loop_types(
+    mod: ModuleNode,
+    symbols: ModuleSymbols,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    activity: ConditionalActivityTracker | None,
+    push: PushFn,
+) -> None:
+    """A For Each control variable must be Variant/Object; its source a collection/array.
+
+    User-defined-Type, Enum, and host-class typing need the host/project type
+    registry and are deferred to M9; the known-scalar cases are fully covered here.
+    """
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode):
+            continue
+        shapes = declaration_shape_environment_for(symbols, member)
+        proc_sym = procedure_symbol_for(symbols, member)
+
+        def resolve_shape(name: str, context: BareIdentifierContext) -> SourceDeclaredShape:
+            return declared_shape_for_source_binding(
+                symbols, proc_sym, project_visible_symbols, name, context
+            )
+
+        _check_for_each_loop_types_in_body(member.body, shapes, activity, push, resolve_shape)
+
+
+def _check_for_each_loop_types_in_body(
+    body: list[BodyNode],
+    shapes: Mapping[str, DeclaredValueShape],
+    activity: ConditionalActivityTracker | None,
+    push: PushFn,
+    resolve_shape: _ShapeResolver,
+) -> None:
+    for node in body:
+        if is_inactive_node(activity, node):
+            continue
+        if isinstance(node, _BLOCK_NODES):
+            if isinstance(node, ForBlockNode):
+                _check_for_each_control_variable_type(node, shapes, push, resolve_shape)
+                _check_for_each_source_type(node, shapes, push, resolve_shape)
+            _check_for_each_loop_types_in_body(node.body, shapes, activity, push, resolve_shape)
+
+
+def _check_for_each_control_variable_type(
+    node: ForBlockNode,
+    shapes: Mapping[str, DeclaredValueShape],
+    push: PushFn,
+    resolve_shape: _ShapeResolver,
+) -> None:
+    if not node.each or not node.control_variable or node.control_variable_span is None:
+        return
+    resolved = resolve_shape(node.control_variable, BareIdentifierContext.ASSIGNMENT_TARGET)
+    shape = resolved.shape if resolved.resolved else shapes.get(node.control_variable.lower())
+    if shape is None:
+        return
+    problem = _for_each_scalar_problem(shape, allow_array_message=True)
+    if problem is None:
+        return
+    push(
+        "forEachControlVariableType",
+        f"For Each control variable '{node.control_variable}' must be Variant or Object, "
+        f"but {problem}.",
+        node.control_variable_span,
+    )
+
+
+def _check_for_each_source_type(
+    node: ForBlockNode,
+    shapes: Mapping[str, DeclaredValueShape],
+    push: PushFn,
+    resolve_shape: _ShapeResolver,
+) -> None:
+    if not node.each or not node.source_expression or node.source_expression_span is None:
+        return
+    source_name = _simple_for_each_source_name(node.source_expression)
+    if not source_name:
+        return
+    resolved = resolve_shape(source_name, BareIdentifierContext.EXPRESSION)
+    shape = resolved.shape if resolved.resolved else shapes.get(source_name.lower())
+    if shape is None:
+        return
+    problem = _for_each_scalar_problem(shape, allow_array_message=False)
+    if problem is None:
+        return
+    push(
+        "forEachSourceType",
+        f"For Each source '{source_name}' must be a collection object or array, but {problem}.",
+        node.source_expression_span,
+    )
+
+
+def _for_each_scalar_problem(shape: DeclaredValueShape, *, allow_array_message: bool) -> str | None:
+    if shape.is_array:
+        return "it is an array variable" if allow_array_message else None
+    if not shape.as_type:
+        return None
+    normalized = normalize_type(shape.as_type)
+    if not normalized or normalized in ("variant", "object"):
+        return None
+    # User-defined-Type / Enum / host-class names resolve to None here (M9); only
+    # the known-scalar declaration is flagged.
+    if is_known_scalar_type(normalized):
+        return f"it is declared As {shape.as_type}"
+    return None
+
+
+def _simple_for_each_source_name(source_expression: str) -> str | None:
+    toks = [
+        t
+        for t in tokenize(source_expression)
+        if t.kind is not TokenKind.COMMENT and t.kind is not TokenKind.NEWLINE
+    ]
+    return token_name(toks[0]) if len(toks) == 1 else None
+
 
 # -- checkExitStatements ---------------------------------------------------
 
