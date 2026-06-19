@@ -42,6 +42,21 @@ def is_known_scalar_type(type_name: str) -> bool:
     )
 
 
+def is_known_object_assignment_type(type_name: str | None) -> bool:
+    """True when a declared type names an object that Set-binds and supports members.
+
+    Host-free slice (M7): the generic ``Object`` type qualifies; Variant and the
+    scalar types do not. Host aliases (Excel/Office) and project class types are
+    resolved by the full host-coupled inference in M8; until then they
+    conservatively return False, so the analyzer never invents a false positive
+    (it only misses some true positives).
+    """
+    normalized = normalize_type(type_name)
+    if normalized is None or normalized == "variant":
+        return False
+    return normalized == "object"
+
+
 @dataclass(frozen=True, slots=True)
 class NumericBounds:
     min: int

@@ -66,6 +66,7 @@ from .rules.module_kind import (
     check_with_events_declarations,
 )
 from .rules.numeric_literals import check_suffixed_literal_overflow
+from .rules.object_state import check_object_variable_not_set
 from .walker import ProcedureStatementVisitor
 
 
@@ -163,9 +164,11 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="duplicateCaseElse", run=lambda ctx, push: check_duplicate_case_else(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="malformedStatements", run=lambda ctx, push: check_malformed_statements(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="elseWithoutIf", run=lambda ctx, push: check_else_without_if(ctx.source, ctx.mod, ctx.activity, push)),
-    # Position 61 forEachLoopTypes deferred (needs type inference + host).
-    # Positions 62-68 deferred: arrays/object-state (M7), member-not-found,
-    # non-callable, argument count/types, runtime values, assignment types
-    # (call extraction + type inference + host, M8/M9).
+    # forEachLoopTypes (type inference + host), arrayBoundIntrinsicArguments (call
+    # extraction), and scalarMemberAccess (type env + member surface) are deferred
+    # to M8 and sit between elseWithoutIf and objectVariableNotSet in registry.ts.
+    DiagnosticRuleEntry(name="objectVariableNotSet", run=lambda ctx, push: check_object_variable_not_set(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
+    # memberNotFound and the type/call/host/array rules between here and the
+    # numeric family remain deferred to M7 (arrays) / M8 / M9.
     DiagnosticRuleEntry(name="suffixedLiteralOverflow", run=lambda ctx, push: check_suffixed_literal_overflow(ctx.source, ctx.activity, push)),
 )
