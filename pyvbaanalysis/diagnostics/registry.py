@@ -52,6 +52,7 @@ from .rules.declarations import (
     check_empty_type,
     check_fixed_length_string_bounds,
     check_identifier_too_long,
+    check_invalid_as_type_names,
     check_invalid_identifier_starts,
     check_module_declarations_after_procedures,
     check_module_declarations_in_procedure_bodies,
@@ -63,6 +64,7 @@ from .rules.declarations import (
     check_parameter_order,
     check_procedure_header,
     check_property_accessor_signatures,
+    check_property_setter_value_parameters,
     check_reserved_declaration_names,
     check_too_many_parameters,
     check_type_declaration_character_as_clause,
@@ -87,6 +89,7 @@ from .rules.lexical import check_invalid_line_continuations, check_unterminated_
 from .rules.module_kind import (
     check_declare_ptr_safe_for_win64,
     check_event_declaration_module_kind,
+    check_event_handler_module_scope,
     check_friend_declarations,
     check_implements_statement_placement,
     check_me_outside_object_module,
@@ -98,7 +101,7 @@ from .rules.numeric_literals import check_suffixed_literal_overflow
 from .rules.object_state import check_object_variable_not_set, check_scalar_member_access
 from .rules.parameter_defaults import check_parameter_default_values
 from .rules.runtime_values import check_runtime_argument_values, check_runtime_conversion_values
-from .rules.type_of_is import check_typeof_missing_operand
+from .rules.type_of_is import check_typeof_is_compatibility, check_typeof_missing_operand
 from .rules.undeclared import (
     check_member_not_found,
     check_non_callable_call_statement,
@@ -179,8 +182,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="moduleDeclarationsAfterProcedures", run=lambda ctx, push: check_module_declarations_after_procedures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="moduleLevelStatementsOutsideProcedures", run=lambda ctx, push: check_module_level_statements_outside_procedures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="reservedDeclarationNames", run=lambda ctx, push: check_reserved_declaration_names(ctx.source, ctx.mod, ctx.activity, push)),
-    # Position 24 deferred: propertySetterValueParameters (object-value branch needs
-    # resolveKnownObjectAssignmentType / host, M9).
+    # propertySetterValueParameters: structural branches only; the propertyLetObjectValue
+    # object-value branch (resolveKnownObjectAssignmentType over the project surface) no-ops.
+    DiagnosticRuleEntry(name="propertySetterValueParameters", run=lambda ctx, push: check_property_setter_value_parameters(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="propertyAccessorSignatures", run=lambda ctx, push: check_property_accessor_signatures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="parameterOrder", run=lambda ctx, push: check_parameter_order(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="parameterDefaultValues", run=lambda ctx, push: check_parameter_default_values(ctx.source, ctx.mod, ctx.activity, push)),
@@ -213,7 +217,10 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="implementsStatementPlacement", run=lambda ctx, push: check_implements_statement_placement(ctx.source, ctx.mod, ctx.module_kind, ctx.activity, push)),
     DiagnosticRuleEntry(name="raiseEventTargets", run=lambda ctx, push: check_raise_event_targets(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="declarePtrSafeForWin64", run=lambda ctx, push: check_declare_ptr_safe_for_win64(ctx.source, ctx.mod, ctx.opts.conditional_compilation, ctx.activity, push)),
-    # Positions 54-55 deferred: eventHandlerModuleScope (completion) + invalidAsTypeNames (M9).
+    DiagnosticRuleEntry(name="eventHandlerModuleScope", run=lambda ctx, push: check_event_handler_module_scope(ctx.source, ctx.mod, ctx.module_name, ctx.module_kind, ctx.opts.document_type, ctx.activity, push)),
+    # invalidAsTypeNames: reserved/runtime/known-non-type fallback branches only; the
+    # project-type-registry and creatable-type (New) branches no-op (M10).
+    DiagnosticRuleEntry(name="invalidAsTypeNames", run=lambda ctx, push: check_invalid_as_type_names(ctx.source, ctx.mod, ctx.activity, ctx.opts, push)),
     DiagnosticRuleEntry(name="callParens", procedure_statements=lambda ctx, push: check_call_parens(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="expressionCallParens", procedure_statements=lambda ctx, push: check_expression_call_parens(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="setAssignments", procedure_statements=lambda ctx, push: check_set_assignments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
@@ -237,7 +244,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="runtimeArgumentValues", procedure_statements=lambda ctx, push: check_runtime_argument_values(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_integer_constants, ctx.opts.project_visible_symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="runtimeConversionValues", procedure_statements=lambda ctx, push: check_runtime_conversion_values(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="assignmentTypes", run=lambda ctx, push: check_assignment_types(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.activity, push)),
-    # Position 78 deferred: typeOfIsAlwaysFalse (M9 host).
+    DiagnosticRuleEntry(name="typeOfIsAlwaysFalse", procedure_expressions=lambda ctx, push: check_typeof_is_compatibility(ctx.symbols, ctx.member_ctx, push)),
     DiagnosticRuleEntry(name="typeofMissingOperand", run=lambda ctx, push: check_typeof_missing_operand(ctx.source, ctx.activity, push)),
     # Position 80 deferred: isOperatorNonObject. The rule is an expression visitor
     # over `x Is y` BinaryExprs; its whole oracle corpus uses a `Debug.Print <expr>`

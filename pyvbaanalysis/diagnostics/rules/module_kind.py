@@ -2,8 +2,8 @@
 
 Ported from xlide_vscode/src/analyzer/diagnostics/rules/moduleKind.ts: object-module
 Public restrictions, Event/WithEvents/Friend/Implements placement, RaiseEvent
-targets, and Declare PtrSafe for Win64. The event-handler-scope rule needs the
-completion event-handler tables and is deferred (M9).
+targets, Declare PtrSafe for Win64, and event-handler module scope (the last reads
+the vendored event catalogue via completion.event_handlers).
 """
 
 from __future__ import annotations
@@ -11,6 +11,11 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Sequence
 
+from ...completion.event_handlers import (
+    EventHandlerDocumentType,
+    event_handler_document_type_for_context,
+    event_handler_procedure_for_name,
+)
 from ...conditional import (
     ConditionalActivityTracker,
     ConditionalCompilationEnvironment,
@@ -24,6 +29,7 @@ from ...parser.nodes import (
     LeafStatementNode,
     ModuleNode,
     ProcedureNode,
+    ProcKind,
     Span,
     StatementNode,
     TypeNode,
@@ -330,5 +336,54 @@ def check_declare_ptr_safe_for_win64(source: str, mod: ModuleNode, conditional_c
         push(
             "declareMissingPtrSafe",
             f"Declare statement '{member.name}' must include PtrSafe when compiling for 64-bit Office.",
+            declared_name_span(source, member.span, member.name),
+        )
+
+
+# -- checkEventHandlerModuleScope ------------------------------------------
+
+
+def _describe_event_document_type(document_type: EventHandlerDocumentType | None) -> str:
+    if document_type in ("workbook", "worksheet", "chart"):
+        return document_type
+    return "unknown"
+
+
+def check_event_handler_module_scope(
+    source: str,
+    mod: ModuleNode,
+    module_name: str,
+    module_kind: ModuleSymbolKind,
+    document_type: EventHandlerDocumentType | None,
+    activity: ConditionalActivityTracker | None,
+    push: PushFn,
+) -> None:
+    """A Sub whose name matches an Excel event handler that this module's document
+    type does not wire. Port of checkEventHandlerModuleScope: pure AST + the vendored
+    event catalogue + module kind; no binder or host surface. A Sub named like an
+    event in the wrong module (or any non-document module) behaves as an ordinary
+    procedure, never as the wired event.
+    """
+    actual_document_type = event_handler_document_type_for_context(
+        module_name, module_kind, document_type
+    )
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode) or member.proc_kind is not ProcKind.SUB:
+            continue
+        event = event_handler_procedure_for_name(member.name)
+        if event is None:
+            continue
+        if actual_document_type == event.document_type:
+            continue
+        module_description = (
+            f"{_describe_event_document_type(actual_document_type)} document module"
+            if module_kind is ModuleSymbolKind.DOCUMENT
+            else f"{module_kind.value} module"
+        )
+        push(
+            "eventHandlerWrongModule",
+            f"'{event.name}' matches a {event.owner} event handler, but this "
+            f"{module_description} is not where Excel wires that event. "
+            "It will behave like an ordinary procedure here.",
             declared_name_span(source, member.span, member.name),
         )

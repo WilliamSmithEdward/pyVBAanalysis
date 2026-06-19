@@ -13,6 +13,7 @@ order) are deferred to later slices / M8 / M9.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Union
@@ -22,12 +23,14 @@ from ...conditional import (
     ConditionalActivityTracker,
     collect_conditional_directives,
 )
+from ...host import resolve_host_alias
 from ...lexer.keyword_table import OPERATOR_IDENTIFIERS, is_reserved_identifier
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize
 from ...parser.fixed_length_string import parse_fixed_length_string_type
 from ...parser.nodes import (
     AttributeNode,
+    BodyNode,
     ConditionalDirectiveKind,
     ConditionalDirectiveNode,
     DeclareNode,
@@ -48,6 +51,7 @@ from ...parser.nodes import (
     VariableGroupNode,
 )
 from ...parser.type_declaration_suffix import is_type_declaration_suffix
+from ...runtime import resolve_runtime_function
 from ...types.type_names import (
     is_known_object_assignment_type,
     is_known_scalar_type,
@@ -58,7 +62,7 @@ from ..const_expr import (
     collect_module_literal_integer_constants,
     resolve_fixed_length_string_size,
 )
-from ..context import PushFn, statement_tokens
+from ..context import AnalyzeModuleOptions, PushFn, statement_tokens
 from ..walker import (
     absolute_span,
     active_module_members,
@@ -399,6 +403,375 @@ def check_reserved_declaration_names(source: str, mod: ModuleNode, activity: Con
             for param in member.params:
                 report("parameter", declaration_name_hit(source, param.span, param.name))
             for_each_variable_group(member.body, inspect_variable_group, activity)
+
+
+# -- checkPropertySetterValueParameters ------------------------------------
+
+# Object-value branch (propertyLetObjectValue) is DEFERRED: it needs
+# resolveKnownObjectAssignmentType (host/project class resolution), which the port
+# does not yet expose as a richer typed result. The three branches below are pure
+# signature/structure checks and are sound without that surface.
+
+
+def _property_setter_return_type_span(source: str, proc: ProcedureNode) -> Span:
+    """Span of the offending `As <type>` return clause on a Property Let/Set header.
+
+    Port of propertySetterReturnTypeSpan: walk past modifiers, `Property`, the
+    accessor, the name, and any parameter list, to the `As` keyword and its type.
+    Falls back to the `As` keyword span when the layout is unexpected.
+    """
+    header = _first_line_span(source, proc.span)
+    toks = statement_tokens(source, header)
+    i = 0
+    while i < len(toks) and token_text(toks[i]) in _PROC_MODIFIERS:
+        i += 1
+    if token_text(_at(toks, i)) == "property":
+        i += 2  # Property + Let/Set
+    i += 1  # property name
+    open_tok = _at(toks, i)
+    if open_tok is None or open_tok.raw_text != "(":
+        return _keyword_span(source, header, "as")
+    depth = 0
+    while i < len(toks):
+        raw = toks[i].raw_text
+        if raw == "(":
+            depth += 1
+        elif raw == ")":
+            depth -= 1
+            if depth == 0:
+                i += 1
+                break
+        i += 1
+    as_tok = _at(toks, i)
+    if as_tok is None or token_text(as_tok) != "as":
+        return _keyword_span(source, header, "as")
+    type_start = i + 1
+    type_end = _consume_declaration_type_name(toks, type_start)
+    if type_end == type_start:
+        type_end = i + 1
+    end_tok = _at(toks, type_end - 1) or as_tok
+    return Span(header.start + as_tok.start, header.start + end_tok.end)
+
+
+def check_property_setter_value_parameters(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode) or member.proc_kind not in (
+            ProcKind.PROPERTY_LET,
+            ProcKind.PROPERTY_SET,
+        ):
+            continue
+        label = "Property Let" if member.proc_kind is ProcKind.PROPERTY_LET else "Property Set"
+        if member.has_as_clause:
+            push(
+                "propertySetterReturnType",
+                f"{label} '{member.name}' cannot declare a return type; "
+                "use the final value parameter for the assigned value.",
+                _property_setter_return_type_span(source, member),
+            )
+        if len(member.params) > 0:
+            value_param = member.params[-1]
+            if member.proc_kind is ProcKind.PROPERTY_SET:
+                normalized = normalize_type(value_param.as_type)
+                if normalized and is_known_scalar_type(normalized):
+                    push(
+                        "propertySetScalarValue",
+                        f"Property Set '{member.name}' final value parameter "
+                        f"'{value_param.name}' must be an object reference, but it is "
+                        f"declared As {value_param.as_type}.",
+                        declared_name_span(source, value_param.span, value_param.name),
+                    )
+            # else: Property Let object-value (propertyLetObjectValue) DEFERRED —
+            # needs resolveKnownObjectAssignmentType (host/project), no-op here.
+            continue
+        push(
+            "propertySetterMissingValue",
+            f"{label} '{member.name}' must include a final value parameter.",
+            declared_name_span(source, member.span, member.name),
+        )
+
+
+# -- checkInvalidAsTypeNames (safe branches) -------------------------------
+#
+# Port of checkInvalidAsTypeNames / collectTypeNameReferences. Only the
+# self-contained fallback branches ship: a type-position name that resolves to NO
+# known type AND is a reserved VBA identifier, a VBA runtime function, or a known
+# project non-type declaration. DEFERRED (no-op, sound):
+#   - ambiguous project-type branch   (needs the project-type registry)
+#   - host-ambiguous reporting         (needs the project-type registry)
+#   - invalidNewTypeName / creatable   (needs isCreatableTypeCompletion + registry)
+# The reserved/runtime branches are gated by `_resolves_to_known_type`, which is a
+# conservative union of every type signal the port DOES have (primitives, host
+# aliases, OLE IUnknown, same-module enums/Types, project class/document/userform
+# members, and `opts.project_types` when supplied). Without that gate a primitive
+# word (`Long` is reserved) or a host type that shares a runtime-function name
+# (`Filter`) would be a false positive. Qualified references (`Mod.Type`) are
+# skipped: resolving the qualifier needs the project-type/external registry, so the
+# sound choice is to stay silent on them.
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_OLE_AUTOMATION_TYPE_NAMES: frozenset[str] = frozenset({"iunknown"})
+
+
+@dataclass(frozen=True, slots=True)
+class _TypeNameRef:
+    name: str
+    span: Span
+    qualified: bool
+
+
+def _type_name_ref_from_tokens(
+    toks: Sequence[VbaToken], type_index: int, base: int
+) -> _TypeNameRef | None:
+    first = _at(toks, type_index)
+    if first is None:
+        return None
+    first_name = token_name(first)
+    if not first_name:
+        return None
+    dot = _at(toks, type_index + 1)
+    member_tok = _at(toks, type_index + 2) if dot is not None and dot.raw_text == "." else None
+    if member_tok is None:
+        return _TypeNameRef(name=first_name, span=Span(base + first.start, base + first.end), qualified=False)
+    member_name = token_name(member_tok)
+    if not member_name:
+        return _TypeNameRef(name=first_name, span=Span(base + first.start, base + first.end), qualified=False)
+    return _TypeNameRef(
+        name=member_name,
+        span=Span(base + member_tok.start, base + member_tok.end),
+        qualified=True,
+    )
+
+
+def _type_name_after_as(source: str, span: Span) -> _TypeNameRef | None:
+    toks = statement_tokens(source, span)
+    for i, tok in enumerate(toks):
+        if token_text(tok) != "as":
+            continue
+        type_index = i + 1
+        if token_text(_at(toks, type_index)) == "new":
+            type_index += 1
+        ref = _type_name_ref_from_tokens(toks, type_index, span.start)
+        if ref is not None:
+            return ref
+    return None
+
+
+def _return_type_name_ref(source: str, proc: ProcedureNode) -> _TypeNameRef | None:
+    header = _first_line_span(source, proc.span)
+    toks = statement_tokens(source, header)
+    depth = 0
+    for i, tok in enumerate(toks):
+        raw = tok.raw_text
+        if raw == "(":
+            depth += 1
+            continue
+        if raw == ")":
+            depth -= 1
+            continue
+        if depth != 0 or token_text(tok) != "as":
+            continue
+        return _type_name_ref_from_tokens(toks, i + 1, header.start)
+    return None
+
+
+def _type_names_after_new(source: str, span: Span) -> list[_TypeNameRef]:
+    toks = statement_tokens(source, span)
+    out: list[_TypeNameRef] = []
+    for i, tok in enumerate(toks):
+        if token_text(tok) != "new":
+            continue
+        ref = _type_name_ref_from_tokens(toks, i + 1, span.start)
+        if ref is not None:
+            out.append(ref)
+    return out
+
+
+def _type_names_after_typeof_is(source: str, span: Span) -> list[_TypeNameRef]:
+    toks = statement_tokens(source, span)
+    out: list[_TypeNameRef] = []
+    saw_typeof = False
+    for i, tok in enumerate(toks):
+        lower = token_text(tok)
+        if lower == "typeof":
+            saw_typeof = True
+            continue
+        if not saw_typeof or lower != "is":
+            continue
+        ref = _type_name_ref_from_tokens(toks, i + 1, span.start)
+        if ref is not None:
+            out.append(ref)
+        saw_typeof = False
+    return out
+
+
+_IMPLEMENTS_RE = re.compile(
+    r"^\s*Implements\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\b",
+    re.IGNORECASE,
+)
+
+
+def _collect_implements_refs(source: str) -> list[_TypeNameRef]:
+    out: list[_TypeNameRef] = []
+    line_start = 0
+    length = len(source)
+    while line_start <= length:
+        line_end = source.find("\n", line_start)
+        if line_end < 0:
+            line_end = length
+        line = source[line_start:line_end]
+        if line.endswith("\r"):
+            line = line[:-1]
+        code = re.sub(r"'.*$", "", line)
+        match = _IMPLEMENTS_RE.match(code)
+        if match:
+            raw_name = match.group(1)
+            column = line.find(raw_name, match.start())
+            dot = raw_name.find(".")
+            if column >= 0 and dot > 0:
+                out.append(
+                    _TypeNameRef(
+                        name=raw_name[dot + 1 :],
+                        span=Span(line_start + column + dot + 1, line_start + column + len(raw_name)),
+                        qualified=True,
+                    )
+                )
+            elif column >= 0:
+                out.append(
+                    _TypeNameRef(
+                        name=raw_name,
+                        span=Span(line_start + column, line_start + column + len(raw_name)),
+                        qualified=False,
+                    )
+                )
+        if line_end == length:
+            break
+        line_start = line_end + 1
+    return out
+
+
+def _collect_type_name_references(source: str, mod: ModuleNode) -> list[_TypeNameRef]:
+    out: list[_TypeNameRef] = []
+    out.extend(_collect_implements_refs(source))
+
+    def collect_group(group: VariableGroupNode) -> None:
+        for decl in group.declarations:
+            if decl.as_type:
+                ref = _type_name_after_as(source, decl.span)
+                if ref is not None:
+                    out.append(ref)
+
+    def collect_statement(span: Span) -> None:
+        out.extend(_type_names_after_new(source, span))
+        out.extend(_type_names_after_typeof_is(source, span))
+
+    def collect_body(body: Sequence[BodyNode]) -> None:
+        for_each_variable_group(list(body), collect_group)
+        for_each_body_statement(list(body), lambda stmt: collect_statement(stmt.span))
+
+    for member in mod.members:
+        if isinstance(member, VariableGroupNode):
+            collect_group(member)
+        elif isinstance(member, TypeNode):
+            for field_node in member.fields:
+                if field_node.as_type:
+                    ref = _type_name_after_as(source, field_node.span)
+                    if ref is not None:
+                        out.append(ref)
+        elif isinstance(member, ProcedureNode):
+            for param in member.params:
+                if param.as_type:
+                    ref = _type_name_after_as(source, param.span)
+                    if ref is not None:
+                        out.append(ref)
+            if member.return_type:
+                ref = _return_type_name_ref(source, member)
+                if ref is not None:
+                    out.append(ref)
+            collect_body(member.body)
+
+    out.sort(key=lambda ref: (ref.span.start, ref.span.end))
+    return out
+
+
+def _module_defined_type_names(mod: ModuleNode) -> set[str]:
+    """Lowercased names of types DEFINED in this module (Enum, user Type).
+
+    A same-module type can shadow a built-in/runtime name, so it must never be
+    flagged as a non-type. Project class/document/userform names come from
+    `opts.project_class_members` instead.
+    """
+    names: set[str] = set()
+    for member in mod.members:
+        if isinstance(member, (TypeNode, EnumNode)) and member.name:
+            names.add(member.name.lower())
+    return names
+
+
+def _resolves_to_known_type(
+    name: str, mod_type_names: set[str], opts: AnalyzeModuleOptions
+) -> bool:
+    """Conservative union of every type signal available to the port.
+
+    Mirrors the part of resolveTypeName the port CAN evaluate: primitives, host
+    aliases/types, OLE IUnknown, same-module Enum/Type definitions, project
+    class/document/userform members, and `opts.project_types` when the registry is
+    supplied. Returns True when `name` could be a valid type, suppressing the
+    fallback branches (no-FP)."""
+    lower = name.lower()
+    normalized = normalize_type(name)
+    if normalized == "object" or normalized == "variant" or is_known_scalar_type(normalized or ""):
+        return True
+    if lower in _OLE_AUTOMATION_TYPE_NAMES:
+        return True
+    if resolve_host_alias(name, opts.host_model) is not None:
+        return True
+    if lower in mod_type_names:
+        return True
+    for project_type in opts.project_class_members or []:
+        if project_type.name.lower() == lower:
+            return True
+    for project_type_name in opts.project_types or []:
+        candidate = getattr(project_type_name, "name", None)
+        if isinstance(candidate, str) and candidate.lower() == lower:
+            return True
+    return False
+
+
+def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, opts: AnalyzeModuleOptions, push: PushFn) -> None:
+    mod_type_names = _module_defined_type_names(mod)
+    known_non_type_names = opts.known_non_type_names or frozenset()
+    for ref in _collect_type_name_references(source, mod):
+        if activity is not None and activity.is_inactive(ref.span):
+            continue
+        if ref.qualified:
+            # Qualified-name resolution needs the project-type/external registry the
+            # port lacks; staying silent is the sound choice. (DEFERRED)
+            continue
+        if _resolves_to_known_type(ref.name, mod_type_names, opts):
+            continue
+        # Ambiguous / invalidNewTypeName branches DEFERRED (need the project-type
+        # registry). Only the self-contained fallbacks below ship.
+        if is_reserved_identifier(ref.name):
+            push(
+                "invalidAsTypeName",
+                f"'{ref.name}' is a reserved VBA identifier, not a valid type name.",
+                ref.span,
+            )
+            continue
+        if resolve_runtime_function(ref.name) is not None:
+            push(
+                "invalidAsTypeName",
+                f"'{ref.name}' is a VBA runtime function, not a valid type name.",
+                ref.span,
+            )
+            continue
+        if ref.name.lower() in known_non_type_names:
+            push(
+                "invalidAsTypeName",
+                f"'{ref.name}' resolves to a project declaration, but that declaration is not a type.",
+                ref.span,
+            )
+            continue
 
 
 # -- checkDimInitializer ---------------------------------------------------
