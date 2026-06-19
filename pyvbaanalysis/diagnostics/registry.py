@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from .context import PushFn, RulePassContext
 from .exprwalk import ProcedureExpressionVisitor
+from .rules.arrays import check_redim_impossible_bounds
 from .rules.control_flow import (
     check_duplicate_case_else,
     check_duplicate_labels,
@@ -138,7 +139,10 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # Positions 32-33 deferred: invalid-expression-syntax + division-by-zero
     # (call extraction / type inference, M8).
     DiagnosticRuleEntry(name="dimInitializer", run=lambda ctx, push: check_dim_initializer(ctx.source, ctx.mod, ctx.activity, push)),
-    # Positions 35-40 deferred: the arrays family (M7).
+    # invalidRedimTargets (position 35) deferred: needs the declaredShapeForSourceBinding wrapper.
+    DiagnosticRuleEntry(name="redimImpossibleBounds", procedure_statements=lambda ctx, push: check_redim_impossible_bounds(ctx.source, ctx.mod, ctx.activity, push)),
+    # Positions 37-42 deferred: array-declaration bounds, redim-preserve, unallocated
+    # access, subscript bounds, mid-statement, erase (M7, porting in progress).
     DiagnosticRuleEntry(name="typeDeclarationCharacterAsClause", run=lambda ctx, push: check_type_declaration_character_as_clause(ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="unexpectedDeclarationTokens", run=lambda ctx, push: check_unexpected_declaration_tokens(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="fixedLengthStringBounds", run=lambda ctx, push: check_fixed_length_string_bounds(ctx.source, ctx.mod, ctx.activity, push)),
