@@ -15,7 +15,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from ..constants.integer_constant_expression import IntegerConstantLookup
-from ..parser.nodes import ProcedureNode
+from ..lexer.token_helpers import match_paren_from
+from ..lexer.token_kinds import VbaToken
+from ..parser.nodes import ProcedureNode, Span
 from ..symbols.name_resolution import (
     BareIdentifierContext,
     BareIdentifierResolutionInput,
@@ -31,10 +33,18 @@ from ..symbols.symbol_model import (
     is_bare_callable_kind,
     is_procedure_kind,
     procedure_params_from_symbol,
+    qualified_procedure_key,
 )
 from ..types.type_inference import procedure_symbol_for
-from .call_extraction import CallableParamType, CallableTypeSignature
-from .walker import strip_header_brackets
+from .call_extraction import (
+    CallableParamType,
+    CallableTypeSignature,
+    CallArguments,
+    empty_arg_split,
+    split_arg_slots,
+)
+from .context import statement_tokens
+from .walker import strip_header_brackets, token_name
 
 
 # -- signature tables ------------------------------------------------------
@@ -174,6 +184,115 @@ def source_name_scope_for(
 
 def runtime_callable_source_shadowed(name: str, source_names: SourceNameScope | None) -> bool:
     return source_names is not None and name.lower() in source_names.runtime_shadows
+
+
+def bare_callable_source_shadowed(name: str, source_names: SourceNameScope | None) -> bool:
+    return source_names is not None and name.lower() in source_names.callable_shadows
+
+
+# -- call resolution -------------------------------------------------------
+
+
+def callable_signature_for(
+    name: str,
+    module_signatures: Mapping[str, CallableTypeSignature],
+    source_names: SourceNameScope | None = None,
+) -> CallableTypeSignature | None:
+    """The signature a bare callee resolves to, or None.
+
+    Runtime-function signatures are deferred (M9): a bare runtime call resolves to
+    None here, which is precision-only (it is never arity/type-checked, so never a
+    false positive).
+    """
+    if bare_callable_source_shadowed(name, source_names):
+        return None
+    return module_signatures.get(name.lower())
+
+
+def callable_signature_for_call(
+    call: CallArguments,
+    module_signatures: Mapping[str, CallableTypeSignature],
+    source_names: SourceNameScope | None = None,
+) -> CallableTypeSignature | None:
+    if call.lookup_key:
+        return module_signatures.get(call.lookup_key)
+    return callable_signature_for(call.name, module_signatures, source_names)
+
+
+@dataclass(frozen=True, slots=True)
+class ParenthesizedCallName:
+    name: str
+    paren_index: int
+    name_end_index: int
+
+
+def parenthesized_call_name_at(
+    toks: Sequence[VbaToken], name_index: int
+) -> ParenthesizedCallName | None:
+    base_name = token_name(toks[name_index])
+    if not base_name:
+        return None
+    suffix = toks[name_index + 1] if name_index + 1 < len(toks) else None
+    after_suffix = toks[name_index + 2] if name_index + 2 < len(toks) else None
+    if (
+        suffix is not None
+        and suffix.raw_text == "$"
+        and toks[name_index].end == suffix.start
+        and after_suffix is not None
+        and after_suffix.raw_text == "("
+        and suffix.end == after_suffix.start
+    ):
+        return ParenthesizedCallName(f"{base_name}$", name_index + 2, name_index + 1)
+    if suffix is not None and suffix.raw_text == "(":
+        return ParenthesizedCallName(base_name, name_index + 1, name_index)
+    return None
+
+
+def expression_calls(
+    source: str,
+    span: Span,
+    module_signatures: Mapping[str, CallableTypeSignature],
+    source_names: SourceNameScope | None = None,
+) -> list[CallArguments]:
+    """Parenthesized current-module / unique-project calls inside an expression."""
+    toks = statement_tokens(source, span)
+    out: list[CallArguments] = []
+    for i in range(len(toks) - 1):
+        call_name = parenthesized_call_name_at(toks, i)
+        if call_name is None:
+            continue
+        qualifier = (
+            token_name(toks[i - 2]) if i >= 2 and toks[i - 1].raw_text == "." else None
+        )
+        lookup_key = qualified_procedure_key(qualifier, call_name.name) if qualifier else None
+        if qualifier and (lookup_key is None or lookup_key not in module_signatures):
+            continue  # host/member calls need receiver binding before checking
+        if not qualifier and i > 0 and toks[i - 1].raw_text == ".":
+            continue
+        if lookup_key is not None:
+            if lookup_key not in module_signatures:
+                continue
+        elif callable_signature_for(call_name.name, module_signatures, source_names) is None:
+            continue
+        close = match_paren_from(toks, call_name.paren_index)
+        if close < 0:
+            continue
+        inner = list(toks[call_name.paren_index + 1 : close])
+        split = empty_arg_split() if not inner else split_arg_slots(inner, span.start)
+        out.append(
+            CallArguments(
+                name=call_name.name,
+                qualifier=qualifier,
+                lookup_key=lookup_key,
+                name_span=Span(
+                    span.start + toks[i].start, span.start + toks[call_name.name_end_index].end
+                ),
+                slots=split.slots,
+                slot_spans=split.spans,
+                slice_start=span.start,
+            )
+        )
+    return out
 
 
 # -- scoped integer-constant lookup ----------------------------------------

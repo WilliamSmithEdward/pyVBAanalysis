@@ -26,6 +26,7 @@ from .rules.arrays import (
 )
 from .rules.assignments import check_const_assignment, check_mid_statement_literal_target
 from .rules.binary_operand_scalar import check_binary_operand_scalar
+from .rules.call_arity import check_argument_count
 from .rules.control_flow import (
     check_duplicate_case_else,
     check_duplicate_labels,
@@ -190,8 +191,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # env + member surface) are deferred to M8.
     DiagnosticRuleEntry(name="arrayBoundIntrinsicArguments", procedure_statements=lambda ctx, push: check_array_bound_intrinsic_arguments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="objectVariableNotSet", run=lambda ctx, push: check_object_variable_not_set(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
-    # Positions 71-74 deferred: memberNotFound (M9), argumentCount / argumentTypes
-    # (call extraction, M8 in progress).
+    # Positions 71-72 deferred: memberNotFound / nonCallableCallStatement (M9 host).
+    DiagnosticRuleEntry(name="argumentCount", procedure_statements=lambda ctx, push: check_argument_count(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
+    # Position 74 deferred: argumentTypes (inferArgumentType, M8 in progress).
     DiagnosticRuleEntry(name="runtimeArgumentValues", procedure_statements=lambda ctx, push: check_runtime_argument_values(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_integer_constants, ctx.opts.project_visible_symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="runtimeConversionValues", procedure_statements=lambda ctx, push: check_runtime_conversion_values(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     # Positions 77-78 deferred: assignmentTypes / missingReturnAssignments (M8 in
