@@ -7,7 +7,11 @@ from oracle_support import accepted_cases, assert_oracle_behavior, asserted_case
 from pyvbaanalysis.diagnostics import analyze_module
 
 # Every array-family code emitted so far (drives the no-false-positive sweep).
-_ARRAY_CODES = ("redim-impossible-bounds",)
+_ARRAY_CODES = (
+    "redim-impossible-bounds",
+    "array-declaration-impossible-bounds",
+    "too-many-array-dimensions",
+)
 
 
 def _codes(source: str) -> set[str]:
@@ -41,10 +45,28 @@ def test_scalar_redim_target_suppresses_bound_check() -> None:
     )
 
 
+def test_array_declaration_bounds() -> None:
+    code = "array-declaration-impossible-bounds"
+    assert code in _codes("Sub S\n    Dim a(10 To 1) As Long\nEnd Sub")
+    assert code not in _codes("Sub S\n    Dim a(1 To 10) As Long\nEnd Sub")
+    assert code not in _codes("Sub S\n    Dim a(5) As Long\nEnd Sub")
+    assert code not in _codes("Sub S\n    Dim a(1 To n) As Long\nEnd Sub")
+    # Module-level declarations are checked too.
+    assert code in _codes("Dim m(3 To 2) As Long")
+
+
+def test_too_many_array_dimensions() -> None:
+    code = "too-many-array-dimensions"
+    over = ", ".join("1" for _ in range(61))
+    ok = ", ".join("1" for _ in range(60))
+    assert code in _codes(f"Sub S\n    Dim a({over}) As Long\nEnd Sub")
+    assert code not in _codes(f"Sub S\n    Dim a({ok}) As Long\nEnd Sub")
+
+
 def test_oracle_asserted_cases() -> None:
-    code = "redim-impossible-bounds"
-    if asserted_cases(code):
-        assert assert_oracle_behavior(code) > 0
+    for code in ("redim-impossible-bounds", "too-many-array-dimensions"):
+        if asserted_cases(code):
+            assert assert_oracle_behavior(code) > 0
 
 
 def test_no_array_false_positives_on_accepted_cases() -> None:

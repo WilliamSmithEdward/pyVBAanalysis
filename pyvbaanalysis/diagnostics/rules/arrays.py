@@ -18,14 +18,23 @@ from ...conditional import ConditionalActivityTracker
 from ...constants.integer_constant_expression import parse_vba_integer_literal, safe_integer
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
 from ...lexer.token_kinds import TokenKind, VbaToken
-from ...parser.nodes import BodyNode, LeafStatementNode, ModuleNode, ProcedureNode, Span, VariableGroupNode
+from ...parser.nodes import (
+    BodyNode,
+    LeafStatementNode,
+    ModuleNode,
+    ProcedureNode,
+    Span,
+    VariableDeclNode,
+    VariableGroupNode,
+)
 from ...types.type_names import normalize_type
-from ..context import PushFn
+from ..context import PushFn, statement_tokens
 from ..walker import (
     ProcedureStatementVisitor,
     absolute_span,
     active_module_members,
     for_each_variable_group,
+    is_inactive_node,
     statement_tokens_after_leading_label,
     token_name,
     token_text,
@@ -259,3 +268,57 @@ def check_redim_impossible_bounds(
         return visitor
 
     return factory
+
+
+# -- checkArrayDeclarationBounds -------------------------------------------
+
+# VBA allows at most 60 array dimensions.
+_MAX_ARRAY_DIMENSIONS = 60
+
+
+def check_array_declaration_bounds(
+    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    def inspect_group(group: VariableGroupNode) -> None:
+        for decl in group.declarations:
+            if not decl.is_array or decl.array_bounds is None or is_inactive_node(activity, decl):
+                continue
+            _inspect_array_declaration(source, decl, push)
+
+    for member in active_module_members(mod, activity):
+        if isinstance(member, VariableGroupNode):
+            inspect_group(member)
+        elif isinstance(member, ProcedureNode):
+            for_each_variable_group(member.body, inspect_group, activity)
+
+
+def _inspect_array_declaration(source: str, decl: VariableDeclNode, push: PushFn) -> None:
+    toks = statement_tokens(source, decl.span)
+    open_index = next((i for i, tok in enumerate(toks) if tok.raw_text == "("), -1)
+    if open_index < 0:
+        return
+    close = match_paren_from(toks, open_index)
+    if close < 0:
+        return
+    dims = [
+        [tok for tok in part if tok.kind is not TokenKind.COMMENT]
+        for part in split_top_level_token_groups(toks, open_index + 1, ",", close)
+    ]
+    dims = [dim_tokens for dim_tokens in dims if dim_tokens]
+    if len(dims) > _MAX_ARRAY_DIMENSIONS:
+        push(
+            "tooManyArrayDimensions",
+            f"Array '{decl.name}' has {len(dims)} dimensions; "
+            f"VBA allows at most {_MAX_ARRAY_DIMENSIONS}.",
+            decl.name_span if decl.name_span is not None else decl.span,
+        )
+    for index, dim_tokens in enumerate(dims):
+        _key, _lower_key, lower_value, upper_value = _comparable_array_bound_key(dim_tokens)
+        if lower_value is None or upper_value is None or lower_value <= upper_value:
+            continue
+        push(
+            "arrayDeclarationImpossibleBounds",
+            f"Array '{decl.name}' lower bound {lower_value} is greater than upper bound "
+            f"{upper_value} for dimension {index + 1}; this is not a valid array bound.",
+            _token_group_span(decl.span, dim_tokens),
+        )
