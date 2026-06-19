@@ -2,11 +2,14 @@
 
 Ported from xlide_vscode/src/analyzer/diagnostics/rules/typeOfIs.ts. The
 TypeOf-missing-operand syntax check is host-free and ported. is-operator-non-object
-is implemented but deferred: its oracle cases use `Debug.Print n Is Nothing`, and
-the Python lexer classifies the intrinsic-object keyword `Debug` as a keyword (not
-an identifier), so `Debug.<member>` does not parse as an expression and the
-expression-AST walk never reaches the `Is` node. That is a lexer/parser parity
-gap (agent.md Risk 4) to fix at the foundation level.
+is a BinaryExpr `Is` visitor: a provably-scalar operand of `Is` is a type error. It
+fires on expression-reachable forms (`If x Is Nothing`, `b = x Is Nothing`) and is
+silent on `Debug.Print x Is Nothing` — a reserved-name receiver statement parses as
+a raw StatementNode, so the inner `Is` never reaches the expression walk. This
+matches XLIDE byte-for-byte (verified by running XLIDE's analyzer: it too is silent
+on the Debug.Print form and fires on the If form); the entire is-operator-non-object
+oracle corpus happens to use the dormant Debug.Print form, so those cases are
+documented as XLIDE-dormant in the test rather than satisfied.
 
 typeof-is-always-false ports the SAFE v1: a simple-identifier operand whose declared
 type resolves to a CONCRETE object class that is mutually incompatible with the
@@ -28,7 +31,16 @@ from ...conditional import ConditionalActivityTracker
 from ...host import resolve_host_alias
 from ...lexer.token_kinds import TokenKind
 from ...lexer.tokenize import tokenize
-from ...parser.nodes import ExprNode, IdentifierExpr, ProcedureNode, Span, TypeOfIsExpr
+from ...parser.nodes import (
+    BinaryExpr,
+    ExprNode,
+    IdentifierExpr,
+    LiteralExpr,
+    LiteralKind,
+    ProcedureNode,
+    Span,
+    TypeOfIsExpr,
+)
 from ...symbols.symbol_model import ModuleSymbols
 from ...types.type_inference import type_environment_for
 from ...types.type_names import is_known_scalar_type, normalize_type
@@ -57,6 +69,61 @@ def check_typeof_missing_operand(
         if activity is not None and activity.is_inactive(span):
             continue
         push("typeofMissingOperand", "'TypeOf' requires an object expression before 'Is'.", span)
+
+
+# -- checkIsOperatorOperands (is-operator-non-object) -----------------------
+
+_IS_NON_OBJECT_LITERAL_KINDS: dict[LiteralKind, str] = {
+    LiteralKind.INTEGER: "integer",
+    LiteralKind.FLOAT: "float",
+    LiteralKind.STRING: "string",
+    LiteralKind.DATE: "date",
+    LiteralKind.BOOLEAN: "boolean",
+}
+
+
+def _non_object_operand(expr: ExprNode, env: dict[str, str]) -> tuple[Span, str] | None:
+    """A provably non-object (scalar) operand of `Is`, or None."""
+    if isinstance(expr, LiteralExpr):
+        kind = _IS_NON_OBJECT_LITERAL_KINDS.get(expr.literal_kind)
+        if kind is not None:
+            return (expr.span, f"'{expr.raw}' is a {kind} literal")
+        return None  # Nothing / Null / Empty -> not provably scalar
+    if isinstance(expr, IdentifierExpr):
+        declared = env.get(expr.name.lower())
+        if not declared:
+            return None  # undeclared / unknown -> quiet
+        # Strip only a trailing array `()` marker -- NOT normalize_type's leading-`vb`
+        # strip, which would wrongly collapse a user class named `vbLong` to a scalar.
+        raw = _TRAILING_ARRAY_RE.sub("", declared).strip().lower()
+        if is_known_scalar_type(raw):
+            return (expr.span, f"'{expr.name}' is declared As {declared}")
+        return None  # Variant / Object / class -> quiet
+    return None  # member / call / paren / array / New / unary -> quiet (v1)
+
+
+def check_is_operator_operands(symbols: ModuleSymbols, push: PushFn) -> ProcedureExpressionVisitor:
+    """The `Is` operator requires object operands; a provably-scalar operand is an error."""
+
+    def factory(member: ProcedureNode) -> Callable[[ExprNode], None]:
+        env = type_environment_for(symbols, member)
+
+        def visitor(expr: ExprNode) -> None:
+            if not isinstance(expr, BinaryExpr) or expr.operator != "Is":
+                return
+            offender = _non_object_operand(expr.left, env) or _non_object_operand(expr.right, env)
+            if offender is not None:
+                span, detail = offender
+                push(
+                    "isOperatorNonObject",
+                    f"The 'Is' operator requires object operands, but {detail}, "
+                    "which is not an object.",
+                    span,
+                )
+
+        return visitor
+
+    return factory
 
 
 # -- checkTypeOfIsCompatibility (always-False) ------------------------------

@@ -101,7 +101,11 @@ from .rules.numeric_literals import check_suffixed_literal_overflow
 from .rules.object_state import check_object_variable_not_set, check_scalar_member_access
 from .rules.parameter_defaults import check_parameter_default_values
 from .rules.runtime_values import check_runtime_argument_values, check_runtime_conversion_values
-from .rules.type_of_is import check_typeof_is_compatibility, check_typeof_missing_operand
+from .rules.type_of_is import (
+    check_is_operator_operands,
+    check_typeof_is_compatibility,
+    check_typeof_missing_operand,
+)
 from .rules.undeclared import (
     check_member_not_found,
     check_non_callable_call_statement,
@@ -246,11 +250,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="assignmentTypes", run=lambda ctx, push: check_assignment_types(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="typeOfIsAlwaysFalse", procedure_expressions=lambda ctx, push: check_typeof_is_compatibility(ctx.symbols, ctx.member_ctx, push)),
     DiagnosticRuleEntry(name="typeofMissingOperand", run=lambda ctx, push: check_typeof_missing_operand(ctx.source, ctx.activity, push)),
-    # Position 80 deferred: isOperatorNonObject. The rule is an expression visitor
-    # over `x Is y` BinaryExprs; its whole oracle corpus uses a `Debug.Print <expr>`
-    # receiver, but a statement led by a reserved-name receiver (Debug/Me) parses as
-    # a raw StatementNode, so its argument expressions never reach the expression
-    # walker. Unblocking it is a foundation parser slice, not a rule gap.
+    DiagnosticRuleEntry(name="isOperatorNonObject", procedure_expressions=lambda ctx, push: check_is_operator_operands(ctx.symbols, push)),
     DiagnosticRuleEntry(name="nonScalarBinaryOperand", procedure_expressions=lambda ctx, push: check_binary_operand_scalar(ctx.symbols, push)),
     DiagnosticRuleEntry(name="argumentShapeMismatch", procedure_statements=lambda ctx, push: check_argument_shape(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="suffixedLiteralOverflow", run=lambda ctx, push: check_suffixed_literal_overflow(ctx.source, ctx.activity, push)),
