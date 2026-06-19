@@ -25,6 +25,7 @@ from .rules.arrays import (
     check_unallocated_dynamic_array_access,
 )
 from .rules.assignments import check_const_assignment, check_mid_statement_literal_target
+from .rules.binary_operand_scalar import check_binary_operand_scalar
 from .rules.control_flow import (
     check_duplicate_case_else,
     check_duplicate_labels,
@@ -191,6 +192,8 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # Positions 71-78 deferred: memberNotFound (M9), the argument/runtime/assignment
     # type rules (M8 foundation), and typeOfIsAlwaysFalse (M9 host).
     DiagnosticRuleEntry(name="typeofMissingOperand", run=lambda ctx, push: check_typeof_missing_operand(ctx.source, ctx.activity, push)),
-    # Positions 80-82 deferred: isOperatorNonObject, nonScalarBinaryOperand, argumentShapeMismatch.
+    # Position 80 deferred: isOperatorNonObject (type_environment).
+    DiagnosticRuleEntry(name="nonScalarBinaryOperand", procedure_expressions=lambda ctx, push: check_binary_operand_scalar(ctx.symbols, push)),
+    # Position 82 deferred: argumentShapeMismatch (call extraction + inference).
     DiagnosticRuleEntry(name="suffixedLiteralOverflow", run=lambda ctx, push: check_suffixed_literal_overflow(ctx.source, ctx.activity, push)),
 )

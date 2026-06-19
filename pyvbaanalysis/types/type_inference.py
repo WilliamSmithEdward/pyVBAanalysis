@@ -82,6 +82,15 @@ def _shape_of(sym: VbaSymbol) -> DeclaredValueShape:
     )
 
 
+def same_module_type_names(symbols: ModuleSymbols) -> set[str]:
+    """Lowercased names of user-defined Type declarations in this module."""
+    return {
+        sym.name.lower()
+        for sym in (symbols.root.children or [])
+        if sym.kind is VbaSymbolKind.TYPE
+    }
+
+
 def _return_assignment_type_for(proc: ProcedureNode) -> str | None:
     if proc.proc_kind in (ProcKind.FUNCTION, ProcKind.PROPERTY_GET):
         return proc.return_type
