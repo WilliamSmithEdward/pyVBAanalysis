@@ -31,6 +31,16 @@ def test_module_shadowing_mid_suppresses() -> None:
     assert _CODE not in _codes('Sub S\n    Dim Mid As String\n    Mid$("abc", 1) = "z"\nEnd Sub')
 
 
+def test_const_assignment() -> None:
+    code = "const-assignment"
+    # Assigning to a local or module-level Const is a compile error.
+    assert code in _codes("Sub S\n    Const C As Long = 5\n    C = 10\nEnd Sub")
+    assert code in _codes("Const M As Long = 1\nSub S\n    M = 2\nEnd Sub")
+    # A regular variable assignment, and reading a Const, are fine.
+    assert code not in _codes("Sub S\n    Dim x As Long\n    x = 5\nEnd Sub")
+    assert code not in _codes("Sub S\n    Const C As Long = 5\n    Dim x As Long\n    x = C\nEnd Sub")
+
+
 def test_oracle_asserted_cases() -> None:
     if asserted_cases(_CODE):
         assert assert_oracle_behavior(_CODE) > 0

@@ -8,19 +8,63 @@ rules (assignment type mismatch, Set object types) land in M8.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Sequence
 
 from ...conditional import ConditionalActivityTracker
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import LeafStatementNode, ModuleNode, ProcedureNode, Span
-from ...symbols.symbol_model import ModuleSymbols
+from ...symbols.name_resolution import (
+    BareIdentifierContext,
+    BareIdentifierResolutionInput,
+    BareIdentifierResolutionScope,
+    resolve_bare_identifier_binding,
+)
+from ...symbols.symbol_model import ModuleSymbols, VbaSymbol, VbaSymbolKind
+from ...types.type_inference import procedure_symbol_for
 from ..context import PushFn
 from ..walker import (
+    ProcedureStatementVisitor,
     active_module_members,
+    bare_assignment_target,
     for_each_statement,
     statement_tokens_after_leading_label,
     token_name,
 )
+
+
+def check_const_assignment(
+    source: str,
+    symbols: ModuleSymbols,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    push: PushFn,
+) -> ProcedureStatementVisitor:
+    def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
+        proc_sym = procedure_symbol_for(symbols, member)
+
+        def visitor(stmt: LeafStatementNode) -> None:
+            hit = bare_assignment_target(source, stmt.span)
+            if hit is None:
+                return
+            binding = resolve_bare_identifier_binding(
+                BareIdentifierResolutionInput(
+                    current_module=symbols,
+                    name=hit[0],
+                    context=BareIdentifierContext.ASSIGNMENT_TARGET,
+                    enclosing_procedure=proc_sym,
+                    project_visible_symbols=list(project_visible_symbols)
+                    if project_visible_symbols
+                    else [],
+                )
+            )
+            if binding.scope is not BareIdentifierResolutionScope.AMBIGUOUS and any(
+                d.kind is VbaSymbolKind.CONSTANT for d in binding.definitions
+            ):
+                push("constAssignment", f"Cannot assign to constant '{hit[0]}'.", hit[1])
+
+        return visitor
+
+    return factory
 
 _TYPE_CHAR_SUFFIX = re.compile(r"[$%&!#@]$")
 

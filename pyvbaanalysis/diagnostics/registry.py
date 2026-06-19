@@ -24,7 +24,7 @@ from .rules.arrays import (
     check_redim_preserve_dimensions,
     check_unallocated_dynamic_array_access,
 )
-from .rules.assignments import check_mid_statement_literal_target
+from .rules.assignments import check_const_assignment, check_mid_statement_literal_target
 from .rules.control_flow import (
     check_duplicate_case_else,
     check_duplicate_labels,
@@ -78,6 +78,7 @@ from .rules.module_kind import (
 )
 from .rules.numeric_literals import check_suffixed_literal_overflow
 from .rules.object_state import check_object_variable_not_set
+from .rules.type_of_is import check_typeof_missing_operand
 from .walker import ProcedureStatementVisitor
 
 
@@ -128,8 +129,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="tooManyParameters", run=lambda ctx, push: check_too_many_parameters(ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="identifierTooLong", run=lambda ctx, push: check_identifier_too_long(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="udtParameterConstraints", run=lambda ctx, push: check_udt_parameter_constraints(ctx.mod, ctx.activity, push)),
-    # Positions 12-15 deferred: ambiguousEnumMemberReferences (M8/M9), constAssignment
-    # (M8), optionExplicit + undeclaredVariables (undeclared family, M8/M9).
+    # Position 12 deferred: ambiguousEnumMemberReferences (M9, needs project + host surfaces).
+    DiagnosticRuleEntry(name="constAssignment", procedure_statements=lambda ctx, push: check_const_assignment(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
+    # Positions 14-15 deferred: optionExplicit + undeclaredVariables (undeclared family, M9).
     DiagnosticRuleEntry(name="optionPlacement", run=lambda ctx, push: check_option_placement(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="duplicateOption", run=lambda ctx, push: check_duplicate_options(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="procedureHeader", run=lambda ctx, push: check_procedure_header(ctx.source, ctx.mod, ctx.activity, push)),
@@ -186,7 +188,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # env + member surface) are deferred to M8.
     DiagnosticRuleEntry(name="arrayBoundIntrinsicArguments", procedure_statements=lambda ctx, push: check_array_bound_intrinsic_arguments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="objectVariableNotSet", run=lambda ctx, push: check_object_variable_not_set(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
-    # memberNotFound and the type/call/host/array rules between here and the
-    # numeric family remain deferred to M7 (arrays) / M8 / M9.
+    # Positions 71-78 deferred: memberNotFound (M9), the argument/runtime/assignment
+    # type rules (M8 foundation), and typeOfIsAlwaysFalse (M9 host).
+    DiagnosticRuleEntry(name="typeofMissingOperand", run=lambda ctx, push: check_typeof_missing_operand(ctx.source, ctx.activity, push)),
+    # Positions 80-82 deferred: isOperatorNonObject, nonScalarBinaryOperand, argumentShapeMismatch.
     DiagnosticRuleEntry(name="suffixedLiteralOverflow", run=lambda ctx, push: check_suffixed_literal_overflow(ctx.source, ctx.activity, push)),
 )
