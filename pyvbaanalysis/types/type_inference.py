@@ -192,6 +192,29 @@ def _source_identifier_binding(
     )
 
 
+def source_identifier_binding(
+    symbols: ModuleSymbols,
+    proc_sym: VbaSymbol | None,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    name: str,
+    context: BareIdentifierContext,
+) -> BareIdentifierResolution:
+    """Resolve a bare identifier to its binding (the public binder seam for rules)."""
+    return _source_identifier_binding(symbols, proc_sym, project_visible_symbols, name, context)
+
+
+def source_identifier_bound(
+    symbols: ModuleSymbols,
+    proc_sym: VbaSymbol | None,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    name: str,
+    context: BareIdentifierContext,
+) -> bool:
+    """Whether a bare identifier resolves to any source binding (scope != UNRESOLVED)."""
+    binding = source_identifier_binding(symbols, proc_sym, project_visible_symbols, name, context)
+    return binding.scope is not BareIdentifierResolutionScope.UNRESOLVED
+
+
 def declared_type_for_source_binding(
     symbols: ModuleSymbols,
     proc_sym: VbaSymbol | None,

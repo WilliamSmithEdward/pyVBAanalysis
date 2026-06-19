@@ -99,6 +99,12 @@ from .rules.object_state import check_object_variable_not_set, check_scalar_memb
 from .rules.parameter_defaults import check_parameter_default_values
 from .rules.runtime_values import check_runtime_argument_values, check_runtime_conversion_values
 from .rules.type_of_is import check_typeof_missing_operand
+from .rules.undeclared import (
+    check_non_callable_call_statement,
+    check_option_explicit,
+    check_undeclared_variables,
+    check_unknown_call_statement,
+)
 from .walker import ProcedureStatementVisitor
 
 
@@ -110,6 +116,17 @@ class DiagnosticRuleEntry:
     run: Callable[[RulePassContext, PushFn], None] | None = None
     procedure_statements: Callable[[RulePassContext, PushFn], ProcedureStatementVisitor] | None = None
     procedure_expressions: Callable[[RulePassContext, PushFn], ProcedureExpressionVisitor] | None = None
+
+
+def _unknown_call_statement(ctx: RulePassContext, push: PushFn) -> ProcedureStatementVisitor:
+    """unknownCallStatement self-gate: silent unless the project supplied the visible
+    procedure-name set (mirrors registry.ts — without it every call looks unknown)."""
+    known_procedures = ctx.opts.known_procedures
+    if known_procedures is None:
+        return lambda member: None
+    return check_unknown_call_statement(
+        ctx.source, ctx.symbols, known_procedures, ctx.opts.project_visible_symbols, push
+    )
 
 
 # The ordered table of active rules. The ORDER is the diagnostic output-order
@@ -151,7 +168,8 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="udtParameterConstraints", run=lambda ctx, push: check_udt_parameter_constraints(ctx.mod, ctx.activity, push)),
     # Position 12 deferred: ambiguousEnumMemberReferences (M9, needs project + host surfaces).
     DiagnosticRuleEntry(name="constAssignment", procedure_statements=lambda ctx, push: check_const_assignment(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
-    # Positions 14-15 deferred: optionExplicit + undeclaredVariables (undeclared family, M9).
+    DiagnosticRuleEntry(name="optionExplicit", run=lambda ctx, push: check_option_explicit(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="undeclaredVariables", run=lambda ctx, push: check_undeclared_variables(ctx.source, ctx.mod, ctx.symbols, ctx.activity, ctx.opts.known_identifiers, ctx.opts.project_procedures, ctx.opts.project_class_members, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="optionPlacement", run=lambda ctx, push: check_option_placement(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="duplicateOption", run=lambda ctx, push: check_duplicate_options(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="procedureHeader", run=lambda ctx, push: check_procedure_header(ctx.source, ctx.mod, ctx.activity, push)),
@@ -211,7 +229,8 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="arrayBoundIntrinsicArguments", procedure_statements=lambda ctx, push: check_array_bound_intrinsic_arguments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="scalarMemberAccess", procedure_statements=lambda ctx, push: check_scalar_member_access(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="objectVariableNotSet", run=lambda ctx, push: check_object_variable_not_set(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
-    # Positions 71-72 deferred: memberNotFound / nonCallableCallStatement (M9 host).
+    # Position 71 deferred: memberNotFound (member-completion engine, M9 in progress).
+    DiagnosticRuleEntry(name="nonCallableCallStatement", procedure_statements=lambda ctx, push: check_non_callable_call_statement(ctx.source, ctx.symbols, ctx.opts.known_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="argumentCount", procedure_statements=lambda ctx, push: check_argument_count(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="argumentTypes", procedure_statements=lambda ctx, push: check_argument_types(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="runtimeArgumentValues", procedure_statements=lambda ctx, push: check_runtime_argument_values(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_integer_constants, ctx.opts.project_visible_symbols, ctx.activity, push)),
@@ -228,4 +247,5 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="argumentShapeMismatch", procedure_statements=lambda ctx, push: check_argument_shape(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="suffixedLiteralOverflow", run=lambda ctx, push: check_suffixed_literal_overflow(ctx.source, ctx.activity, push)),
     DiagnosticRuleEntry(name="missingReturnAssignments", run=lambda ctx, push: check_missing_return_assignments(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.activity, push)),
+    DiagnosticRuleEntry(name="unknownCallStatement", procedure_statements=_unknown_call_statement),
 )
