@@ -58,7 +58,7 @@ from .rules.declarations import (
     check_udt_parameter_constraints,
     check_unexpected_declaration_tokens,
 )
-from .rules.expressions import check_unbalanced_parens
+from .rules.expressions import check_division_by_zero_expressions, check_unbalanced_parens
 from .rules.duplicates import (
     check_duplicate_declarations,
     check_duplicate_enum_members,
@@ -150,8 +150,8 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="constValueNotConstant", run=lambda ctx, push: check_non_constant_const_values(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="enumMemberNotConstant", run=lambda ctx, push: check_non_constant_enum_member_values(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="unbalancedParens", run=lambda ctx, push: check_unbalanced_parens(ctx.source, push)),
-    # Positions 32-33 deferred: invalid-expression-syntax + division-by-zero
-    # (call extraction / type inference, M8).
+    # Position 32 deferred: invalid-expression-syntax (member-completion context, M9).
+    DiagnosticRuleEntry(name="divisionByZeroExpressions", procedure_statements=lambda ctx, push: check_division_by_zero_expressions(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_integer_constants, ctx.opts.project_visible_symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="dimInitializer", run=lambda ctx, push: check_dim_initializer(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="invalidRedimTargets", procedure_statements=lambda ctx, push: check_invalid_redim_targets(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="redimImpossibleBounds", procedure_statements=lambda ctx, push: check_redim_impossible_bounds(ctx.source, ctx.mod, ctx.activity, push)),

@@ -22,7 +22,8 @@ from ..constants.integer_constant_expression import (
     evaluate_integer_constant_expression,
     resolve_raw_integer_constants,
 )
-from ..parser.nodes import BodyNode, EnumNode, ModuleNode, VariableGroupNode
+from ..lexer.token_kinds import VbaToken
+from ..parser.nodes import BodyNode, EnumNode, ModuleNode, Span, VariableGroupNode
 from .walker import active_module_members, for_each_variable_group
 
 
@@ -72,6 +73,21 @@ def collect_body_literal_integer_constants(
 
 def resolve_fixed_length_string_size(raw: str, constants: IntegerConstantLookup) -> int | None:
     """Resolve a fixed-length String size expression to an integer, or None."""
+    return evaluate_integer_constant_expression(raw, constants)
+
+
+def fold_integer_expression_tokens(
+    source: str,
+    span: Span,
+    toks: Sequence[VbaToken],
+    start: int,
+    end_exclusive: int,
+    constants: IntegerConstantLookup,
+) -> int | None:
+    """Evaluate the integer value of a token sub-range, or None if not constant."""
+    if start >= end_exclusive:
+        return None
+    raw = source[span.start + toks[start].start : span.start + toks[end_exclusive - 1].end]
     return evaluate_integer_constant_expression(raw, constants)
 
 
