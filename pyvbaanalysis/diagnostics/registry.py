@@ -192,7 +192,8 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # Positions 71-78 deferred: memberNotFound (M9), the argument/runtime/assignment
     # type rules (M8 foundation), and typeOfIsAlwaysFalse (M9 host).
     DiagnosticRuleEntry(name="typeofMissingOperand", run=lambda ctx, push: check_typeof_missing_operand(ctx.source, ctx.activity, push)),
-    # Position 80 deferred: isOperatorNonObject (type_environment).
+    # Position 80 deferred: isOperatorNonObject (implemented; blocked by a lexer
+    # parity gap where Debug.X / Me.X receivers do not parse as expressions).
     DiagnosticRuleEntry(name="nonScalarBinaryOperand", procedure_expressions=lambda ctx, push: check_binary_operand_scalar(ctx.symbols, push)),
     # Position 82 deferred: argumentShapeMismatch (call extraction + inference).
     DiagnosticRuleEntry(name="suffixedLiteralOverflow", run=lambda ctx, push: check_suffixed_literal_overflow(ctx.source, ctx.activity, push)),

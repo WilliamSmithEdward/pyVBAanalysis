@@ -1,8 +1,13 @@
 """Rule family: TypeOf ... Is expression rules.
 
 Ported from xlide_vscode/src/analyzer/diagnostics/rules/typeOfIs.ts. The
-TypeOf-missing-operand syntax check is host-free; typeof-is-always-false needs
-the host object-compatibility tables (M9) and is deferred.
+TypeOf-missing-operand syntax check is host-free and ported. is-operator-non-object
+is implemented but deferred: its oracle cases use `Debug.Print n Is Nothing`, and
+the Python lexer classifies the intrinsic-object keyword `Debug` as a keyword (not
+an identifier), so `Debug.<member>` does not parse as an expression and the
+expression-AST walk never reaches the `Is` node. That is a lexer/parser parity
+gap (agent.md Risk 4) to fix at the foundation level; typeof-is-always-false
+additionally needs the host object-compatibility tables (M9).
 """
 
 from __future__ import annotations
