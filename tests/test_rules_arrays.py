@@ -18,6 +18,7 @@ _ARRAY_CODES = (
     "invalid-erase-target",
     "erase-requires-array",
     "unallocated-dynamic-array-access",
+    "array-bound-requires-array",
 )
 
 
@@ -166,6 +167,19 @@ def test_unallocated_dynamic_array_access() -> None:
     assert code not in _codes(f"Sub S\n    {arr}    Debug.Print obj.values(0)\nEnd Sub")
 
 
+def test_array_bound_intrinsic_arguments() -> None:
+    code = "array-bound-requires-array"
+    # LBound/UBound on a scalar argument is a compile error.
+    assert code in _codes("Sub S\n    Dim Value As Long\n    Debug.Print LBound(Value)\nEnd Sub")
+    assert code in _codes("Sub S\n    Dim Value As Long\n    Debug.Print UBound(Value)\nEnd Sub")
+    # An array argument is valid; Variant is not a known scalar.
+    assert code not in _codes("Sub S\n    Dim a(1 To 3) As Long\n    Debug.Print LBound(a)\nEnd Sub")
+    assert code not in _codes("Sub S\n    Dim d() As Long\n    Debug.Print UBound(d)\nEnd Sub")
+    assert code not in _codes("Sub S\n    Dim v As Variant\n    Debug.Print LBound(v)\nEnd Sub")
+    # obj.LBound (member access) is not the intrinsic.
+    assert code not in _codes("Sub S\n    Dim Value As Long\n    Debug.Print obj.LBound(Value)\nEnd Sub")
+
+
 def test_oracle_asserted_cases() -> None:
     for code in (
         "redim-impossible-bounds",
@@ -175,6 +189,7 @@ def test_oracle_asserted_cases() -> None:
         "scalar-redim",
         "erase-requires-array",
         "unallocated-dynamic-array-access",
+        "array-bound-requires-array",
     ):
         if asserted_cases(code):
             assert assert_oracle_behavior(code) > 0

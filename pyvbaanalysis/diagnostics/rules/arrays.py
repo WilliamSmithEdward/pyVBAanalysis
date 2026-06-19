@@ -920,3 +920,81 @@ def _dynamic_array_touches_in_statement(
     toks = statement_tokens_after_leading_label(source, stmt.span)
     out.update(tracked_locals_passed_as_call_arguments(toks, lambda name: name in arrays))
     return out
+
+
+# -- checkArrayBoundIntrinsicArguments -------------------------------------
+
+
+def check_array_bound_intrinsic_arguments(
+    source: str,
+    symbols: ModuleSymbols,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    push: PushFn,
+) -> ProcedureStatementVisitor:
+    def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
+        shapes = declaration_shape_environment_for(symbols, member)
+        proc_sym = procedure_symbol_for(symbols, member)
+
+        def visitor(stmt: LeafStatementNode) -> None:
+            for function_name, name, hit_span, as_type in _array_bound_scalar_arguments(
+                source, stmt.span, shapes, symbols, proc_sym, project_visible_symbols
+            ):
+                push(
+                    "arrayBoundRequiresArray",
+                    f"{function_name} requires an array argument, "
+                    f"but '{name}' is declared As {as_type}.",
+                    hit_span,
+                )
+
+        return visitor
+
+    return factory
+
+
+def _array_bound_scalar_arguments(
+    source: str,
+    span: Span,
+    shapes: dict[str, DeclaredValueShape],
+    symbols: ModuleSymbols,
+    proc_sym: VbaSymbol | None,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+) -> list[tuple[str, str, Span, str]]:
+    toks = statement_tokens(source, span)
+    hits: list[tuple[str, str, Span, str]] = []
+    for i in range(len(toks) - 2):
+        function_name = token_name(toks[i])
+        if function_name is None or function_name.lower() not in ("lbound", "ubound"):
+            continue
+        if toks[i + 1].raw_text != "(" or not _is_bare_or_vba_qualified_intrinsic_call(toks, i):
+            continue
+        close = match_paren_from(toks, i + 1)
+        if close < 0 or close <= i + 2:
+            continue
+        slots = split_top_level_token_groups(toks, i + 2, ",", close)
+        first_slot = slots[0] if slots else []
+        if len(first_slot) != 1:
+            continue
+        arg_name = token_name(first_slot[0])
+        if arg_name is None:
+            continue
+        resolved = declared_shape_for_source_binding(
+            symbols, proc_sym, project_visible_symbols, arg_name, BareIdentifierContext.EXPRESSION
+        )
+        shape = resolved.shape if resolved.resolved else shapes.get(arg_name.lower())
+        if shape is None:
+            continue
+        as_type = shape.as_type
+        if shape.is_array or not as_type:
+            continue
+        normalized = normalize_type(as_type)
+        if not normalized or not is_known_scalar_type(normalized):
+            continue
+        hits.append(
+            (
+                function_name,
+                arg_name,
+                Span(span.start + first_slot[0].start, span.start + first_slot[0].end),
+                as_type,
+            )
+        )
+    return hits

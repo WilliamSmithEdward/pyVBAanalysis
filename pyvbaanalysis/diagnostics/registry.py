@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from .context import PushFn, RulePassContext
 from .exprwalk import ProcedureExpressionVisitor
 from .rules.arrays import (
+    check_array_bound_intrinsic_arguments,
     check_array_declaration_bounds,
     check_erase_targets,
     check_fixed_array_subscript_bounds,
@@ -181,9 +182,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="duplicateCaseElse", run=lambda ctx, push: check_duplicate_case_else(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="malformedStatements", run=lambda ctx, push: check_malformed_statements(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="elseWithoutIf", run=lambda ctx, push: check_else_without_if(ctx.source, ctx.mod, ctx.activity, push)),
-    # forEachLoopTypes (type inference + host), arrayBoundIntrinsicArguments (call
-    # extraction), and scalarMemberAccess (type env + member surface) are deferred
-    # to M8 and sit between elseWithoutIf and objectVariableNotSet in registry.ts.
+    # forEachLoopTypes (67, type inference + host) and scalarMemberAccess (69, type
+    # env + member surface) are deferred to M8.
+    DiagnosticRuleEntry(name="arrayBoundIntrinsicArguments", procedure_statements=lambda ctx, push: check_array_bound_intrinsic_arguments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="objectVariableNotSet", run=lambda ctx, push: check_object_variable_not_set(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
     # memberNotFound and the type/call/host/array rules between here and the
     # numeric family remain deferred to M7 (arrays) / M8 / M9.
