@@ -66,7 +66,13 @@ from .rules.declarations import (
     check_udt_parameter_constraints,
     check_unexpected_declaration_tokens,
 )
-from .rules.expressions import check_division_by_zero_expressions, check_unbalanced_parens
+from .rules.expressions import (
+    check_call_parens,
+    check_division_by_zero_expressions,
+    check_expression_call_parens,
+    check_invalid_expression_syntax,
+    check_unbalanced_parens,
+)
 from .rules.duplicates import (
     check_duplicate_declarations,
     check_duplicate_enum_members,
@@ -158,7 +164,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="constValueNotConstant", run=lambda ctx, push: check_non_constant_const_values(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="enumMemberNotConstant", run=lambda ctx, push: check_non_constant_enum_member_values(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="unbalancedParens", run=lambda ctx, push: check_unbalanced_parens(ctx.source, push)),
-    # Position 32 deferred: invalid-expression-syntax (member-completion context, M9).
+    DiagnosticRuleEntry(name="invalidExpressionSyntax", procedure_statements=lambda ctx, push: check_invalid_expression_syntax(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="divisionByZeroExpressions", procedure_statements=lambda ctx, push: check_division_by_zero_expressions(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_integer_constants, ctx.opts.project_visible_symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="dimInitializer", run=lambda ctx, push: check_dim_initializer(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="invalidRedimTargets", procedure_statements=lambda ctx, push: check_invalid_redim_targets(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.activity, push)),
@@ -183,8 +189,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="implementsStatementPlacement", run=lambda ctx, push: check_implements_statement_placement(ctx.source, ctx.mod, ctx.module_kind, ctx.activity, push)),
     DiagnosticRuleEntry(name="raiseEventTargets", run=lambda ctx, push: check_raise_event_targets(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="declarePtrSafeForWin64", run=lambda ctx, push: check_declare_ptr_safe_for_win64(ctx.source, ctx.mod, ctx.opts.conditional_compilation, ctx.activity, push)),
-    # Positions 54-58 deferred: eventHandlerModuleScope (completion), invalidAsTypeNames
-    # (M9), and the parenthesized-call rules (memberCtx / call extraction, M8).
+    # Positions 54-55 deferred: eventHandlerModuleScope (completion) + invalidAsTypeNames (M9).
+    DiagnosticRuleEntry(name="callParens", procedure_statements=lambda ctx, push: check_call_parens(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
+    DiagnosticRuleEntry(name="expressionCallParens", procedure_statements=lambda ctx, push: check_expression_call_parens(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="setAssignments", procedure_statements=lambda ctx, push: check_set_assignments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     # -- control-flow family (positions 59-66, self-contained subset) --
     DiagnosticRuleEntry(name="exitStatements", procedure_statements=lambda ctx, push: check_exit_statements(ctx.source, push)),
