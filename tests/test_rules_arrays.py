@@ -12,6 +12,7 @@ _ARRAY_CODES = (
     "array-declaration-impossible-bounds",
     "too-many-array-dimensions",
     "array-subscript-out-of-bounds",
+    "redim-preserve-dimension-change",
 )
 
 
@@ -86,11 +87,32 @@ def test_array_subscript_out_of_bounds() -> None:
     assert code not in _codes(f"Sub S\n    {fixed}    obj.a(11) = 1\nEnd Sub")
 
 
+def test_redim_preserve_dimensions() -> None:
+    code = "redim-preserve-dimension-change"
+    arr = "Dim grid() As Long\n"
+    base = "    ReDim grid(1 To 2, 1 To 2)\n"
+    # Resizing only the final dimension's upper bound is allowed.
+    assert code not in _codes(f"Sub S\n    {arr}{base}    ReDim Preserve grid(1 To 2, 1 To 3)\nEnd Sub")
+    # Changing a non-final dimension is flagged.
+    assert code in _codes(f"Sub S\n    {arr}{base}    ReDim Preserve grid(1 To 3, 1 To 2)\nEnd Sub")
+    # Changing the final dimension's lower bound is flagged.
+    assert code in _codes(f"Sub S\n    {arr}{base}    ReDim Preserve grid(1 To 2, 0 To 3)\nEnd Sub")
+    # Changing the dimension count is flagged.
+    assert code in _codes(f"Sub S\n    {arr}{base}    ReDim Preserve grid(1 To 2)\nEnd Sub")
+    # A plain ReDim (not Preserve) is never flagged.
+    assert code not in _codes(f"Sub S\n    {arr}{base}    ReDim grid(1 To 5, 1 To 5)\nEnd Sub")
+    # Non-literal bounds yield no comparable key -> quiet.
+    assert code not in _codes(
+        f"Sub S\n    {arr}    ReDim grid(1 To n)\n    ReDim Preserve grid(1 To m)\nEnd Sub"
+    )
+
+
 def test_oracle_asserted_cases() -> None:
     for code in (
         "redim-impossible-bounds",
         "too-many-array-dimensions",
         "array-subscript-out-of-bounds",
+        "redim-preserve-dimension-change",
     ):
         if asserted_cases(code):
             assert assert_oracle_behavior(code) > 0

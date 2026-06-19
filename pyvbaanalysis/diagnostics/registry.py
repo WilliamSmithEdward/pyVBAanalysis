@@ -18,6 +18,7 @@ from .rules.arrays import (
     check_array_declaration_bounds,
     check_fixed_array_subscript_bounds,
     check_redim_impossible_bounds,
+    check_redim_preserve_dimensions,
 )
 from .rules.control_flow import (
     check_duplicate_case_else,
@@ -146,7 +147,8 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # invalidRedimTargets (position 35) deferred: needs the declaredShapeForSourceBinding wrapper.
     DiagnosticRuleEntry(name="redimImpossibleBounds", procedure_statements=lambda ctx, push: check_redim_impossible_bounds(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="arrayDeclarationImpossibleBounds", run=lambda ctx, push: check_array_declaration_bounds(ctx.source, ctx.mod, ctx.activity, push)),
-    # Positions 38-39 deferred: redim-preserve, unallocated access.
+    DiagnosticRuleEntry(name="redimPreserveDimensions", run=lambda ctx, push: check_redim_preserve_dimensions(ctx.source, ctx.mod, ctx.activity, push)),
+    # Position 39 deferred: unallocated-dynamic-array-access.
     DiagnosticRuleEntry(name="arraySubscriptOutOfBounds", run=lambda ctx, push: check_fixed_array_subscript_bounds(ctx.source, ctx.mod, ctx.activity, push)),
     # Positions 41-42 deferred: mid-statement, erase (M7, porting in progress).
     DiagnosticRuleEntry(name="typeDeclarationCharacterAsClause", run=lambda ctx, push: check_type_declaration_character_as_clause(ctx.mod, ctx.activity, push)),

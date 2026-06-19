@@ -11,7 +11,7 @@ Const-backed bounds stay quiet (the no-false-positive contract).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from ...conditional import ConditionalActivityTracker
@@ -24,6 +24,7 @@ from ...parser.nodes import (
     ModuleNode,
     ProcedureNode,
     Span,
+    StatementNode,
     VariableDeclNode,
     VariableGroupNode,
 )
@@ -36,6 +37,7 @@ from ..walker import (
     for_each_statement,
     for_each_variable_group,
     is_inactive_node,
+    pluralize_count,
     statement_tokens_after_leading_label,
     token_name,
     token_text,
@@ -465,3 +467,76 @@ def _check_fixed_array_subscript_bounds_procedure(
             push("arraySubscriptOutOfBounds", message, span)
 
     for_each_statement(proc.body, visit, activity)
+
+
+# -- checkRedimPreserveDimensions ------------------------------------------
+
+
+def check_redim_preserve_dimensions(
+    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    for member in active_module_members(mod, activity):
+        if isinstance(member, ProcedureNode):
+            _check_redim_preserve_dimensions_in_body(source, member.body, {}, activity, push)
+
+
+def _check_redim_preserve_dimensions_in_body(
+    source: str,
+    body: Sequence[BodyNode],
+    initial_shapes: Mapping[str, _RedimTarget],
+    activity: ConditionalActivityTracker | None,
+    push: PushFn,
+) -> None:
+    # Copy-down, no-leak-up: a shape learned inside a nested block is visible
+    # deeper in that block but does not propagate back to the enclosing body.
+    shapes = dict(initial_shapes)
+    for node in body:
+        if is_inactive_node(activity, node):
+            continue
+        if isinstance(node, StatementNode):
+            for target in _redim_statement_targets(source, node.span):
+                if target.preserve:
+                    previous = shapes.get(target.name.lower())
+                    reason = (
+                        _redim_preserve_dimension_mismatch(previous, target)
+                        if previous is not None
+                        else None
+                    )
+                    if reason is not None:
+                        push(
+                            "redimPreserveDimensionChange",
+                            f"ReDim Preserve can only resize the last dimension of "
+                            f"'{target.name}'. {reason}",
+                            target.span,
+                        )
+                if target.dimensions:
+                    shapes[target.name.lower()] = target
+            continue
+        child = getattr(node, "body", None)
+        if isinstance(child, list):
+            _check_redim_preserve_dimensions_in_body(source, child, shapes, activity, push)
+
+
+def _redim_preserve_dimension_mismatch(
+    previous: _RedimTarget, current: _RedimTarget
+) -> str | None:
+    prev_len = len(previous.dimensions)
+    cur_len = len(current.dimensions)
+    if prev_len > 0 and cur_len > 0 and prev_len != cur_len:
+        return (
+            f"Previous ReDim has {pluralize_count(prev_len, 'dimension')}, "
+            f"but this ReDim Preserve has {cur_len}."
+        )
+    comparable_count = min(prev_len, cur_len) - 1
+    for i in range(comparable_count):
+        before = previous.dimensions[i].key
+        after = current.dimensions[i].key
+        if before and after and before != after:
+            return f"Dimension {i + 1} changes before the final dimension."
+    final_index = min(prev_len, cur_len) - 1
+    if final_index >= 0:
+        before_lower = previous.dimensions[final_index].lower_key
+        after_lower = current.dimensions[final_index].lower_key
+        if before_lower and after_lower and before_lower != after_lower:
+            return f"The lower bound of dimension {final_index + 1} changes under Preserve."
+    return None
