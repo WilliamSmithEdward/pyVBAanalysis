@@ -17,6 +17,7 @@ _ARRAY_CODES = (
     "fixed-array-redim",
     "invalid-erase-target",
     "erase-requires-array",
+    "unallocated-dynamic-array-access",
 )
 
 
@@ -139,6 +140,32 @@ def test_erase_targets() -> None:
     assert "invalid-erase-target" not in _codes("Sub S\n    Dim a(1 To 3) As Long\n    Erase a\nEnd Sub")
 
 
+def test_unallocated_dynamic_array_access() -> None:
+    code = "unallocated-dynamic-array-access"
+    arr = "Dim values() As Long\n"
+    # Indexed access and LBound/UBound on an unallocated dynamic array fire.
+    assert code in _codes(f"Sub S\n    {arr}    Debug.Print values(0)\nEnd Sub")
+    assert code in _codes(f"Sub S\n    {arr}    Debug.Print LBound(values)\nEnd Sub")
+    assert code in _codes(f"Sub S\n    {arr}    Debug.Print UBound(values)\nEnd Sub")
+    # After ReDim it is allocated -> silent.
+    assert code not in _codes(f"Sub S\n    {arr}    ReDim values(1 To 3)\n    Debug.Print values(0)\nEnd Sub")
+    # Erase resets to unallocated -> fires again.
+    assert code in _codes(
+        f"Sub S\n    {arr}    ReDim values(1 To 3)\n    Erase values\n    Debug.Print values(0)\nEnd Sub"
+    )
+    # Passing to a helper makes the state unknown -> silent.
+    assert code not in _codes(f"Sub S\n    {arr}    Init values\n    Debug.Print values(0)\nEnd Sub")
+    # Branch merge: ReDim'd on every arm before access -> silent.
+    assert code not in _codes(
+        f"Sub S\n    {arr}    If c Then\n        ReDim values(1 To 2)\n"
+        "    Else\n        ReDim values(1 To 3)\n    End If\n    Debug.Print values(0)\nEnd Sub"
+    )
+    # Static / fixed-size / member-access arrays are not tracked.
+    assert code not in _codes("Sub S\n    Static s() As Long\n    Debug.Print s(0)\nEnd Sub")
+    assert code not in _codes("Sub S\n    Dim f(1 To 3) As Long\n    Debug.Print f(0)\nEnd Sub")
+    assert code not in _codes(f"Sub S\n    {arr}    Debug.Print obj.values(0)\nEnd Sub")
+
+
 def test_oracle_asserted_cases() -> None:
     for code in (
         "redim-impossible-bounds",
@@ -147,6 +174,7 @@ def test_oracle_asserted_cases() -> None:
         "redim-preserve-dimension-change",
         "scalar-redim",
         "erase-requires-array",
+        "unallocated-dynamic-array-access",
     ):
         if asserted_cases(code):
             assert assert_oracle_behavior(code) > 0

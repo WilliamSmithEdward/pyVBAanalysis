@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from ...conditional import ConditionalActivityTracker
 from ...constants.integer_constant_expression import parse_vba_integer_literal, safe_integer
+from ...flow.procedure_unstructured import procedure_has_unstructured_flow
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import (
@@ -38,10 +39,18 @@ from ...types.type_inference import (
 )
 from ...types.type_names import is_known_scalar_type, normalize_type
 from ..context import PushFn, statement_tokens
+from ..dataflow import (
+    DataflowHooks,
+    Lattice,
+    tracked_locals_passed_as_call_arguments,
+    walk_branch_merged_body,
+    walk_straight_line_body,
+)
 from ..walker import (
     ProcedureStatementVisitor,
     absolute_span,
     active_module_members,
+    bare_assignment_target,
     for_each_statement,
     for_each_variable_group,
     is_inactive_node,
@@ -713,4 +722,201 @@ def _erase_scalar_targets(
             continue
         if normalized == "object" or is_known_scalar_type(normalized):
             out.append((name, _token_group_span(span, content), as_type))
+    return out
+
+
+# -- checkUnallocatedDynamicArrayAccess ------------------------------------
+
+
+def check_unallocated_dynamic_array_access(
+    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    for member in active_module_members(mod, activity):
+        if isinstance(member, ProcedureNode):
+            _check_unallocated_dynamic_array_access_procedure(source, member, activity, push)
+
+
+def _check_unallocated_dynamic_array_access_procedure(
+    source: str, proc: ProcedureNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    arrays = _local_dynamic_array_declarations_for_body(proc.body, activity)
+    if not arrays:
+        return
+    state: dict[str, str] = dict.fromkeys(arrays, "unallocated")
+
+    def on_statement(stmt: LeafStatementNode) -> None:
+        _check_unallocated_statement(source, stmt, arrays, state, push)
+
+    def touches(stmt: LeafStatementNode) -> set[str]:
+        return _dynamic_array_touches_in_statement(source, stmt, arrays)
+
+    def demote(lower: str) -> None:
+        state[lower] = "unknown"
+
+    def restore(snapshot: Mapping[str, str]) -> None:
+        state.clear()
+        state.update(snapshot)
+
+    hooks = DataflowHooks(
+        on_statement=on_statement,
+        touches_in_statement=touches,
+        demote_to_unknown=demote,
+        snapshot_state=lambda: dict(state),
+        restore_state=restore,
+        set_state=lambda key, value: state.__setitem__(key, value),
+        lattice=Lattice(init="unallocated", good="allocated", unknown="unknown"),
+    )
+    walk = (
+        walk_straight_line_body
+        if procedure_has_unstructured_flow(source, proc, activity)
+        else walk_branch_merged_body
+    )
+    walk(proc.body, lambda node: is_inactive_node(activity, node), hooks)
+
+
+def _check_unallocated_statement(
+    source: str, stmt: LeafStatementNode, arrays: set[str], state: dict[str, str], push: PushFn
+) -> None:
+    redimmed = _redim_statement_targets(source, stmt.span)
+    if redimmed:
+        for target in redimmed:
+            if target.name.lower() in arrays and target.dimensions:
+                state[target.name.lower()] = "allocated"
+        return
+    erased = _erase_statement_simple_targets(source, stmt.span)
+    if erased:
+        for lower in erased:
+            if lower in arrays:
+                state[lower] = "unallocated"
+        return
+    for name, hit_span in _unallocated_index_accesses(source, stmt.span, arrays, state):
+        push(
+            "unallocatedDynamicArrayAccess",
+            f"Dynamic array '{name}' is not allocated before indexed access. "
+            "This will raise Run-time error '9': Subscript out of range.",
+            hit_span,
+        )
+    for function_name, name, hit_span in _unallocated_bound_calls(source, stmt.span, arrays, state):
+        push(
+            "unallocatedDynamicArrayAccess",
+            f"Dynamic array '{name}' is not allocated before {function_name}. "
+            "This will raise Run-time error '9': Subscript out of range.",
+            hit_span,
+        )
+    assignment = bare_assignment_target(source, stmt.span)
+    if assignment is not None and assignment[0].lower() in arrays:
+        state[assignment[0].lower()] = "unknown"
+    toks = statement_tokens_after_leading_label(source, stmt.span)
+    for lower in tracked_locals_passed_as_call_arguments(toks, lambda name: name in arrays):
+        if state.get(lower) == "unallocated":
+            state[lower] = "unknown"
+
+
+def _local_dynamic_array_declarations_for_body(
+    body: Sequence[BodyNode], activity: ConditionalActivityTracker | None
+) -> set[str]:
+    out: set[str] = set()
+
+    def visit(group: VariableGroupNode) -> None:
+        if group.is_const or group.modifier.lower() == "static":
+            return
+        for decl in group.declarations:
+            if decl.is_array and not decl.array_bounds:
+                out.add(decl.name.lower())
+
+    for_each_variable_group(body, visit, activity)
+    return out
+
+
+def _erase_statement_simple_targets(source: str, span: Span) -> set[str]:
+    toks = statement_tokens_after_leading_label(source, span)
+    if not toks or token_text(toks[0]) != "erase":
+        return set()
+    out: set[str] = set()
+    for group in split_top_level_token_groups(toks, 1, ","):
+        content = [tok for tok in group if tok.kind is not TokenKind.COMMENT]
+        if len(content) != 1:
+            continue
+        name = token_name(content[0])
+        if name is not None:
+            out.add(name.lower())
+    return out
+
+
+def _unallocated_index_accesses(
+    source: str, span: Span, arrays: set[str], state: Mapping[str, str]
+) -> list[tuple[str, Span]]:
+    toks = statement_tokens_after_leading_label(source, span)
+    out: list[tuple[str, Span]] = []
+    for i in range(len(toks) - 1):
+        if toks[i + 1].raw_text != "(" or (i >= 1 and toks[i - 1].raw_text in (".", "!")):
+            continue
+        name = token_name(toks[i])
+        if name is None:
+            continue
+        lower = name.lower()
+        if lower not in arrays or state.get(lower) != "unallocated":
+            continue
+        if match_paren_from(toks, i + 1) <= i + 1:
+            continue
+        out.append((name, Span(span.start + toks[i].start, span.start + toks[i].end)))
+    return out
+
+
+def _unallocated_bound_calls(
+    source: str, span: Span, arrays: set[str], state: Mapping[str, str]
+) -> list[tuple[str, str, Span]]:
+    toks = statement_tokens(source, span)
+    out: list[tuple[str, str, Span]] = []
+    for i in range(len(toks) - 2):
+        function_name = token_name(toks[i])
+        if function_name is None or function_name.lower() not in ("lbound", "ubound"):
+            continue
+        if toks[i + 1].raw_text != "(" or not _is_bare_or_vba_qualified_intrinsic_call(toks, i):
+            continue
+        close = match_paren_from(toks, i + 1)
+        if close < 0:
+            continue
+        slots = split_top_level_token_groups(toks, i + 2, ",", close)
+        first_slot = slots[0] if slots else []
+        if len(first_slot) != 1:
+            continue
+        name = token_name(first_slot[0])
+        if name is None:
+            continue
+        lower = name.lower()
+        if lower not in arrays or state.get(lower) != "unallocated":
+            continue
+        out.append(
+            (function_name, name, Span(span.start + first_slot[0].start, span.start + first_slot[0].end))
+        )
+    return out
+
+
+def _is_bare_or_vba_qualified_intrinsic_call(toks: Sequence[VbaToken], name_index: int) -> bool:
+    if name_index < 1 or toks[name_index - 1].raw_text != ".":
+        return True
+    qualifier = token_name(toks[name_index - 2]) if name_index >= 2 else None
+    return (
+        qualifier is not None
+        and qualifier.lower() == "vba"
+        and (name_index < 3 or toks[name_index - 3].raw_text != ".")
+    )
+
+
+def _dynamic_array_touches_in_statement(
+    source: str, stmt: LeafStatementNode, arrays: set[str]
+) -> set[str]:
+    out: set[str] = set()
+    for target in _redim_statement_targets(source, stmt.span):
+        if target.name.lower() in arrays:
+            out.add(target.name.lower())
+    for lower in _erase_statement_simple_targets(source, stmt.span):
+        if lower in arrays:
+            out.add(lower)
+    assignment = bare_assignment_target(source, stmt.span)
+    if assignment is not None and assignment[0].lower() in arrays:
+        out.add(assignment[0].lower())
+    toks = statement_tokens_after_leading_label(source, stmt.span)
+    out.update(tracked_locals_passed_as_call_arguments(toks, lambda name: name in arrays))
     return out

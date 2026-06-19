@@ -21,6 +21,7 @@ from .rules.arrays import (
     check_invalid_redim_targets,
     check_redim_impossible_bounds,
     check_redim_preserve_dimensions,
+    check_unallocated_dynamic_array_access,
 )
 from .rules.assignments import check_mid_statement_literal_target
 from .rules.control_flow import (
@@ -151,7 +152,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="redimImpossibleBounds", procedure_statements=lambda ctx, push: check_redim_impossible_bounds(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="arrayDeclarationImpossibleBounds", run=lambda ctx, push: check_array_declaration_bounds(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="redimPreserveDimensions", run=lambda ctx, push: check_redim_preserve_dimensions(ctx.source, ctx.mod, ctx.activity, push)),
-    # Position 39 deferred: unallocated-dynamic-array-access.
+    DiagnosticRuleEntry(name="unallocatedDynamicArrayAccess", run=lambda ctx, push: check_unallocated_dynamic_array_access(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="arraySubscriptOutOfBounds", run=lambda ctx, push: check_fixed_array_subscript_bounds(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="midStatementLiteralTarget", run=lambda ctx, push: check_mid_statement_literal_target(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="eraseTargets", procedure_statements=lambda ctx, push: check_erase_targets(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
