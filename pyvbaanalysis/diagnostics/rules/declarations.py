@@ -49,6 +49,11 @@ from ...parser.nodes import (
 )
 from ...parser.type_declaration_suffix import is_type_declaration_suffix
 from ...types.type_names import is_known_scalar_type, normalize_type
+from ..const_expr import (
+    collect_body_literal_integer_constants,
+    collect_module_literal_integer_constants,
+    resolve_fixed_length_string_size,
+)
 from ..context import PushFn, statement_tokens
 from ..walker import (
     absolute_span,
@@ -561,6 +566,67 @@ def check_type_declaration_character_as_clause(mod: ModuleNode, activity: Condit
             for param in member.params:
                 report(param, "Parameter")
             for_each_variable_group(member.body, inspect_group, activity)
+
+
+# -- checkFixedLengthStringBounds ------------------------------------------
+
+# MS-VBAL fixed-length String bounds (VBE oracle: "Invalid length for fixed-length
+# string"). The active rule resolves decimal integer literal sizes and same
+# module/procedure Const aliases that reduce to a decimal integer literal; unknown,
+# duplicate, string, and compound constants stay deferred until broader
+# constant-expression semantics are verified.
+_FIXED_LENGTH_STRING_MIN = 1
+_FIXED_LENGTH_STRING_MAX = 65526
+
+
+def check_fixed_length_string_bounds(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+    module_constants = collect_module_literal_integer_constants(mod, activity)
+
+    def inspect_declaration(decl: VariableDeclNode | TypeFieldNode, constants: dict[str, int | None]) -> None:
+        if decl.fixed_length is None or is_inactive_node(activity, decl):
+            return
+        value = resolve_fixed_length_string_size(decl.fixed_length, constants)
+        if value is None or _FIXED_LENGTH_STRING_MIN <= value <= _FIXED_LENGTH_STRING_MAX:
+            return
+        push(
+            "fixedLengthStringSize",
+            f"Fixed-length String size must be between {_FIXED_LENGTH_STRING_MIN} and "
+            f"{_FIXED_LENGTH_STRING_MAX} characters; got {value}.",
+            _fixed_length_string_length_span(source, decl.span) or decl.span,
+        )
+
+    def inspect_group(group: VariableGroupNode) -> None:
+        for decl in group.declarations:
+            inspect_declaration(decl, module_constants)
+
+    for member in active_module_members(mod, activity):
+        if isinstance(member, VariableGroupNode):
+            inspect_group(member)
+        elif isinstance(member, TypeNode):
+            for field_node in member.fields:
+                inspect_declaration(field_node, module_constants)
+        elif isinstance(member, ProcedureNode):
+            procedure_constants = dict(module_constants)
+            collect_body_literal_integer_constants(member.body, procedure_constants, activity)
+            body_groups: list[VariableGroupNode] = []
+            for_each_variable_group(member.body, body_groups.append, activity)
+            for group in body_groups:
+                for decl in group.declarations:
+                    inspect_declaration(decl, procedure_constants)
+
+
+def _fixed_length_string_length_span(source: str, span: Span) -> Span | None:
+    toks = statement_tokens(source, span)
+    as_index = next((i for i, tok in enumerate(toks) if token_text(tok) == "as"), -1)
+    if as_index < 0:
+        return None
+    type_start = as_index + 1
+    if type_start < len(toks) and token_text(toks[type_start]) == "new":
+        type_start += 1
+    fixed = parse_fixed_length_string_type(toks, type_start)
+    if fixed is None:
+        return None
+    return absolute_span(span, toks[fixed.length_index])
 
 
 # -- checkOptionPlacement --------------------------------------------------

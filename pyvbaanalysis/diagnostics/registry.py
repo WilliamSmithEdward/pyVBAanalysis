@@ -25,6 +25,7 @@ from .rules.declarations import (
     check_dim_initializer,
     check_duplicate_options,
     check_empty_type,
+    check_fixed_length_string_bounds,
     check_identifier_too_long,
     check_invalid_identifier_starts,
     check_module_declarations_after_procedures,
@@ -136,8 +137,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # Positions 35-40 deferred: the arrays family (M7).
     DiagnosticRuleEntry(name="typeDeclarationCharacterAsClause", run=lambda ctx, push: check_type_declaration_character_as_clause(ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="unexpectedDeclarationTokens", run=lambda ctx, push: check_unexpected_declaration_tokens(ctx.source, ctx.mod, ctx.activity, push)),
-    # Position 45 deferred: fixedLengthStringBounds (constExpr); positions 35-42
-    # (arrays / object-state, M7) precede it and are also deferred.
+    DiagnosticRuleEntry(name="fixedLengthStringBounds", run=lambda ctx, push: check_fixed_length_string_bounds(ctx.source, ctx.mod, ctx.activity, push)),
+    # Positions 35-42 (arrays / object-state, M7) precede typeDeclarationCharacterAsClause
+    # above and remain deferred.
     # -- moduleKind family (positions 46-53, self-contained subset) --
     DiagnosticRuleEntry(name="objectModulePublicMembers", run=lambda ctx, push: check_object_module_public_members(ctx.source, ctx.mod, ctx.module_kind, ctx.activity, push)),
     DiagnosticRuleEntry(name="eventDeclarationModuleKind", run=lambda ctx, push: check_event_declaration_module_kind(ctx.source, ctx.mod, ctx.module_kind, ctx.activity, push)),

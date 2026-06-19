@@ -16,6 +16,7 @@ _DECL_CODES = (
     "dim-initializer",
     "unexpected-declaration-token",
     "type-declaration-character-as-clause",
+    "fixed-length-string-size",
     "option-after-declaration",
     "empty-type",
     "duplicate-option",
@@ -81,6 +82,26 @@ def test_type_declaration_character_with_as_clause() -> None:
     assert "type-declaration-character-as-clause" in _codes("Dim x$ As String")
     assert "type-declaration-character-as-clause" not in _codes("Dim x As String")
     assert "type-declaration-character-as-clause" not in _codes("Dim x$")
+
+
+def test_fixed_length_string_bounds() -> None:
+    code = "fixed-length-string-size"
+    # Decimal literal sizes: 1..65526 are accepted, 0 and 65527 are rejected.
+    assert code in _codes("Sub S\n    Dim s As String * 0\nEnd Sub")
+    assert code in _codes("Sub S\n    Dim s As String * 65527\nEnd Sub")
+    assert code not in _codes("Sub S\n    Dim s As String * 1\nEnd Sub")
+    assert code not in _codes("Sub S\n    Dim s As String * 65526\nEnd Sub")
+    # A module Const integer alias resolves; an out-of-range alias still fires.
+    ok = "Private Const N As Long = 20\nSub S\n    Dim s As String * N\nEnd Sub"
+    bad = "Private Const N As Long = 65527\nSub S\n    Dim s As String * N\nEnd Sub"
+    assert code not in _codes(ok)
+    assert code in _codes(bad)
+    # Type fields are checked the same way.
+    assert code in _codes("Type T\n    f As String * 0\nEnd Type")
+    # Unknown / non-integer length stays deferred (no false positive), and a
+    # variable-length String is untouched.
+    assert code not in _codes("Sub S\n    Dim s As String * Unknown\nEnd Sub")
+    assert code not in _codes("Sub S\n    Dim s As String\nEnd Sub")
 
 
 def test_option_placement_and_duplication() -> None:

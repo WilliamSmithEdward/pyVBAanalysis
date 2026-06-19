@@ -1,0 +1,117 @@
+"""Integer constant collection for the diagnostics engine.
+
+Ported from xlide_vscode/src/analyzer/diagnostics/constExpr.ts. The evaluator
+itself lives in constants/integer_constant_expression.py (shared with the
+structural analyzer); this module owns the diagnostics-side collection of raw
+module-level and procedure-body integer constants and the fixed-length-string
+size resolution that builds on them.
+
+Only the literal-integer collection the active rules need is ported here.
+External (VBA runtime / Excel host) constant resolution and span-based integer
+expression folding stay deferred with the rules that need them (M8 / M9).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+
+from ..conditional import ConditionalActivityTracker
+from ..constants.integer_constant_expression import (
+    IntegerConstantLookup,
+    enum_member_raw_expression,
+    evaluate_integer_constant_expression,
+    resolve_raw_integer_constants,
+)
+from ..parser.nodes import BodyNode, EnumNode, ModuleNode, VariableGroupNode
+from .walker import active_module_members, for_each_variable_group
+
+
+def collect_module_literal_integer_constants(
+    mod: ModuleNode,
+    activity: ConditionalActivityTracker | None,
+    base: Mapping[str, int | None] | None = None,
+) -> dict[str, int | None]:
+    """Resolve module-level Const and Enum integer constants to their values.
+
+    Only active Const groups and Enum members participate. Each value is an
+    integer-literal expression or a reference to another such constant; anything
+    that is not a deterministic integer resolves to None. A duplicate name is
+    poisoned to None so an ambiguous constant never resolves.
+    """
+    raw_constants: dict[str, str | None] = {}
+    seen: set[str] = set()
+    for member in active_module_members(mod, activity):
+        if isinstance(member, VariableGroupNode) and member.is_const:
+            _add_raw_integer_constants(member, raw_constants, seen)
+        elif isinstance(member, EnumNode):
+            _add_raw_enum_integer_constants(member, raw_constants, seen)
+    base_map: Mapping[str, int | None] = {} if base is None else base
+    resolved: dict[str, int | None] = dict(base_map)
+    for name, value in resolve_raw_integer_constants(raw_constants, base_map).items():
+        resolved[name] = value
+    return resolved
+
+
+def collect_body_literal_integer_constants(
+    body: Sequence[BodyNode],
+    constants: dict[str, int | None],
+    activity: ConditionalActivityTracker | None,
+) -> None:
+    """Fold a procedure body's local Const integer constants into ``constants``."""
+    raw_constants: dict[str, str | None] = {}
+    seen: set[str] = set()
+
+    def collect(group: VariableGroupNode) -> None:
+        if group.is_const:
+            _add_raw_integer_constants(group, raw_constants, seen)
+
+    for_each_variable_group(body, collect, activity)
+    for name, value in resolve_raw_integer_constants(raw_constants, constants).items():
+        constants[name] = value
+
+
+def resolve_fixed_length_string_size(raw: str, constants: IntegerConstantLookup) -> int | None:
+    """Resolve a fixed-length String size expression to an integer, or None."""
+    return evaluate_integer_constant_expression(raw, constants)
+
+
+def _add_raw_integer_constants(
+    group: VariableGroupNode,
+    raw_constants: dict[str, str | None],
+    seen: set[str],
+) -> None:
+    for decl in group.declarations:
+        name = _normalize_declared_constant_name(decl.name)
+        if name is None:
+            continue
+        key = name.lower()
+        if key in seen:
+            raw_constants[key] = None
+            continue
+        seen.add(key)
+        raw_constants[key] = decl.default_raw
+
+
+def _add_raw_enum_integer_constants(
+    en: EnumNode,
+    raw_constants: dict[str, str | None],
+    seen: set[str],
+) -> None:
+    previous_name: str | None = None
+    for member in en.members:
+        name = _normalize_declared_constant_name(member.name)
+        if name is None:
+            continue
+        key = name.lower()
+        if key in seen:
+            raw_constants[key] = None
+            previous_name = name
+            continue
+        seen.add(key)
+        raw_constants[key] = enum_member_raw_expression(member.value_raw, previous_name)
+        previous_name = name
+
+
+def _normalize_declared_constant_name(raw: str) -> str | None:
+    text = raw.strip()
+    return text if text else None

@@ -36,7 +36,9 @@ _OCTAL_RE = re.compile(r"^&[oO]([0-7]+)$")
 class IntegerConstantLookup(Protocol):
     """Lookup of integer constant values by lowercased (possibly qualified) name."""
 
-    def get(self, name: str) -> int | None: ...
+    # Positional-only so a plain dict/Mapping of resolved constants satisfies the
+    # protocol (mirrors the ReadonlyMap the TypeScript rules pass in).
+    def get(self, name: str, /) -> int | None: ...
 
 
 def _is_safe_integer(value: int) -> bool:
