@@ -15,10 +15,12 @@ from dataclasses import dataclass, replace
 
 from ...conditional import ConditionalActivity, ConditionalActivityTracker
 from ...lexer.token_kinds import TokenKind
+from ...lexer.tokenize import tokenize
 from ...parser.nodes import (
     AssignmentNode,
     BodyNode,
     CallNode,
+    ConditionalDirectiveNode,
     DoBlockNode,
     ForBlockNode,
     IfBlockNode,
@@ -45,6 +47,7 @@ from ..walker import (
     token_name,
     token_text,
 )
+from .shared import scan_conditional_compilation_branch_order
 
 # -- checkExitStatements ---------------------------------------------------
 
@@ -215,6 +218,92 @@ def _check_context_body(
         elif isinstance(node, (IfBlockNode, WhileBlockNode)):
             _check_context_body(source, node.body, ctx, activity, push)
         # ConditionalDirective / VariableGroup: no context check.
+
+
+# -- checkElseBranchOrder --------------------------------------------------
+
+
+def check_else_branch_order(
+    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    _check_conditional_compilation_else_branch_order(source, mod, push)
+    _check_if_block_else_branch_order(source, mod, activity, push)
+
+
+def _check_conditional_compilation_else_branch_order(
+    source: str, mod: ModuleNode, push: PushFn
+) -> None:
+    # Conditional-compilation directives are checked structurally, regardless of
+    # branch activity (a malformed #If block fails to compile either way).
+    for issue in scan_conditional_compilation_branch_order(mod).issues:
+        if issue.kind == "elseifAfterElse":
+            message = (
+                "'#ElseIf' cannot appear after '#Else' in the same conditional-compilation block."
+            )
+        else:
+            message = "Only one '#Else' branch is allowed in a conditional-compilation block."
+        push("elseBranchOrder", message, _conditional_directive_keyword_span(source, issue.directive))
+
+
+def _check_if_block_else_branch_order(
+    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    for member in active_module_members(mod, activity):
+        if isinstance(member, ProcedureNode):
+            _check_if_block_else_branch_order_in_body(source, member.body, activity, push)
+
+
+def _check_if_block_else_branch_order_in_body(
+    source: str, body: list[BodyNode], activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    for node in body:
+        if is_inactive_node(activity, node):
+            continue
+        if isinstance(node, IfBlockNode):
+            _check_single_if_block_else_branch_order(source, node, activity, push)
+        child = getattr(node, "body", None)
+        if isinstance(child, list):
+            _check_if_block_else_branch_order_in_body(source, child, activity, push)
+
+
+def _check_single_if_block_else_branch_order(
+    source: str, node: IfBlockNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    seen_else = False
+    for child in node.body:
+        if is_inactive_node(activity, child) or not is_leaf_statement(child):
+            continue
+        toks = statement_tokens_after_leading_label(source, child.span)
+        if not toks:
+            continue
+        word = token_text(toks[0])
+        if word == "elseif" and seen_else:
+            push(
+                "elseBranchOrder",
+                "'ElseIf' cannot appear after 'Else' in the same If block.",
+                absolute_span(child.span, toks[0]),
+            )
+        elif word == "else":
+            if seen_else:
+                push(
+                    "elseBranchOrder",
+                    "Only one 'Else' branch is allowed in an If block.",
+                    absolute_span(child.span, toks[0]),
+                )
+            seen_else = True
+
+
+def _conditional_directive_keyword_span(source: str, directive: ConditionalDirectiveNode) -> Span:
+    tokens = [
+        tok
+        for tok in tokenize(source[directive.span.start : directive.span.end])
+        if tok.kind is not TokenKind.COMMENT and tok.kind is not TokenKind.NEWLINE
+    ]
+    marker = tokens[0] if tokens else None
+    keyword = tokens[1] if len(tokens) > 1 else None
+    if marker is not None and marker.kind is TokenKind.DIRECTIVE and keyword is not None:
+        return Span(directive.span.start + marker.start, directive.span.start + keyword.end)
+    return directive.span
 
 
 def check_statement_context(

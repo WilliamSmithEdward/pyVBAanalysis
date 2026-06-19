@@ -16,6 +16,7 @@ from .context import PushFn, RulePassContext
 from .exprwalk import ProcedureExpressionVisitor
 from .rules.control_flow import (
     check_duplicate_case_else,
+    check_else_branch_order,
     check_else_without_if,
     check_exit_statements,
     check_malformed_statements,
@@ -153,8 +154,8 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # (M9), and the parenthesized-call rules (memberCtx / call extraction, M8).
     # -- control-flow family (positions 59-66, self-contained subset) --
     DiagnosticRuleEntry(name="exitStatements", procedure_statements=lambda ctx, push: check_exit_statements(ctx.source, push)),
-    # Positions 54-56 deferred: duplicate/undefined labels (flow/procedureLabels),
-    # elseBranchOrder (shared conditional-compilation branch-order helper).
+    # Positions 54-55 deferred: duplicate/undefined labels (flow/procedureLabels, not yet ported).
+    DiagnosticRuleEntry(name="elseBranchOrder", run=lambda ctx, push: check_else_branch_order(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="statementContext", run=lambda ctx, push: check_statement_context(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="duplicateCaseElse", run=lambda ctx, push: check_duplicate_case_else(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="malformedStatements", run=lambda ctx, push: check_malformed_statements(ctx.source, ctx.mod, ctx.activity, push)),

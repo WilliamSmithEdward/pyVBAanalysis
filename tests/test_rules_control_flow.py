@@ -16,6 +16,7 @@ _CF_CODES = (
     "next-variable-mismatch",
     "duplicate-case-else",
     "else-without-if",
+    "else-branch-order",
     "invalid-assignment-target",
     "open-missing-for",
 )
@@ -83,6 +84,19 @@ def test_malformed_statements() -> None:
     assert "invalid-assignment-target" not in _codes("Sub S\n    x = 1\nEnd Sub")
     assert "open-missing-for" in _codes('Sub S\n    Open "f.txt" As #1\nEnd Sub')
     assert "open-missing-for" not in _codes('Sub S\n    Open "f.txt" For Input As #1\nEnd Sub')
+
+
+def test_else_branch_order() -> None:
+    code = "else-branch-order"
+    # Runtime If blocks: ElseIf/Else after the final Else is rejected; the
+    # normal ElseIf-before-Else ordering is accepted.
+    assert code in _codes("Sub S\n    If x Then\n    Else\n    ElseIf y Then\n    End If\nEnd Sub")
+    assert code in _codes("Sub S\n    If x Then\n    Else\n    Else\n    End If\nEnd Sub")
+    assert code not in _codes("Sub S\n    If x Then\n    ElseIf y Then\n    Else\n    End If\nEnd Sub")
+    # Conditional-compilation directives follow the same branch-order rule.
+    assert code in _codes("Sub S\n#If False Then\n#Else\n#ElseIf True Then\n#End If\nEnd Sub")
+    assert code in _codes("Sub S\n#If False Then\n#Else\n#Else\n#End If\nEnd Sub")
+    assert code not in _codes("Sub S\n#If False Then\n#ElseIf True Then\n#Else\n#End If\nEnd Sub")
 
 
 @pytest.mark.parametrize("code", _CF_CODES)
