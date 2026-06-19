@@ -33,6 +33,7 @@ from ..walker import (
     ProcedureStatementVisitor,
     absolute_span,
     active_module_members,
+    for_each_statement,
     for_each_variable_group,
     is_inactive_node,
     statement_tokens_after_leading_label,
@@ -322,3 +323,145 @@ def _inspect_array_declaration(source: str, decl: VariableDeclNode, push: PushFn
             f"{upper_value} for dimension {index + 1}; this is not a valid array bound.",
             _token_group_span(decl.span, dim_tokens),
         )
+
+
+# -- checkFixedArraySubscriptBounds ----------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _FixedArrayBound:
+    name: str
+    upper_value: int
+    has_explicit_lower: bool
+    lower_value: int | None = None
+
+
+def _parse_fixed_array_bounds_for_decl(
+    source: str, decl: VariableDeclNode
+) -> tuple[int | None, int, bool] | None:
+    """Returns (lower_value, upper_value, has_explicit_lower) for a single-dim fixed array."""
+    toks = statement_tokens(source, decl.span)
+    open_index = next((i for i, tok in enumerate(toks) if tok.raw_text == "("), -1)
+    if open_index < 0:
+        return None
+    close = match_paren_from(toks, open_index)
+    if close < 0:
+        return None
+    dims = [
+        [tok for tok in part if tok.kind is not TokenKind.COMMENT]
+        for part in split_top_level_token_groups(toks, open_index + 1, ",", close)
+    ]
+    dims = [dim_tokens for dim_tokens in dims if dim_tokens]
+    if len(dims) != 1:
+        return None  # multi-dimension subscript matching is out of scope
+    _key, _lower_key, lower_value, upper_value = _comparable_array_bound_key(dims[0])
+    if upper_value is None:
+        return None  # non-literal upper bound is not statically known
+    return (lower_value, upper_value, lower_value is not None)
+
+
+def _local_fixed_array_declarations_for_body(
+    source: str, body: Sequence[BodyNode], activity: ConditionalActivityTracker | None
+) -> dict[str, _FixedArrayBound]:
+    out: dict[str, _FixedArrayBound] = {}
+
+    def visit(group: VariableGroupNode) -> None:
+        if group.is_const:
+            return
+        for decl in group.declarations:
+            if not decl.is_array or not decl.array_bounds:
+                continue  # dynamic arrays (no static bounds) are out of scope
+            lower = decl.name.lower()
+            if lower in out:
+                continue
+            bounds = _parse_fixed_array_bounds_for_decl(source, decl)
+            if bounds is not None:
+                lower_value, upper_value, has_explicit_lower = bounds
+                out[lower] = _FixedArrayBound(
+                    name=decl.name,
+                    upper_value=upper_value,
+                    has_explicit_lower=has_explicit_lower,
+                    lower_value=lower_value,
+                )
+
+    for_each_variable_group(body, visit, activity)
+    return out
+
+
+def _redim_target_names_in_body(
+    source: str, body: Sequence[BodyNode], activity: ConditionalActivityTracker | None
+) -> set[str]:
+    out: set[str] = set()
+
+    def visit(stmt: LeafStatementNode) -> None:
+        for target in _redim_statement_targets(source, stmt.span):
+            out.add(target.name.lower())
+
+    for_each_statement(body, visit, activity)
+    return out
+
+
+def _fixed_array_subscript_violations(
+    source: str, span: Span, fixed: dict[str, _FixedArrayBound], excluded: set[str]
+) -> list[tuple[Span, str]]:
+    toks = statement_tokens_after_leading_label(source, span)
+    out: list[tuple[Span, str]] = []
+    for i in range(len(toks) - 1):
+        if toks[i + 1].raw_text != "(" or (i >= 1 and toks[i - 1].raw_text in (".", "!")):
+            continue
+        name = token_name(toks[i])
+        lower = name.lower() if name is not None else None
+        if name is None or lower is None or lower not in fixed or lower in excluded:
+            continue
+        close = match_paren_from(toks, i + 1)
+        if close <= i + 1:
+            continue
+        arg_toks = [tok for tok in toks[i + 2 : close] if tok.kind is not TokenKind.COMMENT]
+        slots = split_top_level_token_groups(arg_toks, 0, ",")
+        if len(slots) != 1 or len(slots[0]) == 0:
+            continue  # not a single-subscript index access (multi-dim/empty)
+        value = _comparable_array_bound_expression_value(slots[0])
+        if value is None:
+            continue  # non-literal subscript -> not statically provable
+        decl = fixed[lower]
+        low_gate = decl.lower_value if (decl.has_explicit_lower and decl.lower_value is not None) else 0
+        if value <= decl.upper_value and value >= low_gate:
+            continue
+        slot = slots[0]
+        if value > decl.upper_value:
+            detail = f"is above the array's declared upper bound {decl.upper_value}"
+        elif decl.has_explicit_lower:
+            detail = f"is below the array's declared lower bound {decl.lower_value}"
+        else:
+            detail = "is negative and out of range"
+        out.append(
+            (
+                Span(span.start + slot[0].start, span.start + slot[-1].end),
+                f"Subscript {value} for array '{decl.name}' {detail}. "
+                "This will raise Run-time error '9': Subscript out of range.",
+            )
+        )
+    return out
+
+
+def check_fixed_array_subscript_bounds(
+    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    for member in active_module_members(mod, activity):
+        if isinstance(member, ProcedureNode):
+            _check_fixed_array_subscript_bounds_procedure(source, member, activity, push)
+
+
+def _check_fixed_array_subscript_bounds_procedure(
+    source: str, proc: ProcedureNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    fixed = _local_fixed_array_declarations_for_body(source, proc.body, activity)
+    if not fixed:
+        return
+    excluded = _redim_target_names_in_body(source, proc.body, activity)
+
+    def visit(stmt: LeafStatementNode) -> None:
+        for span, message in _fixed_array_subscript_violations(source, stmt.span, fixed, excluded):
+            push("arraySubscriptOutOfBounds", message, span)
+
+    for_each_statement(proc.body, visit, activity)

@@ -11,6 +11,7 @@ _ARRAY_CODES = (
     "redim-impossible-bounds",
     "array-declaration-impossible-bounds",
     "too-many-array-dimensions",
+    "array-subscript-out-of-bounds",
 )
 
 
@@ -63,8 +64,34 @@ def test_too_many_array_dimensions() -> None:
     assert code not in _codes(f"Sub S\n    Dim a({ok}) As Long\nEnd Sub")
 
 
+def test_array_subscript_out_of_bounds() -> None:
+    code = "array-subscript-out-of-bounds"
+    fixed = "Dim a(1 To 10) As Long\n"
+    # Above the upper bound and below an explicit lower bound both fire.
+    assert code in _codes(f"Sub S\n    {fixed}    a(11) = 1\nEnd Sub")
+    assert code in _codes(f"Sub S\n    {fixed}    a(0) = 1\nEnd Sub")
+    # In-bounds subscripts stay silent.
+    assert code not in _codes(f"Sub S\n    {fixed}    a(1) = 1\nEnd Sub")
+    assert code not in _codes(f"Sub S\n    {fixed}    a(10) = 1\nEnd Sub")
+    # Single-bound Dim b(5): the low region is Option-Base-dependent (silent);
+    # only above-upper or negative fires.
+    single = "Dim b(5) As Long\n"
+    assert code not in _codes(f"Sub S\n    {single}    b(0) = 1\nEnd Sub")
+    assert code in _codes(f"Sub S\n    {single}    b(6) = 1\nEnd Sub")
+    assert code in _codes(f"Sub S\n    {single}    b(-1) = 1\nEnd Sub")
+    # Variable subscripts are not statically provable; ReDim'd and member-access
+    # arrays are excluded.
+    assert code not in _codes(f"Sub S\n    {fixed}    a(i) = 1\nEnd Sub")
+    assert code not in _codes("Sub S\n    Dim d() As Long\n    ReDim d(1 To 3)\n    d(99) = 1\nEnd Sub")
+    assert code not in _codes(f"Sub S\n    {fixed}    obj.a(11) = 1\nEnd Sub")
+
+
 def test_oracle_asserted_cases() -> None:
-    for code in ("redim-impossible-bounds", "too-many-array-dimensions"):
+    for code in (
+        "redim-impossible-bounds",
+        "too-many-array-dimensions",
+        "array-subscript-out-of-bounds",
+    ):
         if asserted_cases(code):
             assert assert_oracle_behavior(code) > 0
 
