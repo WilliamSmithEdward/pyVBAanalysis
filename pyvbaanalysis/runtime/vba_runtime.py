@@ -1,15 +1,24 @@
 """Built-in VBA runtime function/statement metadata (MS-VBAL Phase 9).
 
-Ported from the function table of xlide_vscode/src/analyzer/runtime/vbaRuntime.ts:
-the verified intrinsic functions and statements available in every VBA project
-(MsgBox, Left, CLng, Now, Array, RGB, ...). Signatures are transcribed from the
-Microsoft VBA language reference; they are never invented. The runtime constants
-and global objects feed host/external-constant inference and are deferred (M9).
+Ported from xlide_vscode/src/analyzer/runtime/vbaRuntime.ts: the verified intrinsic
+functions and statements available in every VBA project (MsgBox, Left, CLng, Now,
+Array, RGB, ...). Function signatures are transcribed from the Microsoft VBA
+language reference; they are never invented. The runtime constant + global-object
+tables (vbCrLf, vbObjectError, Err, Debug, ...) are mechanically extracted to
+data/vba_runtime_tables.json by tools/extract_runtime_tables.mjs — they feed the
+undeclared-reference negative lookup (a name that resolves to a runtime constant
+or object is never flagged undeclared).
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from typing import TypedDict
+
+_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,3 +259,56 @@ def resolve_runtime_function(name: str) -> VbaRuntimeFunction | None:
 def runtime_allows_explicit_call(fn: VbaRuntimeFunction) -> bool:
     """Whether this runtime entry may be the target of an explicit `Call` statement."""
     return fn.explicit_call != "forbidden"
+
+
+# -- runtime constant + global-object tables -------------------------------
+
+
+class VbaRuntimeConstant(TypedDict, total=False):
+    name: str
+    type: str
+    value: str | int
+    source: str
+
+
+class VbaRuntimeObjectMember(TypedDict, total=False):
+    name: str
+    kind: str
+    signature: str
+    returns: str
+    writable: bool
+    writeType: str
+
+
+class VbaRuntimeObject(TypedDict, total=False):
+    name: str
+    type: str
+    source: str
+    exhaustive: bool
+    members: list[VbaRuntimeObjectMember]
+
+
+@lru_cache(maxsize=1)
+def _runtime_tables() -> tuple[
+    dict[str, VbaRuntimeConstant], dict[str, VbaRuntimeObject], dict[str, VbaRuntimeObject]
+]:
+    raw = json.loads((_DATA_DIR / "vba_runtime_tables.json").read_text(encoding="utf-8"))
+    constants_by_lower = {c["name"].lower(): c for c in raw["constants"]}
+    objects_by_lower = {o["name"].lower(): o for o in raw["objects"]}
+    objects_by_type_lower = {o["type"].lower(): o for o in raw["objects"]}
+    return constants_by_lower, objects_by_lower, objects_by_type_lower
+
+
+def resolve_runtime_constant(name: str) -> VbaRuntimeConstant | None:
+    """A built-in VBA runtime constant (vbCrLf, vbObjectError, ...) by name."""
+    return _runtime_tables()[0].get(name.lower())
+
+
+def resolve_runtime_object(name: str) -> VbaRuntimeObject | None:
+    """A built-in VBA runtime global object (Err, Debug) by name."""
+    return _runtime_tables()[1].get(name.lower())
+
+
+def resolve_runtime_object_type(type_name: str) -> VbaRuntimeObject | None:
+    """A built-in VBA runtime object by its qualified type (VBA.ErrObject)."""
+    return _runtime_tables()[2].get(type_name.lower())

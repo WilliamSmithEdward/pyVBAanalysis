@@ -196,3 +196,13 @@ def resolve_member_return_type(
     type_index = _host_model_index(_default(model)).members_by_type.get(qualified)
     member = type_index.by_lower_name.get(member_name.lower()) if type_index is not None else None
     return member.get("returns") if member is not None else None
+
+
+@lru_cache(maxsize=1)
+def application_member_names() -> frozenset[str]:
+    """Lowercased member names of the host Application global (for the implicit-member
+    negative lookup: `Calculate`, `Range`, ... are unqualified Application members)."""
+    model = get_excel_object_model()
+    app_type = resolve_host_global("Application", model)
+    members = get_host_members(app_type, model) if app_type is not None else []
+    return frozenset(member["name"].lower() for member in members)
