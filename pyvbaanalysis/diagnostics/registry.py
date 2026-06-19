@@ -79,6 +79,7 @@ from .rules.module_kind import (
 )
 from .rules.numeric_literals import check_suffixed_literal_overflow
 from .rules.object_state import check_object_variable_not_set
+from .rules.runtime_values import check_runtime_argument_values, check_runtime_conversion_values
 from .rules.type_of_is import check_typeof_missing_operand
 from .walker import ProcedureStatementVisitor
 
@@ -189,8 +190,12 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # env + member surface) are deferred to M8.
     DiagnosticRuleEntry(name="arrayBoundIntrinsicArguments", procedure_statements=lambda ctx, push: check_array_bound_intrinsic_arguments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="objectVariableNotSet", run=lambda ctx, push: check_object_variable_not_set(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
-    # Positions 71-78 deferred: memberNotFound (M9), the argument/runtime/assignment
-    # type rules (M8 foundation), and typeOfIsAlwaysFalse (M9 host).
+    # Positions 71-74 deferred: memberNotFound (M9), argumentCount / argumentTypes
+    # (call extraction, M8 in progress).
+    DiagnosticRuleEntry(name="runtimeArgumentValues", procedure_statements=lambda ctx, push: check_runtime_argument_values(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_integer_constants, ctx.opts.project_visible_symbols, ctx.activity, push)),
+    DiagnosticRuleEntry(name="runtimeConversionValues", procedure_statements=lambda ctx, push: check_runtime_conversion_values(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
+    # Positions 77-78 deferred: assignmentTypes / missingReturnAssignments (M8 in
+    # progress), and typeOfIsAlwaysFalse (M9 host).
     DiagnosticRuleEntry(name="typeofMissingOperand", run=lambda ctx, push: check_typeof_missing_operand(ctx.source, ctx.activity, push)),
     # Position 80 deferred: isOperatorNonObject (implemented; blocked by a lexer
     # parity gap where Debug.X / Me.X receivers do not parse as expressions).

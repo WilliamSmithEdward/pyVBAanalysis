@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions, analyze_module
 from pyvbaanalysis.evidence import OracleCase, load_audit, load_oracle_cases
-from pyvbaanalysis.symbols import ModuleSymbolKind
+from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
 
 AUDIT = {a.code: a for a in load_audit()}
 CASES = {c.id: c for c in load_oracle_cases()}
@@ -20,12 +20,34 @@ _KIND = {
 }
 
 
+def _kind(module_type: str) -> ModuleSymbolKind:
+    return _KIND.get(module_type, ModuleSymbolKind.STANDARD)
+
+
 def case_codes(case: OracleCase) -> set[str]:
-    """Union of diagnostic codes analyze_module emits across a case's modules."""
+    """Union of diagnostic codes analyze_module emits across a case's modules.
+
+    Each module is analyzed with the cross-module project context the real
+    analyzer sees (mirrors how XLIDE runs a project): a ProjectIndex is built
+    from every module in the case, and each module's analysis receives the
+    project-visible procedures, integer constants, and identifier symbols. For a
+    single-module case this context is empty, so behavior is unchanged.
+    """
+    index = ProjectIndex()
+    for module in case.modules:
+        index.set_module(ModuleInput(module.name, _kind(module.module_type), module.source))
+    project_procedures = index.procedure_signatures()
     out: set[str] = set()
     for module in case.modules:
         opts = AnalyzeModuleOptions(
-            module_name=module.name, module_kind=_KIND.get(module.module_type, ModuleSymbolKind.STANDARD)
+            module_name=module.name,
+            module_kind=_kind(module.module_type),
+            project_procedures=project_procedures,
+            project_integer_constants=index.visible_external_integer_constant_expressions(module.name),
+            project_visible_symbols=index.visible_identifier_symbols(module.name),
+            known_procedures=index.visible_procedure_names(module.name),
+            known_identifiers=index.visible_identifier_names(module.name),
+            known_non_type_names=index.visible_non_type_names(module.name),
         )
         for diag in analyze_module(module.source, opts):
             out.add(diag.code)
