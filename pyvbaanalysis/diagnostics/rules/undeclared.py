@@ -75,9 +75,11 @@ from ..walker import (
     set_assignment_target,
     token_name,
 )
+from ...completion import MemberCompletionContext
 from .shared import (
     ValueReadReference,
     for_each_undeclared_reference_span,
+    resolve_exhaustive_member_surface,
     value_read_references,
 )
 from ...types.type_inference import (
@@ -118,6 +120,44 @@ def member_access_references(source: str, span: Span) -> list[MemberAccessRefere
             )
         )
     return out
+
+
+def check_member_not_found(
+    source: str,
+    member_ctx: MemberCompletionContext,
+    push: PushFn,
+) -> ProcedureStatementVisitor:
+    """`receiver.Member` where the receiver type resolves to an EXHAUSTIVE member
+    surface and `Member` is genuinely absent: "Method or data member not found".
+
+    Ported from checkMemberNotFound (undeclared.ts). Rides the shared
+    procedure-statement walk. The no-false-positive contract is the exhaustive
+    gate in resolve_exhaustive_member_surface: a non-exhaustive host type, an
+    Object/Variant receiver, or an unresolved receiver yields no surface, so the
+    rule stays silent. Public fields and known members are present in the surface,
+    so they never fire. Host events are excluded from object surfaces, so an event
+    name on an exhaustive receiver is reported absent (matching VBE)."""
+
+    def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
+        def visitor(stmt: LeafStatementNode) -> None:
+            for ref in member_access_references(source, stmt.span):
+                surface = resolve_exhaustive_member_surface(
+                    source, ref.dot_end_offset, member_ctx
+                )
+                if surface is None:
+                    continue
+                lower = ref.member.lower()
+                if any(candidate.name.lower() == lower for candidate in surface.members):
+                    continue
+                push(
+                    "memberNotFound",
+                    f"Method or data member not found: '{surface.owner}.{ref.member}'.",
+                    ref.member_span,
+                )
+
+        return visitor
+
+    return factory
 
 
 # -- unknownCallStatement --------------------------------------------------

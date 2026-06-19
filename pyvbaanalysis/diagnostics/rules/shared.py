@@ -12,6 +12,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from ...call.call_context import bare_call_statement_target as call_statement_target
+from ...completion import (
+    MemberCompletionContext,
+    MemberCompletionEntry,
+    resolve_member_surface_at,
+)
 from ...conditional import ConditionalActivityTracker, collect_conditional_directives
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import (
@@ -41,6 +46,33 @@ from ..walker import (
 
 def _at(toks: Sequence[VbaToken], i: int) -> VbaToken | None:
     return toks[i] if 0 <= i < len(toks) else None
+
+
+# -- exhaustive member-surface resolver ------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ExhaustiveMemberSurface:
+    """An EXHAUSTIVE member surface: a complete member list that proves absence."""
+
+    owner: str
+    members: list[MemberCompletionEntry]
+
+
+def resolve_exhaustive_member_surface(
+    source: str, dot_end_offset: int, member_ctx: MemberCompletionContext
+) -> ExhaustiveMemberSurface | None:
+    """The member surface at a member-access dot, but ONLY when it is exhaustive.
+
+    Ported from resolveExhaustiveMemberSurface (shared.ts). Returns None unless the
+    resolved receiver type yields an exhaustive surface — the no-false-positive gate
+    for member-not-found: a non-exhaustive host type, Object/Variant, or unresolved
+    receiver produces no surface, so no member can be proven absent.
+    """
+    surface = resolve_member_surface_at(source, dot_end_offset, member_ctx)
+    if surface is None or not surface.exhaustive:
+        return None
+    return ExhaustiveMemberSurface(owner=surface.owner, members=surface.members)
 
 
 # -- name-token hits -------------------------------------------------------

@@ -14,12 +14,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from ..completion import MemberCompletionContext
 from ..conditional import create_conditional_activity_tracker
-from ..parser.nodes import Span
+from ..lexer.token_kinds import TokenKind
+from ..lexer.tokenize import tokenize
+from ..parser.nodes import ModuleNode, Span
 from ..parser.parse_module import parse_module
 from ..symbols.build_module_symbols import BuildModuleSymbolsOptions, build_module_symbols
 from ..symbols.symbol_model import ModuleSymbolKind
-from .context import AnalyzeModuleOptions, PushFn, RulePassContext
+from .context import (
+    AnalyzeModuleOptions,
+    PushFn,
+    RulePassContext,
+    is_object_module_kind,
+)
 from .exprwalk import ProcedureExpressionVisitor, walk_procedure_expressions
 from .model import DiagnosticSeverity, VbaDiagnostic, VbaDiagnosticData
 from .registry import DIAGNOSTIC_RULE_REGISTRY
@@ -90,6 +98,7 @@ def _run_rules(source: str, opts: AnalyzeModuleOptions) -> list[VbaDiagnostic]:
             ),
         ),
         activity=create_conditional_activity_tracker(mod, opts.conditional_compilation),
+        member_ctx=diagnostic_member_completion_context(opts, source, mod),
     )
 
     # Each rule reports into its own buffer; per-statement and per-expression rules
@@ -116,3 +125,44 @@ def _run_rules(source: str, opts: AnalyzeModuleOptions) -> list[VbaDiagnostic]:
     for buffer in buffers:
         out.extend(buffer)
     return out
+
+
+def diagnostic_member_completion_context(
+    opts: AnalyzeModuleOptions, source: str, mod: ModuleNode
+) -> MemberCompletionContext:
+    """Assemble the per-pass member-resolution context (analysisContext.ts mirror).
+
+    Hard diagnostics disable Set-assignment refinement (VBE leaves those receivers
+    late-bound). The context is primed with the per-pass AST and the shared
+    full-source token stream so member resolution never re-parses or re-lexes per
+    dotted reference. `me_project_type`/`me_type` are derived from the module
+    identity; `code_names` is left unset (the diagnostics pass has no code-name map).
+    """
+    ctx = MemberCompletionContext(
+        project_class_members=opts.project_class_members,
+        allow_set_assignment_refinement=False,
+        model=opts.host_model,
+        parsed_module=mod,
+        source_tokens=[t for t in tokenize(source) if t.kind is not TokenKind.COMMENT],
+    )
+    me_project_type = _me_project_type_for(opts.module_name, opts.module_kind)
+    if me_project_type:
+        ctx.me_project_type = me_project_type
+    me_type = _me_host_type_for(opts.module_name, opts.module_kind)
+    if me_type:
+        ctx.me_type = me_type
+    return ctx
+
+
+def _me_project_type_for(
+    module_name: str | None, module_kind: ModuleSymbolKind | None
+) -> str | None:
+    return module_name if module_name and is_object_module_kind(module_kind) else None
+
+
+def _me_host_type_for(
+    module_name: str | None, module_kind: ModuleSymbolKind | None
+) -> str | None:
+    if not module_name or module_kind is not ModuleSymbolKind.DOCUMENT:
+        return None
+    return "Excel.Workbook" if module_name.lower() == "thisworkbook" else None

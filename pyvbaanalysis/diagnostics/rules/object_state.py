@@ -7,17 +7,24 @@ variable that is still Nothing when a member is accessed raises Run-time error
 falling back to the conservative straight-line walk for procedures with
 unstructured flow.
 
-M7 slice: object typing uses the host-free is_known_object_assignment_type
-(generic Object only), and the member-surface suppression (hasDefiniteMissingMember)
-is deferred to M9; both are sound for the no-false-positive contract (they only
-reduce precision, never invent a diagnostic). The scalar-member-access rule in
-the same XLIDE family needs the type environment + member surface and lands in M8.
+M9 slice: object typing uses the host-aware is_known_object_assignment_type (from
+the member-completion engine), so host-typed locals like `Dim ws As Worksheet`
+count as object variables via resolve_host_alias; and the member-surface
+suppression (hasDefiniteMissingMember) is wired to the exhaustive member surface so
+an objectVariableNotSet report is suppressed when the member is provably missing
+(suppression-only — it can REMOVE a diagnostic, never add one). The
+scalar-member-access rule in the same XLIDE family needs the type environment +
+member surface and lands in M8.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
+from ...completion import (
+    MemberCompletionContext,
+    is_known_object_assignment_type,
+)
 from ...conditional import ConditionalActivityTracker
 from ...flow.procedure_unstructured import procedure_has_unstructured_flow
 from ...lexer.token_kinds import TokenKind, VbaToken
@@ -30,8 +37,9 @@ from ...types.type_inference import (
     procedure_symbol_for,
     type_environment_for,
 )
-from ...types.type_names import is_known_object_assignment_type, is_known_scalar_type, normalize_type
+from ...types.type_names import is_known_scalar_type, normalize_type
 from ..context import PushFn, statement_tokens
+from .shared import resolve_exhaustive_member_surface
 from ..dataflow import (
     DataflowHooks,
     Lattice,
@@ -136,26 +144,33 @@ def check_object_variable_not_set(
     symbols: ModuleSymbols,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    member_ctx: MemberCompletionContext | None = None,
 ) -> None:
+    # member_ctx is keyword-defaulted so the registry can adopt the new arg without
+    # a signature break; the faithful TS order threads ctx.memberCtx here. An empty
+    # context still resolves generic Object + host aliases (the model defaults to
+    # Excel), losing only project-class precision.
+    ctx = member_ctx if member_ctx is not None else MemberCompletionContext()
     for member in active_module_members(mod, activity):
         if isinstance(member, ProcedureNode):
-            _check_procedure(source, member, symbols, activity, push)
+            _check_procedure(source, member, symbols, ctx, activity, push)
 
 
 def _check_procedure(
     source: str,
     proc: ProcedureNode,
     symbols: ModuleSymbols,
+    member_ctx: MemberCompletionContext,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
 ) -> None:
-    locals_ = _local_object_variables_for(symbols, proc)
+    locals_ = _local_object_variables_for(symbols, proc, member_ctx)
     if not locals_:
         return
     state: dict[str, str] = dict.fromkeys(locals_, "unset")
 
     def on_statement(stmt: LeafStatementNode) -> None:
-        _check_statement(source, stmt, locals_, state, push)
+        _check_statement(source, stmt, locals_, state, member_ctx, push)
 
     def on_block(node: BodyNode) -> None:
         if not isinstance(node, WithBlockNode):
@@ -203,9 +218,10 @@ def _check_statement(
     stmt: LeafStatementNode,
     locals_: set[str],
     state: dict[str, str],
+    member_ctx: MemberCompletionContext,
     push: PushFn,
 ) -> None:
-    for name, span in _unset_object_member_accesses(source, stmt.span, locals_, state):
+    for name, span in _unset_object_member_accesses(source, stmt.span, locals_, state, member_ctx):
         push("objectVariableNotSet", _not_set_message(name, "member access"), span)
     target = set_assignment_target(source, stmt.span)
     if target is not None:
@@ -220,7 +236,11 @@ def _check_statement(
 
 
 def _unset_object_member_accesses(
-    source: str, span: Span, locals_: set[str], state: Mapping[str, str]
+    source: str,
+    span: Span,
+    locals_: set[str],
+    state: Mapping[str, str],
+    member_ctx: MemberCompletionContext,
 ) -> list[tuple[str, Span]]:
     toks = statement_tokens(source, span)
     out: list[tuple[str, Span]] = []
@@ -233,12 +253,27 @@ def _unset_object_member_accesses(
         lower = name.lower()
         if lower not in locals_ or state.get(lower) != "unset":
             continue
-        # The member-surface suppression (hasDefiniteMissingMember) is deferred to
-        # M9: without the exhaustive surface we never suppress, which is sound for
-        # the accepted-case sweep because suppression only avoids double-reporting
-        # with the compile-only member-not-found rule.
+        # Suppression-only (M9): when the receiver's member surface is exhaustive and
+        # provably lacks this member, the member-not-found compile rule already owns
+        # the diagnostic, so do not also report the runtime "object variable not set"
+        # (this can only REMOVE a report, never add one).
+        member = token_name(toks[i + 2]) if i + 2 < len(toks) else None
+        if member is not None and _has_definite_missing_member(
+            source, span.start + toks[i + 1].end, member, member_ctx
+        ):
+            continue
         out.append((name, Span(span.start + toks[i].start, span.start + toks[i].end)))
     return out
+
+
+def _has_definite_missing_member(
+    source: str, dot_end_offset: int, member_name: str, member_ctx: MemberCompletionContext
+) -> bool:
+    surface = resolve_exhaustive_member_surface(source, dot_end_offset, member_ctx)
+    if surface is None:
+        return False
+    lower = member_name.lower()
+    return not any(candidate.name.lower() == lower for candidate in surface.members)
 
 
 def _set_value_is_nothing(value_tokens: Sequence[VbaToken]) -> bool:
@@ -266,7 +301,9 @@ def _unset_with_receiver(
     return (name, Span(header.start + toks[1].start, header.start + toks[1].end))
 
 
-def _local_object_variables_for(symbols: ModuleSymbols, proc: ProcedureNode) -> set[str]:
+def _local_object_variables_for(
+    symbols: ModuleSymbols, proc: ProcedureNode, member_ctx: MemberCompletionContext
+) -> set[str]:
     proc_sym = _procedure_symbol_for(symbols, proc)
     if proc_sym is None or proc_sym.children is None:
         return set()
@@ -276,7 +313,8 @@ def _local_object_variables_for(symbols: ModuleSymbols, proc: ProcedureNode) -> 
             child.kind is VbaSymbolKind.LOCAL_VARIABLE
             and child.visibility is not SymbolVisibility.STATIC
             and not child.is_array
-            and is_known_object_assignment_type(child.as_type)
+            and child.as_type
+            and is_known_object_assignment_type(child.as_type, member_ctx)
         ):
             out.add(child.name.lower())
     return out

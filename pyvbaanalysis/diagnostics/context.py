@@ -13,6 +13,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ..completion import MemberCompletionContext
 from ..conditional import ConditionalActivityTracker, ConditionalCompilationEnvironment
 from ..lexer.token_helpers import statement_tokens as _compute_statement_tokens
 from ..lexer.token_kinds import VbaToken
@@ -66,7 +67,12 @@ class PushFn(Protocol):
 
 @dataclass(slots=True)
 class RulePassContext:
-    """Everything one diagnostics pass computes once and every rule shares."""
+    """Everything one diagnostics pass computes once and every rule shares.
+
+    `member_ctx` is the member-resolution context primed with the per-pass AST and
+    full-source token stream (mirrors analysisContext.ts memberCtx assembly); the
+    member-not-found and object-state rules read it.
+    """
 
     source: str
     module_name: str
@@ -75,6 +81,7 @@ class RulePassContext:
     mod: ModuleNode
     symbols: ModuleSymbols
     activity: ConditionalActivityTracker | None
+    member_ctx: MemberCompletionContext
 
 
 def is_object_module_kind(module_kind: ModuleSymbolKind | None) -> bool:

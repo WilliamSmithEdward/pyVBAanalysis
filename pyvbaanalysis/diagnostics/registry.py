@@ -100,6 +100,7 @@ from .rules.parameter_defaults import check_parameter_default_values
 from .rules.runtime_values import check_runtime_argument_values, check_runtime_conversion_values
 from .rules.type_of_is import check_typeof_missing_operand
 from .rules.undeclared import (
+    check_member_not_found,
     check_non_callable_call_statement,
     check_option_explicit,
     check_undeclared_variables,
@@ -228,8 +229,8 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="forEachLoopTypes", run=lambda ctx, push: check_for_each_loop_types(ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="arrayBoundIntrinsicArguments", procedure_statements=lambda ctx, push: check_array_bound_intrinsic_arguments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="scalarMemberAccess", procedure_statements=lambda ctx, push: check_scalar_member_access(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
-    DiagnosticRuleEntry(name="objectVariableNotSet", run=lambda ctx, push: check_object_variable_not_set(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
-    # Position 71 deferred: memberNotFound (member-completion engine, M9 in progress).
+    DiagnosticRuleEntry(name="objectVariableNotSet", run=lambda ctx, push: check_object_variable_not_set(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push, ctx.member_ctx)),
+    DiagnosticRuleEntry(name="memberNotFound", procedure_statements=lambda ctx, push: check_member_not_found(ctx.source, ctx.member_ctx, push)),
     DiagnosticRuleEntry(name="nonCallableCallStatement", procedure_statements=lambda ctx, push: check_non_callable_call_statement(ctx.source, ctx.symbols, ctx.opts.known_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="argumentCount", procedure_statements=lambda ctx, push: check_argument_count(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="argumentTypes", procedure_statements=lambda ctx, push: check_argument_types(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),

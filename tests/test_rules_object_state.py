@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from oracle_support import accepted_cases, assert_oracle_behavior, asserted_cases, case_codes
+from oracle_support import (
+    accepted_cases,
+    assert_oracle_behavior,
+    asserted_cases,
+    oracle_false_positives,
+)
 
 from pyvbaanalysis.diagnostics import analyze_module
 
@@ -83,5 +88,11 @@ def test_oracle_asserted_cases() -> None:
 
 
 def test_no_false_positives_on_accepted_cases() -> None:
+    # object-variable-not-set is a deterministic-runtime-error: firing on a
+    # compile-only-verified accepted case is a real runtime fault, not a false
+    # positive (only runtime-verified accepted controls constrain it). Use the
+    # phase-aware guard so host-typed unset locals (e.g. Dim pt As PivotTable, only
+    # tracked now that the rule resolves host aliases) are judged correctly.
     for case in accepted_cases():
-        assert _CODE not in case_codes(case), f"{case.id}: {_CODE} false positive"
+        spurious = oracle_false_positives(case, (_CODE,))
+        assert not spurious, f"{case.id}: {_CODE} false positive {spurious}"
