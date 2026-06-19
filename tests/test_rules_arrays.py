@@ -15,6 +15,8 @@ _ARRAY_CODES = (
     "redim-preserve-dimension-change",
     "scalar-redim",
     "fixed-array-redim",
+    "invalid-erase-target",
+    "erase-requires-array",
 )
 
 
@@ -124,6 +126,19 @@ def test_invalid_redim_targets() -> None:
     assert "scalar-redim" not in _codes("Sub S\n    ReDim unknown(1 To 10)\nEnd Sub")
 
 
+def test_erase_targets() -> None:
+    # Erasing a scalar (Object or Long) is a compile error; Variant is allowed.
+    assert "erase-requires-array" in _codes("Sub S\n    Dim obj As Object\n    Erase obj\nEnd Sub")
+    assert "erase-requires-array" in _codes("Sub S\n    Dim n As Long\n    Erase n\nEnd Sub")
+    assert "erase-requires-array" not in _codes("Sub S\n    Dim v As Variant\n    Erase v\nEnd Sub")
+    # Erasing an array (fixed or dynamic) is fine.
+    assert "erase-requires-array" not in _codes("Sub S\n    Dim a(1 To 3) As Long\n    Erase a\nEnd Sub")
+    assert "erase-requires-array" not in _codes("Sub S\n    Dim d() As Long\n    Erase d\nEnd Sub")
+    # An expression target is not a variable/array name.
+    assert "invalid-erase-target" in _codes("Sub S\n    Erase 1 + 2\nEnd Sub")
+    assert "invalid-erase-target" not in _codes("Sub S\n    Dim a(1 To 3) As Long\n    Erase a\nEnd Sub")
+
+
 def test_oracle_asserted_cases() -> None:
     for code in (
         "redim-impossible-bounds",
@@ -131,6 +146,7 @@ def test_oracle_asserted_cases() -> None:
         "array-subscript-out-of-bounds",
         "redim-preserve-dimension-change",
         "scalar-redim",
+        "erase-requires-array",
     ):
         if asserted_cases(code):
             assert assert_oracle_behavior(code) > 0

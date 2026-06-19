@@ -16,6 +16,7 @@ from .context import PushFn, RulePassContext
 from .exprwalk import ProcedureExpressionVisitor
 from .rules.arrays import (
     check_array_declaration_bounds,
+    check_erase_targets,
     check_fixed_array_subscript_bounds,
     check_invalid_redim_targets,
     check_redim_impossible_bounds,
@@ -153,7 +154,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # Position 39 deferred: unallocated-dynamic-array-access.
     DiagnosticRuleEntry(name="arraySubscriptOutOfBounds", run=lambda ctx, push: check_fixed_array_subscript_bounds(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="midStatementLiteralTarget", run=lambda ctx, push: check_mid_statement_literal_target(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
-    # Position 42 deferred: erase (M7, porting in progress).
+    DiagnosticRuleEntry(name="eraseTargets", procedure_statements=lambda ctx, push: check_erase_targets(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="typeDeclarationCharacterAsClause", run=lambda ctx, push: check_type_declaration_character_as_clause(ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="unexpectedDeclarationTokens", run=lambda ctx, push: check_unexpected_declaration_tokens(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="fixedLengthStringBounds", run=lambda ctx, push: check_fixed_length_string_bounds(ctx.source, ctx.mod, ctx.activity, push)),

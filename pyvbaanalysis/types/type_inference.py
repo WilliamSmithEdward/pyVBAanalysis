@@ -45,6 +45,43 @@ class SourceDeclaredShape:
     shape: DeclaredValueShape | None = None
 
 
+_VALUE_DECLARATION_KINDS = frozenset(
+    {
+        VbaSymbolKind.PARAMETER,
+        VbaSymbolKind.LOCAL_VARIABLE,
+        VbaSymbolKind.MODULE_VARIABLE,
+        VbaSymbolKind.CONSTANT,
+    }
+)
+
+
+def declaration_shape_environment_for(
+    symbols: ModuleSymbols, proc: ProcedureNode
+) -> dict[str, DeclaredValueShape]:
+    """Syntactic declared-shape fallback for a procedure's module + local value names.
+
+    The function-return-variable shape (an Erase/assignment target named after the
+    procedure) is omitted; that is a precision-only gap, never a false positive.
+    """
+    out: dict[str, DeclaredValueShape] = {}
+    for sym in symbols.root.children or []:
+        if sym.kind in _VALUE_DECLARATION_KINDS:
+            out[sym.name.lower()] = _shape_of(sym)
+    proc_sym = procedure_symbol_for(symbols, proc)
+    for child in (proc_sym.children if proc_sym is not None else None) or []:
+        if child.kind in _VALUE_DECLARATION_KINDS:
+            out[child.name.lower()] = _shape_of(child)
+    return out
+
+
+def _shape_of(sym: VbaSymbol) -> DeclaredValueShape:
+    return DeclaredValueShape(
+        as_type=sym.as_type,
+        is_array=sym.is_array is True,
+        is_fixed_array=sym.array_bounds is not None,
+    )
+
+
 def procedure_symbol_for(symbols: ModuleSymbols, proc: ProcedureNode) -> VbaSymbol | None:
     """The module symbol for a procedure node, matched by declaration start offset."""
     for sym in symbols.root.children or []:

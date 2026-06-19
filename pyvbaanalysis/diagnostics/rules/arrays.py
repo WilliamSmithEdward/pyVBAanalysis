@@ -32,10 +32,11 @@ from ...symbols.name_resolution import BareIdentifierContext
 from ...symbols.symbol_model import ModuleSymbols, VbaSymbol
 from ...types.type_inference import (
     DeclaredValueShape,
+    declaration_shape_environment_for,
     declared_shape_for_source_binding,
     procedure_symbol_for,
 )
-from ...types.type_names import normalize_type
+from ...types.type_names import is_known_scalar_type, normalize_type
 from ..context import PushFn, statement_tokens
 from ..walker import (
     ProcedureStatementVisitor,
@@ -615,3 +616,101 @@ def _redim_preserve_dimension_mismatch(
         if before_lower and after_lower and before_lower != after_lower:
             return f"The lower bound of dimension {final_index + 1} changes under Preserve."
     return None
+
+
+# -- checkEraseTargets -----------------------------------------------------
+
+_ERASE_EXPRESSION_OPERATORS = frozenset(
+    {"+", "-", "*", "/", "\\", "^", "&", "=", "<", ">", "<=", ">=", "<>"}
+)
+
+
+def check_erase_targets(
+    source: str,
+    symbols: ModuleSymbols,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    push: PushFn,
+) -> ProcedureStatementVisitor:
+    def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
+        shapes = declaration_shape_environment_for(symbols, member)
+        proc_sym = procedure_symbol_for(symbols, member)
+
+        def visitor(stmt: LeafStatementNode) -> None:
+            for span in _invalid_erase_targets(source, stmt.span):
+                push(
+                    "invalidEraseTarget",
+                    "Erase target must be a variable or array name, not an arbitrary expression.",
+                    span,
+                )
+            for name, span, as_type in _erase_scalar_targets(
+                source, stmt.span, shapes, symbols, proc_sym, project_visible_symbols
+            ):
+                push(
+                    "eraseRequiresArray",
+                    f"Erase target '{name}' must be an array or Variant, "
+                    f"but it is declared As {as_type}.",
+                    span,
+                )
+
+        return visitor
+
+    return factory
+
+
+def _invalid_erase_targets(source: str, span: Span) -> list[Span]:
+    toks = statement_tokens_after_leading_label(source, span)
+    if not toks or token_text(toks[0]) != "erase":
+        return []
+    out: list[Span] = []
+    for group in split_top_level_token_groups(toks, 1, ","):
+        content = [tok for tok in group if tok.kind is not TokenKind.COMMENT]
+        if not content:
+            continue
+        if _erase_target_looks_variable_like(content):
+            continue
+        out.append(_token_group_span(span, content))
+    return out
+
+
+def _erase_target_looks_variable_like(toks: Sequence[VbaToken]) -> bool:
+    if token_name(toks[0]) is None:
+        return False
+    if any(tok.raw_text in _ERASE_EXPRESSION_OPERATORS for tok in toks):
+        return False
+    return toks[0].raw_text != "("
+
+
+def _erase_scalar_targets(
+    source: str,
+    span: Span,
+    shapes: dict[str, DeclaredValueShape],
+    symbols: ModuleSymbols,
+    proc_sym: VbaSymbol | None,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+) -> list[tuple[str, Span, str]]:
+    toks = statement_tokens_after_leading_label(source, span)
+    if not toks or token_text(toks[0]) != "erase":
+        return []
+    out: list[tuple[str, Span, str]] = []
+    for group in split_top_level_token_groups(toks, 1, ","):
+        content = [tok for tok in group if tok.kind is not TokenKind.COMMENT]
+        if len(content) != 1:
+            continue
+        name = token_name(content[0])
+        if name is None:
+            continue
+        resolved = declared_shape_for_source_binding(
+            symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.ASSIGNMENT_TARGET
+        )
+        shape = resolved.shape if resolved.resolved else shapes.get(name.lower())
+        if shape is None:
+            continue
+        as_type = shape.as_type
+        if shape.is_array or not as_type:
+            continue
+        normalized = normalize_type(as_type)
+        if not normalized or normalized == "variant":
+            continue
+        if normalized == "object" or is_known_scalar_type(normalized):
+            out.append((name, _token_group_span(span, content), as_type))
+    return out
