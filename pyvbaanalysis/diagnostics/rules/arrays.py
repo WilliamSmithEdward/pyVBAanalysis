@@ -28,6 +28,13 @@ from ...parser.nodes import (
     VariableDeclNode,
     VariableGroupNode,
 )
+from ...symbols.name_resolution import BareIdentifierContext
+from ...symbols.symbol_model import ModuleSymbols, VbaSymbol
+from ...types.type_inference import (
+    DeclaredValueShape,
+    declared_shape_for_source_binding,
+    procedure_symbol_for,
+)
 from ...types.type_names import normalize_type
 from ..context import PushFn, statement_tokens
 from ..walker import (
@@ -267,6 +274,74 @@ def check_redim_impossible_bounds(
                         "this will raise Run-time error '9': Subscript out of range.",
                         dimension.span,
                     )
+
+        return visitor
+
+    return factory
+
+
+# -- checkInvalidRedimTargets ----------------------------------------------
+
+
+def _redim_blocked_declaration_for_shape(
+    name: str, span: Span, shape: DeclaredValueShape | None
+) -> _RedimBlockedDeclaration | None:
+    if shape is None:
+        return None
+    if not shape.is_array:
+        if _is_variant_like_redim_target_type(shape.as_type):
+            return None
+        return _RedimBlockedDeclaration(name=name, span=span, kind="scalar")
+    if shape.is_fixed_array:
+        return _RedimBlockedDeclaration(name=name, span=span, kind="fixedArray")
+    return None
+
+
+def check_invalid_redim_targets(
+    source: str,
+    mod: ModuleNode,
+    symbols: ModuleSymbols,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    activity: ConditionalActivityTracker | None,
+    push: PushFn,
+) -> ProcedureStatementVisitor:
+    module_declarations = _redim_blocked_declarations_for_module(mod, activity)
+
+    def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
+        local_declarations = _redim_blocked_declarations_for_body(member.body, activity)
+        local_names = _declaration_names_for_body(member.body, activity)
+        proc_sym = procedure_symbol_for(symbols, member)
+
+        def visitor(stmt: LeafStatementNode) -> None:
+            for target in _redim_statement_targets(source, stmt.span):
+                lower = target.name.lower()
+                resolved = declared_shape_for_source_binding(
+                    symbols, proc_sym, project_visible_symbols, target.name,
+                    BareIdentifierContext.ASSIGNMENT_TARGET,
+                )
+                if resolved.resolved:
+                    declaration = _redim_blocked_declaration_for_shape(
+                        target.name, target.span, resolved.shape
+                    )
+                else:
+                    declaration = local_declarations.get(lower)
+                    if declaration is None and lower not in local_names:
+                        declaration = module_declarations.get(lower)
+                if declaration is None:
+                    continue
+                if declaration.kind == "scalar":
+                    push(
+                        "scalarRedim",
+                        f"Scalar variable '{target.name}' cannot be resized with ReDim; "
+                        "declare it as a dynamic array first.",
+                        target.span,
+                    )
+                    continue
+                push(
+                    "fixedArrayRedim",
+                    f"Fixed-size array '{target.name}' cannot be resized with ReDim.",
+                    target.span,
+                )
 
         return visitor
 

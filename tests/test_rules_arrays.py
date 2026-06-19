@@ -13,6 +13,8 @@ _ARRAY_CODES = (
     "too-many-array-dimensions",
     "array-subscript-out-of-bounds",
     "redim-preserve-dimension-change",
+    "scalar-redim",
+    "fixed-array-redim",
 )
 
 
@@ -107,12 +109,28 @@ def test_redim_preserve_dimensions() -> None:
     )
 
 
+def test_invalid_redim_targets() -> None:
+    # A scalar variable and a fixed-size array cannot be ReDim'd.
+    assert "scalar-redim" in _codes("Sub S\n    Dim x As Long\n    ReDim x(1 To 10)\nEnd Sub")
+    assert "fixed-array-redim" in _codes("Sub S\n    Dim a(1 To 3) As Long\n    ReDim a(1 To 9)\nEnd Sub")
+    # A dynamic array is the legal ReDim target.
+    dyn = "Sub S\n    Dim d() As Long\n    ReDim d(1 To 10)\nEnd Sub"
+    assert "scalar-redim" not in _codes(dyn)
+    assert "fixed-array-redim" not in _codes(dyn)
+    # Variant (explicit and implicit) scalars are legal implicit ReDim targets.
+    assert "scalar-redim" not in _codes("Sub S\n    Dim v As Variant\n    ReDim v(1 To 10)\nEnd Sub")
+    assert "scalar-redim" not in _codes("Sub S\n    Dim v\n    ReDim v(1 To 10)\nEnd Sub")
+    # An undeclared / unresolved name stays quiet.
+    assert "scalar-redim" not in _codes("Sub S\n    ReDim unknown(1 To 10)\nEnd Sub")
+
+
 def test_oracle_asserted_cases() -> None:
     for code in (
         "redim-impossible-bounds",
         "too-many-array-dimensions",
         "array-subscript-out-of-bounds",
         "redim-preserve-dimension-change",
+        "scalar-redim",
     ):
         if asserted_cases(code):
             assert assert_oracle_behavior(code) > 0

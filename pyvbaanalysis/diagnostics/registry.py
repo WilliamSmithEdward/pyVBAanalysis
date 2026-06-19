@@ -17,6 +17,7 @@ from .exprwalk import ProcedureExpressionVisitor
 from .rules.arrays import (
     check_array_declaration_bounds,
     check_fixed_array_subscript_bounds,
+    check_invalid_redim_targets,
     check_redim_impossible_bounds,
     check_redim_preserve_dimensions,
 )
@@ -145,7 +146,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # Positions 32-33 deferred: invalid-expression-syntax + division-by-zero
     # (call extraction / type inference, M8).
     DiagnosticRuleEntry(name="dimInitializer", run=lambda ctx, push: check_dim_initializer(ctx.source, ctx.mod, ctx.activity, push)),
-    # invalidRedimTargets (position 35) deferred: needs the declaredShapeForSourceBinding wrapper.
+    DiagnosticRuleEntry(name="invalidRedimTargets", procedure_statements=lambda ctx, push: check_invalid_redim_targets(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="redimImpossibleBounds", procedure_statements=lambda ctx, push: check_redim_impossible_bounds(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="arrayDeclarationImpossibleBounds", run=lambda ctx, push: check_array_declaration_bounds(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="redimPreserveDimensions", run=lambda ctx, push: check_redim_preserve_dimensions(ctx.source, ctx.mod, ctx.activity, push)),
