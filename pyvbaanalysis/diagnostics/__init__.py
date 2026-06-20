@@ -12,6 +12,7 @@ from .model import (
     VbaDiagnosticData,
     VbaEdit,
     VbaMissingRequiredArgumentPlaceholderData,
+    line_col,
 )
 from .registry import DIAGNOSTIC_RULE_REGISTRY, DiagnosticRuleEntry
 from .rule_metadata import (
@@ -19,10 +20,12 @@ from .rule_metadata import (
     DIAGNOSTIC_RULES,
     STRUCTURAL_DIAGNOSTIC_RULES,
     DiagnosticRuleMetadata,
+    allowed_diagnostic_severity_overrides_for_code,
     diagnostic_metadata_for_code,
     load_rule_metadata,
     normalize_diagnostic_severity_override,
     rule_metadata_by_code,
+    validate_severity_overrides,
 )
 
 __all__ = [
@@ -50,4 +53,7 @@ __all__ = [
     "DEFAULT_DIAGNOSTIC_SUPPRESSION_SCOPES",
     "load_rule_metadata",
     "rule_metadata_by_code",
+    "allowed_diagnostic_severity_overrides_for_code",
+    "validate_severity_overrides",
+    "line_col",
 ]

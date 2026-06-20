@@ -30,10 +30,12 @@ def normalize_type(type_name: str | None) -> str | None:
 
 
 def is_numeric_type(type_name: str) -> bool:
+    """True when the normalized type name is one of VBA's numeric types (Byte/Integer/Long/LongLong/LongPtr/Single/Double/Currency/Decimal)."""
     return type_name in _NUMERIC_TYPES
 
 
 def is_known_scalar_type(type_name: str) -> bool:
+    """True when the normalized type name is a known scalar: String, Boolean, Date, or any numeric type."""
     return (
         type_name == "string"
         or type_name == "boolean"

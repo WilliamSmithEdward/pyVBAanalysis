@@ -93,3 +93,16 @@ class VbaDiagnostic:
     # MS-VBAL (or other) reference for the rule, when known.
     spec_reference: str | None = None
     data: VbaDiagnosticData | None = None
+
+
+def line_col(source: str, offset: int) -> tuple[int, int]:
+    """The 1-based (line, column) of a character offset in ``source``.
+
+    Offsets are the unit of ``VbaDiagnostic.span`` (``span.start`` / ``span.end``).
+    The column counts characters from the start of the line. An offset past the end
+    of the source clamps to the end.
+    """
+    clamped = max(0, min(offset, len(source)))
+    line = source.count("\n", 0, clamped) + 1
+    last_newline = source.rfind("\n", 0, clamped)
+    return line, clamped - (last_newline + 1) + 1

@@ -56,6 +56,7 @@ class BareIdentifierResolutionInput:
 def resolve_bare_identifier_binding(
     input: BareIdentifierResolutionInput,
 ) -> BareIdentifierResolution:
+    """Resolve a bare identifier to its source-backed definition(s), searching local then module then project scope and reporting ambiguous or unresolved when no single binding wins."""
     lower_name = input.name.lower()
     local = local_identifier_matches(input.enclosing_procedure, lower_name, input.context, input.offset)
     if len(local) > 0:
@@ -127,6 +128,7 @@ def source_identifier_names(
     enclosing_procedure: VbaSymbol | None = None,
     project_visible_symbols: Sequence[VbaSymbol] = (),
 ) -> set[str]:
+    """Collect the lowercased names of every source-backed identifier visible from a context: locals, module members (and enum members), and project-visible symbols."""
     out: set[str] = set()
     return_variable = _procedure_return_variable(enclosing_procedure, BareIdentifierContext.EXPRESSION)
     if return_variable is not None:

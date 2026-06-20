@@ -1,39 +1,91 @@
 # pyVBAanalysis
 
-Pure-Python static analysis for VBA, ported from the
-[XLIDE](https://github.com/WilliamSmithEdward/xlide_vscode) analyzer.
+Static analysis for Excel VBA. It reads your macros and reports likely bugs and the
+errors the VBA compiler would catch, without opening Excel or running any code.
 
-pyVBAanalysis takes VBA source text and returns diagnostics, plus the analysis
-model behind them (tokens, AST, symbols, types). The goal is full static-analysis
-parity with XLIDE under the same no-false-positive discipline: a diagnostic ships
-only when it is provably correct (backed by MS-VBAL, the Excel/VBE oracle, or
-deterministic metadata), and anything unknown or ambiguous stays quiet.
+Point it at a workbook or a set of exported module files, and it returns the
+problems it finds, each with the exact line and a plain explanation.
 
-This is an independent, pure-analysis library. The only runtime dependency is
-[pyOpenVBA](https://pypi.org/project/pyOpenVBA/), used to read VBA modules
-directly from Excel, Word, and PowerPoint files; pyOpenVBA is itself pure Python
-with no transitive dependencies, so the whole runtime tree is pure Python.
-Everything else is the standard library. There is no Excel COM, and the library
-does not run the oracle. XLIDE owns the Excel/VBE oracle and the evidence
-pipeline; pyVBAanalysis consumes the emitted evidence (the oracle case corpus and
-the provenance audit) as porting spec and as test fixtures.
+## What it checks
 
-## Status
+It looks for more than a hundred kinds of problem, including:
 
-Planning and scaffolding. The build plan, parity inventory, Python module layout,
-port order, and the XLIDE sync strategy live in [agent.md](agent.md). The agent
-operating policy is in
-[docs/agentic_ai_programming_best_practices.md](docs/agentic_ai_programming_best_practices.md).
+- Type errors, such as assigning a string to a `Long` or passing the wrong type to
+  a procedure.
+- Undeclared variables and calls to procedures or members that do not exist.
+- Code the VBA compiler rejects: duplicate declarations, a missing `Option
+  Explicit`, malformed statements, or a `Declare` that lacks `PtrSafe` on 64-bit
+  Office.
+- Likely run-time failures, such as dividing by a constant zero or a type mismatch
+  from a bad conversion.
 
-## Development
+It only reports a problem when it can prove one, and stays quiet otherwise, so the
+output does not bury you in false alarms.
+
+## Install
 
 ```
-pip install -e ".[dev]"
-pytest
-ruff check .
-mypy pyvbaanalysis
+pip install pyvbaanalysis
 ```
+
+Python 3.10 or later. Nothing else to set up.
+
+## Use it from Python
+
+Analyze a workbook:
+
+```python
+from pyvbaanalysis import analyze_workbook
+
+for module, problems in analyze_workbook("Budget.xlsm").items():
+    for p in problems:
+        print(module, p.severity.value, p.code, p.message)
+```
+
+Analyze a single module's source:
+
+```python
+from pyvbaanalysis import analyze_module
+
+source = "Sub Test()\n    Dim n As Long\n    n = \"oops\"\nEnd Sub\n"
+for p in analyze_module(source):
+    print(p.code, p.message)
+```
+
+Each result has a `code`, a `message`, a `severity` (`error`, `warning`, or
+`information`), and a `span` giving the character offsets in the source.
+
+Analyze several exported files together, so references between them resolve:
+
+```python
+from pyvbaanalysis import analyze_loose_files
+
+analyze_loose_files(["Module1.bas", "Sheet1.cls", "UserForm1.frm"])
+```
+
+## Use it from the command line
+
+```
+pyvbaanalysis Budget.xlsm
+pyvbaanalysis ./exported_modules --format json
+pyvbaanalysis Budget.xlsm --only Sheet1
+```
+
+A path can be a workbook, a folder of exported `.bas` / `.cls` / `.frm` files, or a
+single file. The command exits 1 when it finds problems and 0 when the code is
+clean, so it drops into a CI check.
+
+## Scope
+
+This analyzes Excel VBA. It does not run macros and does not need Excel installed.
+Word and PowerPoint are not supported.
+
+## Documentation
+
+- [Usage guide](docs/usage.md)
+- [API reference](docs/api-reference.md)
+- [Diagnostic catalogue](docs/diagnostics-catalogue.md)
 
 ## License
 
-Not yet chosen.
+MIT. See [LICENSE](LICENSE).

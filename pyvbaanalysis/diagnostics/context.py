@@ -1,9 +1,10 @@
 """Per-pass shared state for the diagnostics engine.
 
-Ported from analysisContext.ts. The host-coupled pieces - the member-completion
-context (memberCtx) and applicationMemberNames - are deferred until the host layer
-(M9) and the member rules land; no rule in the engine skeleton reads them, so
-RulePassContext omits memberCtx for now and gains it when member rules arrive.
+Ported from analysisContext.ts. RulePassContext carries the member-completion
+context (member_ctx) as a first-class field: it is assembled once per pass and the
+member-not-found, object-state, call-shape, type-of-is, and assignment rules read
+it through ctx.member_ctx. The host object model reaches that context through
+AnalyzeModuleOptions.host_model.
 """
 
 from __future__ import annotations
@@ -33,13 +34,16 @@ from .model import VbaDiagnosticData
 class AnalyzeModuleOptions:
     """Inputs for analyze_module.
 
-    Fields typed Any (document_type, host_model) carry host/completion types that
-    are ported in a later milestone; no engine-skeleton rule reads them.
+    document_type and host_model are typed Any to avoid importing the completion
+    and host packages here; their concrete types are EventHandlerDocumentType and
+    HostObjectModel. Both are read by rules: document_type drives the
+    event-handler-module-scope rule, and host_model feeds the member-completion
+    context and the type-name resolver.
     """
 
     module_name: str | None = None
     module_kind: ModuleSymbolKind | None = None
-    document_type: Any = None  # EventHandlerDocumentType (completion; deferred)
+    document_type: Any = None  # EventHandlerDocumentType (from the completion package)
     # Per-rule severity overrides keyed by stable diagnostic code; "off" disables.
     severity_overrides: Mapping[str, str] | None = None
     # Lowercased procedure names callable as bare identifiers from this module.
@@ -50,12 +54,12 @@ class AnalyzeModuleOptions:
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None = None
     project_class_members: Sequence[VbaProjectClassMembers] | None = None
     # Project-defined type names (class/document/userform, user Type, Enum) visible
-    # to this module — the registry the type-name resolver searches.
+    # to this module, the registry the type-name resolver searches.
     project_types: Sequence[VbaProjectTypeName] | None = None
     project_visible_symbols: Sequence[VbaSymbol] | None = None
     known_non_type_names: AbstractSet[str] | None = None
     project_integer_constants: Mapping[str, str | None] | None = None
-    host_model: Any = None  # HostObjectModel (host layer; deferred)
+    host_model: Any = None  # HostObjectModel (from the host package)
     conditional_compilation: ConditionalCompilationEnvironment | None = None
     parsed_module: ModuleNode | None = None
 
@@ -88,6 +92,7 @@ class RulePassContext:
 
 
 def is_object_module_kind(module_kind: ModuleSymbolKind | None) -> bool:
+    """True for the object module kinds (class, document, userform) that own a Me."""
     return module_kind in (
         ModuleSymbolKind.CLASS,
         ModuleSymbolKind.DOCUMENT,

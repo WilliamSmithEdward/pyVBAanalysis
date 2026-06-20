@@ -164,6 +164,7 @@ def _collect_conditional_activity_events(
 
 
 def module_has_conditional_directives(module: ModuleNode) -> bool:
+    """True when the module contains any #If/#Const directive at module level, inside a procedure body, or attached to an Enum/Type."""
     for member in module.members:
         if isinstance(member, ConditionalDirectiveNode):
             return True
@@ -177,12 +178,14 @@ def module_has_conditional_directives(module: ModuleNode) -> bool:
 def index_conditional_compilation(
     module: ModuleNode, env: ConditionalCompilationEnvironment | None = None
 ) -> ConditionalCompilationIndex:
+    """Index a module's conditional compilation: all directive occurrences plus the resolved #Const definitions and their values."""
     directives = collect_conditional_directives(module)
     constants = _collect_conditional_constants(directives, _effective_environment(env))
     return ConditionalCompilationIndex(directives=directives, constants=constants)
 
 
 def collect_conditional_directives(module: ModuleNode) -> list[ConditionalDirectiveOccurrence]:
+    """Gather every conditional directive in the module (module level, procedure bodies, and Enum/Type members), sorted by source offset."""
     out: list[ConditionalDirectiveOccurrence] = []
     for member in module.members:
         if isinstance(member, ConditionalDirectiveNode):
@@ -201,6 +204,7 @@ def collect_conditional_directives(module: ModuleNode) -> list[ConditionalDirect
 def conditional_compiler_constants(
     env: ConditionalCompilationEnvironment | None = None,
 ) -> dict[str, ConditionalValue]:
+    """Merge the compiler and project #Const values into one lowercased-name lookup, with project constants overriding compiler ones."""
     env = env if env is not None else ConditionalCompilationEnvironment()
     constants: dict[str, ConditionalValue] = {}
     for name, value in (env.compiler_constants or {}).items():
@@ -213,6 +217,7 @@ def conditional_compiler_constants(
 def evaluate_conditional_expression(
     expression: str | None, env: ConditionalCompilationEnvironment | None = None
 ) -> ConditionalValue | None:
+    """Tokenize and evaluate a single #If/#Const expression against the environment's constants, returning its value or None when undecidable."""
     if expression is None or expression.strip() == "":
         return None
     tokens = [
@@ -227,6 +232,7 @@ def evaluate_conditional_expression(
 def conditional_activity_at_offset(
     module: ModuleNode, offset: int, env: ConditionalCompilationEnvironment | None = None
 ) -> ConditionalActivity:
+    """Replay the directive stack up to a source offset and report whether that point is active, inactive, or unknown."""
     effective_env = _effective_environment(env)
     directives = collect_conditional_directives(module)
     project_constants = _lowercased(effective_env.project_constants)
@@ -242,6 +248,7 @@ def conditional_activity_at_offset(
 def conditional_activity_for_span(
     module: ModuleNode, span: Span, env: ConditionalCompilationEnvironment | None = None
 ) -> ConditionalActivity:
+    """Conditional activity (active/inactive/unknown) at the start of a source span."""
     return conditional_activity_at_offset(module, span.start, env)
 
 

@@ -6,10 +6,9 @@ its operand splitters, the ByRef / string-arithmetic / numeric-overflow operand
 checks, incompatibilityReason, and validateArgumentTypes(ForSignature).
 
 The host/completion-coupled resolution paths (host globals, runtime/host
-constants, and member-expression typing via the member-completion context) are
-deferred to M9: they resolve to None here. That is precision-only — an
-unresolved argument type is simply not checked, so it can never become a false
-positive.
+constants, and member-expression typing via the member-completion context)
+deliberately resolve to None here. That is precision-only: an unresolved
+argument type is simply not checked, so it can never become a false positive.
 """
 
 from __future__ import annotations
@@ -179,7 +178,7 @@ def _infer_atomic_expression_type(
             return InferredArgumentType(
                 type_=sig.return_type, label=f"{name} As {sig.return_type}", span=span
             )
-        # Host globals and runtime/host constants are deferred (M9).
+        # Host globals and runtime/host constants deliberately resolve to None here.
         return None
 
     if token_text(first) == "new" and len(toks) == 2:
@@ -243,7 +242,7 @@ def _infer_atomic_expression_type(
                         span=member_span,
                     )
                 return None
-            # Qualified runtime/host constants are deferred (M9).
+            # Qualified runtime/host constants deliberately resolve to None here.
         if (
             member
             and len(toks) > 3
@@ -258,7 +257,8 @@ def _infer_atomic_expression_type(
                     label=f"{name}.{member}(...) As {sig.return_type}",
                     span=Span(slice_start + toks[2].start, slice_start + toks[2].end),
                 )
-    # Member-expression typing via the member-completion context is deferred (M9).
+    # Member-expression typing via the member-completion context deliberately
+    # resolves to None here.
     return None
 
 

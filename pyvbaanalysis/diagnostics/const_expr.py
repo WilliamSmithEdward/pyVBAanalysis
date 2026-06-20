@@ -6,9 +6,10 @@ structural analyzer); this module owns the diagnostics-side collection of raw
 module-level and procedure-body integer constants and the fixed-length-string
 size resolution that builds on them.
 
-Only the literal-integer collection the active rules need is ported here.
-External (VBA runtime / Excel host) constant resolution and span-based integer
-expression folding stay deferred with the rules that need them (M8 / M9).
+This collects the literal-integer constants the active rules need and folds
+span-based integer expressions via the shared evaluator. External (VBA runtime
+/ Excel host) constants are not resolved here: such names are left unresolved,
+which is precision-only and never a false positive.
 """
 
 from __future__ import annotations

@@ -1,14 +1,15 @@
 """Rule family: unresolved-name rules.
 
-Ported from xlide_vscode/src/analyzer/diagnostics/rules/undeclared.ts. Four rules:
-Option Explicit presence (style), undeclared variable reads/writes, and unknown /
-non-callable bare call statements.
+Ported from xlide_vscode/src/analyzer/diagnostics/rules/undeclared.ts. Rules:
+Option Explicit presence (style), undeclared variable reads/writes, unknown /
+non-callable bare call statements, and member-not-found.
 
 Self-gating preserves the no-false-positive guarantee: `check_undeclared_variables`
 and `check_unknown_call_statement` no-op unless the caller supplies the project
 identifier/procedure sets (the cross-module surface). The member-not-found rule
-(`checkMemberNotFound` in the TS) needs the host member-completion surface and is
-deferred to M9; only its pure helper `member_access_references` is ported here.
+(`check_member_not_found`) rides the host member-completion surface, gated on the
+exhaustive-surface check; its pure helper `member_access_references` collects the
+`.member` references it inspects.
 """
 
 from __future__ import annotations
@@ -92,7 +93,7 @@ _VBA_IDENTIFIER_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENDS_WITH_BLANK_PHYSICAL_LINE_RE = re.compile(r"(?:\r\n|\r|\n)[ \t]*(?:\r\n|\r|\n)$")
 
 
-# -- member-access references (pure helper; checkMemberNotFound deferred to M9) --
+# -- member-access references (pure helper for checkMemberNotFound) --
 
 
 @dataclass(frozen=True, slots=True)

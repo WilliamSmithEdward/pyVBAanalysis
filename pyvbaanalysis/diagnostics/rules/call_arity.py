@@ -4,10 +4,11 @@ Ported from xlide_vscode/src/analyzer/diagnostics/rules/callArity.ts. A call to 
 known Sub/Function/Declare must supply an argument count the parameter list
 accepts. Same-module procedures come from this module's AST; cross-module checks
 use the unique exported project signatures; module-qualified calls resolve through
-the named standard module only. Ambiguous or unresolved targets stay silent to
-remain false-positive-free. The parenthesized object-member calls and runtime
-(host) arity signatures need the member-completion / runtime surfaces and are
-deferred to M9 — their omission only drops detections, never adds a false one.
+the named standard module only; bare calls also resolve against the VBA runtime arity signatures.
+Ambiguous or unresolved targets stay silent to remain false-positive-free. The
+parenthesized object-member calls need the member-completion surface, so they
+are deliberately not checked here; that omission only drops detections, never
+adds a false one.
 """
 
 from __future__ import annotations

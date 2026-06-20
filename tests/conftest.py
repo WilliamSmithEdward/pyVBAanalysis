@@ -1,5 +1,6 @@
 # Pytest configuration root for pyVBAanalysis.
 #
-# Fixtures that load the vendored XLIDE data package (the oracle case corpus and
-# the diagnostic provenance audit) and drive the TS-vs-Python differential harness
-# are added in milestone M0; see agent.md.
+# The vendored XLIDE data package (the oracle case corpus and the diagnostic
+# provenance audit) and the oracle harness that drives the TS-vs-Python differential
+# checks are in place; the rule test modules load them through oracle_support.py.
+# See agent.md.

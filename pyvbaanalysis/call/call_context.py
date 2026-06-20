@@ -135,6 +135,7 @@ def bare_call_statement_target(source: str, span: Span) -> BareCallStatementTarg
 
 
 def explicit_call_statement_target(source: str, span: Span) -> BareCallStatementTarget | None:
+    """The callee name and span of an explicit ``Call`` statement, or None when the statement is not a Call."""
     toks = _statement_tokens_after_leading_line_number(source, span)
     if len(toks) < 2 or token_word(toks[0]) != "call":
         return None
@@ -147,6 +148,7 @@ def explicit_call_statement_target(source: str, span: Span) -> BareCallStatement
 
 
 def explicit_call_statement_argument_without_parens(source: str, span: Span) -> Span | None:
+    """The span of the first stray argument when an explicit ``Call`` passes arguments without enclosing parentheses, or None."""
     found = _explicit_call_statement_argument_list_without_parens(source, span)
     return found.first_argument_span if found is not None else None
 
@@ -190,6 +192,7 @@ def _explicit_call_statement_argument_list_without_parens(
 def standalone_empty_parenthesized_call_statement(
     source: str, span: Span
 ) -> ParenthesizedCallStatementTarget | None:
+    """A parenless call statement whose callee is immediately followed by an empty ``()`` and nothing else, or None (e.g. ``Foo()`` or ``obj.Foo()`` as a whole statement)."""
     toks = _statement_tokens_after_leading_line_number(source, span)
     if len(toks) < 3 or token_word(toks[0]) == "call" or _top_level_token_index(toks, "=") >= 0:
         return None

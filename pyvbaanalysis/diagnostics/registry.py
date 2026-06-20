@@ -3,8 +3,10 @@
 Ported from registry.ts. A rule entry is a stable name plus exactly one execution
 form (run / procedure_statements / procedure_expressions). The registry ORDER is a
 hard contract: it is the diagnostic output order (run_rules buffers per rule and
-flushes in registry order). Rule families are appended here as they are ported
-(M6+); the engine skeleton starts with an empty registry.
+flushes in registry order), so entries sit at their registry.ts positions. The
+table is complete: every ported family is present, spanning the lexical, duplicate,
+declaration, expression, array, module-kind, control-flow, object-state, call-shape,
+type-of-is, and undeclared/unknown-call rules.
 """
 
 from __future__ import annotations
@@ -129,7 +131,7 @@ class DiagnosticRuleEntry:
 
 def _unknown_call_statement(ctx: RulePassContext, push: PushFn) -> ProcedureStatementVisitor:
     """unknownCallStatement self-gate: silent unless the project supplied the visible
-    procedure-name set (mirrors registry.ts — without it every call looks unknown)."""
+    procedure-name set (mirrors registry.ts, without it every call looks unknown)."""
     known_procedures = ctx.opts.known_procedures
     if known_procedures is None:
         return lambda member: None
@@ -139,8 +141,8 @@ def _unknown_call_statement(ctx: RulePassContext, push: PushFn) -> ProcedureStat
 
 
 # The ordered table of active rules. The ORDER is the diagnostic output-order
-# contract; entries are placed at their registry.ts positions as families are
-# ported (gaps remain for not-yet-ported families).
+# contract; every entry sits at its registry.ts position, so the table reproduces
+# the canonical rule order end to end.
 DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(
         name="unterminatedStrings",
@@ -187,8 +189,8 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="moduleDeclarationsAfterProcedures", run=lambda ctx, push: check_module_declarations_after_procedures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="moduleLevelStatementsOutsideProcedures", run=lambda ctx, push: check_module_level_statements_outside_procedures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="reservedDeclarationNames", run=lambda ctx, push: check_reserved_declaration_names(ctx.source, ctx.mod, ctx.activity, push)),
-    # propertySetterValueParameters: structural branches only; the propertyLetObjectValue
-    # object-value branch (resolveKnownObjectAssignmentType over the project surface) no-ops.
+    # propertySetterValueParameters: includes the propertyLetObjectValue object-value
+    # branch (resolveKnownObjectAssignmentType over the project surface via member_ctx).
     DiagnosticRuleEntry(name="propertySetterValueParameters", run=lambda ctx, push: check_property_setter_value_parameters(ctx.source, ctx.mod, ctx.activity, ctx.member_ctx, push)),
     DiagnosticRuleEntry(name="propertyAccessorSignatures", run=lambda ctx, push: check_property_accessor_signatures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="parameterOrder", run=lambda ctx, push: check_parameter_order(ctx.source, ctx.mod, ctx.activity, push)),
@@ -211,9 +213,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="typeDeclarationCharacterAsClause", run=lambda ctx, push: check_type_declaration_character_as_clause(ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="unexpectedDeclarationTokens", run=lambda ctx, push: check_unexpected_declaration_tokens(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="fixedLengthStringBounds", run=lambda ctx, push: check_fixed_length_string_bounds(ctx.source, ctx.mod, ctx.activity, push)),
-    # Positions 35-42 (arrays / object-state, M7) precede typeDeclarationCharacterAsClause
-    # above and remain deferred.
-    # -- moduleKind family (positions 46-53, self-contained subset) --
+    # The arrays family sits above (invalidRedimTargets through eraseTargets); the
+    # object-state rules (scalarMemberAccess, objectVariableNotSet) sit below.
+    # -- moduleKind family --
     DiagnosticRuleEntry(name="objectModulePublicMembers", run=lambda ctx, push: check_object_module_public_members(ctx.source, ctx.mod, ctx.module_kind, ctx.activity, push)),
     DiagnosticRuleEntry(name="eventDeclarationModuleKind", run=lambda ctx, push: check_event_declaration_module_kind(ctx.source, ctx.mod, ctx.module_kind, ctx.activity, push)),
     DiagnosticRuleEntry(name="meOutsideObjectModule", procedure_statements=lambda ctx, push: check_me_outside_object_module(ctx.module_kind, ctx.source, push)),
@@ -223,13 +225,14 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="raiseEventTargets", run=lambda ctx, push: check_raise_event_targets(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="declarePtrSafeForWin64", run=lambda ctx, push: check_declare_ptr_safe_for_win64(ctx.source, ctx.mod, ctx.opts.conditional_compilation, ctx.activity, push)),
     DiagnosticRuleEntry(name="eventHandlerModuleScope", run=lambda ctx, push: check_event_handler_module_scope(ctx.source, ctx.mod, ctx.module_name, ctx.module_kind, ctx.opts.document_type, ctx.activity, push)),
-    # invalidAsTypeNames: reserved/runtime/known-non-type fallback branches only; the
-    # project-type-registry and creatable-type (New) branches no-op (M10).
+    # invalidAsTypeNames: resolves each type-name reference over the project-type
+    # registry and host model, covering the ambiguous-type and creatable-type (New)
+    # branches as well as the reserved/runtime/known-non-type fallbacks.
     DiagnosticRuleEntry(name="invalidAsTypeNames", run=lambda ctx, push: check_invalid_as_type_names(ctx.source, ctx.mod, ctx.activity, ctx.opts, push)),
     DiagnosticRuleEntry(name="callParens", procedure_statements=lambda ctx, push: check_call_parens(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, ctx.member_ctx, push)),
     DiagnosticRuleEntry(name="expressionCallParens", procedure_statements=lambda ctx, push: check_expression_call_parens(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="setAssignments", procedure_statements=lambda ctx, push: check_set_assignments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, ctx.member_ctx, push)),
-    # -- control-flow family (positions 59-66, self-contained subset) --
+    # -- control-flow family --
     DiagnosticRuleEntry(name="exitStatements", procedure_statements=lambda ctx, push: check_exit_statements(ctx.source, push)),
     DiagnosticRuleEntry(name="duplicateLabels", run=lambda ctx, push: check_duplicate_labels(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="undefinedLabels", run=lambda ctx, push: check_undefined_labels(ctx.source, ctx.mod, ctx.activity, push)),

@@ -4,7 +4,7 @@ Ported from xlide_vscode/src/analyzer/diagnostics/rules/typeOfIs.ts. The
 TypeOf-missing-operand syntax check is host-free and ported. is-operator-non-object
 is a BinaryExpr `Is` visitor: a provably-scalar operand of `Is` is a type error. It
 fires on expression-reachable forms (`If x Is Nothing`, `b = x Is Nothing`) and is
-silent on `Debug.Print x Is Nothing` — a reserved-name receiver statement parses as
+silent on `Debug.Print x Is Nothing`, a reserved-name receiver statement parses as
 a raw StatementNode, so the inner `Is` never reaches the expression walk. This
 matches XLIDE byte-for-byte (verified by running XLIDE's analyzer: it too is silent
 on the Debug.Print form and fires on the If form); the entire is-operator-non-object
@@ -206,7 +206,7 @@ def _object_assignment_incompatible(
     """True when an `actual_raw`-typed object value is provably NOT assignable to an
     `expected_raw`-typed object reference. Port of the object-vs-object arm of
     objectAssignmentIncompatibilityReason (scalar/Variant/Nothing arms are not
-    reachable here — both operands are already concrete object types)."""
+    reachable here, both operands are already concrete object types)."""
     expected = _resolve_known_object_assignment_type(expected_raw, member_ctx)
     if expected is None or expected.kind == "generic":
         return False
@@ -254,7 +254,7 @@ def object_assignment_incompatibility_reason(
 def _is_implemented_by_any_project_class(
     operand_type: _ObjectAssignmentType, member_ctx: MemberCompletionContext
 ) -> bool:
-    """True when any project class declares `Implements <operandType>` — so the
+    """True when any project class declares `Implements <operandType>`, so the
     operand could hold a subtype that is-a the target (stay quiet, no-FP)."""
     names = {operand_type.key, operand_type.display.lower()}
     for project_type in member_ctx.project_class_members or []:

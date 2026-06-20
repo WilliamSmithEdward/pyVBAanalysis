@@ -5,7 +5,7 @@ functions and statements available in every VBA project (MsgBox, Left, CLng, Now
 Array, RGB, ...). Function signatures are transcribed from the Microsoft VBA
 language reference; they are never invented. The runtime constant + global-object
 tables (vbCrLf, vbObjectError, Err, Debug, ...) are mechanically extracted to
-data/vba_runtime_tables.json by tools/extract_runtime_tables.mjs — they feed the
+data/vba_runtime_tables.json by tools/extract_runtime_tables.mjs, they feed the
 undeclared-reference negative lookup (a name that resolves to a runtime constant
 or object is never flagged undeclared).
 """

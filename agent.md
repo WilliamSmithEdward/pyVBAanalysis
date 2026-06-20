@@ -1,5 +1,17 @@
 # pyVBAanalysis - Agent Gameplan
 
+> Status: COMPLETE. The port shipped at v1.0.0. Milestones M0 through M10 are done
+> (the full lexer, parser, symbol and project index, conditional compilation, type
+> inference, host object model, member-completion surface, project-type registry,
+> and all 85 registry rules), and a file/workbook ingestion layer was added on top
+> (analyze_project, analyze_workbook, the loose-file reader, and the CLI). This
+> document is retained as the historical build plan and the XLIDE data-sync
+> reference; the milestone sections below are written in the future tense they were
+> planned in, and the "first action: start M0" guidance is historical. For current
+> contributor guidance see CONTRIBUTING.md, and treat
+> `pyvbaanalysis/data/manifest.json` as the authoritative list of vendored data
+> files (the filenames sketched below predate the shipped layout).
+
 This file is the operating plan for building **pyVBAanalysis**: an independent,
 pure-Python static analyzer for VBA, ported from the proven XLIDE TypeScript
 analyzer. It is both the porting gameplan and the repo-level agent instruction
@@ -7,8 +19,8 @@ file (per RG-17 in `docs/agentic_ai_programming_best_practices.md`). Read that
 best-practices doc first; this plan assumes it. Write everything in plain ASCII,
 no em dashes, no AI tells (UM-07).
 
-Grounded against the XLIDE repo at `C:/Development/xlide/xlide_vscode` on
-2026-06-17. Every count and path below was read from that repo, not recalled. If
+Grounded against the XLIDE repo at the sibling checkout `../xlide_vscode` (read on
+2026-06-17). Every count and path below was read from that repo, not recalled. If
 a fact here ever conflicts with the XLIDE source, the source wins; re-verify
 before acting (RG-18).
 
@@ -40,7 +52,8 @@ Out of scope:
 
 Dependencies: the only runtime dependency is pyOpenVBA
 (https://pypi.org/project/pyOpenVBA/, version 3.0.1, requires Python >=3.10),
-used to read VBA modules directly from Excel, Word, and PowerPoint files.
+used to read VBA modules directly out of Excel workbooks (the analyzer targets
+Excel VBA; the shipped reader is Excel-only).
 pyOpenVBA is itself pure Python with no transitive dependencies, so the whole
 runtime tree stays pure Python; everything else is the standard library. The
 analysis core operates on source text and never imports pyOpenVBA. Only the
@@ -110,7 +123,7 @@ via lowercased keys (VBA is case-insensitive).
 pyvbaanalysis/
   __init__.py                  # public API: analyze_module, parse_module, tokenize, ProjectIndex, analyze_workbook
   reader/
-    workbook.py                # read VBA modules from .xlsm/.docm/.pptm via pyOpenVBA -> source; the ONLY pyOpenVBA import
+    workbook.py                # read VBA modules from Excel .xlsm/.xlsb/.xlam/.xls via pyOpenVBA -> source; the ONLY pyOpenVBA import
   lexer/
     token_kinds.py             # TokenKind, TriviaKind (Enum); VbaToken, Trivia (dataclass)
     tokenize.py                # tokenize(), tokenize_cached(), date-literal validator
@@ -168,9 +181,9 @@ let any file become a monolith (UM-03): the 8900-line `excelReferenceMembers.ts`
 must land as JSON data plus a thin resolver, never as a giant `.py`.
 
 The reader layer (`reader/workbook.py`) is the only place pyOpenVBA is imported.
-It turns an Office file (.xlsm/.docm/.pptm) into module source text and feeds the
-pure analyzer; `analyze_module(source)` and everything below it stays stdlib-only
-(UM-01), so the core is testable from plain strings without any Office file. The
+It turns an Excel workbook (.xlsm/.xlsb/.xlam/.xls) into module source text and
+feeds the pure analyzer; `analyze_module(source)` and everything below it stays
+stdlib-only (UM-01), so the core is testable from plain strings without any file. The
 import name is most likely `pyopenvba` (per the wheel `pyopenvba-3.0.1`); confirm
 at first use.
 

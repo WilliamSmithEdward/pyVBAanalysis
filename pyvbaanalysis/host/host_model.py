@@ -1,8 +1,8 @@
-"""Host object-model resolver — pure functions over a HostObjectModel.
+"""Host object-model resolver, pure functions over a HostObjectModel.
 
 Ported from xlide_vscode/src/analyzer/host/hostModel.ts. The Excel object model
 itself is vendored as data/excel_host_model.json, mechanically extracted from the
-generated XLIDE host modules (tools/extract_host_model.mjs) — never hand-
+generated XLIDE host modules (tools/extract_host_model.mjs), never hand-
 transcribed, so the member surfaces stay exact (the no-false-positive contract
 for member-not-found depends on the exhaustive set being complete). Defaults to
 the Excel model but accepts any model dict for testing.
@@ -57,6 +57,7 @@ class HostGlobal:
 
 @lru_cache(maxsize=1)
 def get_excel_object_model() -> HostObjectModel:
+    """Load and cache the vendored Excel host object model from data/excel_host_model.json."""
     raw = json.loads((_DATA_DIR / "excel_host_model.json").read_text(encoding="utf-8"))
     return raw  # type: ignore[no-any-return]
 

@@ -192,6 +192,7 @@ def external_type_candidates_in_module(module_name: str) -> tuple[TypeCompletion
 
 
 def is_creatable_type_completion(candidate: TypeCompletion) -> bool:
+    """True when the resolved type can be instantiated with ``New``: only project class and userform types qualify."""
     return candidate.kind == "class" or candidate.kind == "userform"
 
 

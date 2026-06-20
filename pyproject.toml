@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyvbaanalysis"
-version = "1.0.0"
-description = "Pure-Python static analysis for VBA, ported from the XLIDE analyzer"
+dynamic = ["version"]
+description = "Pure-Python static analysis for Excel VBA"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -21,19 +21,46 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
     "Typing :: Typed",
 ]
+# pyOpenVBA is the one external runtime dependency, used for direct VBA reads out of
+# Excel workbooks (pyvbaanalysis.reader.workbook). It is pure Python with no
+# transitive dependencies, so the runtime tree stays pure Python. Everything else is
+# the standard library.
 dependencies = ["pyOpenVBA>=3.0.1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
 build = ["build>=1.2", "twine>=5"]
 
+[project.scripts]
+pyvbaanalysis = "pyvbaanalysis.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/WilliamSmithEdward/pyVBAanalysis"
 Repository = "https://github.com/WilliamSmithEdward/pyVBAanalysis"
 Issues = "https://github.com/WilliamSmithEdward/pyVBAanalysis/issues"
 
+# Single-source the version: hatchling reads __version__ from the package __init__,
+# so the wheel metadata and pyvbaanalysis.__version__ cannot drift.
+[tool.hatch.version]
+path = "pyvbaanalysis/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["pyvbaanalysis"]
+# The oracle corpus and provenance audit are read only by the test suite, not at
+# runtime, so keep them out of the published wheel (they stay in the sdist).
+exclude = [
+    "pyvbaanalysis/data/vbe_oracle_cases.json",
+    "pyvbaanalysis/data/diagnostic_influence_audit.json",
+]
+
+[tool.hatch.build.targets.sdist]
+# Keep internal development notes out of the published sdist. The evidence corpus
+# stays in (the test suite needs it); only the agent/working notes are excluded.
+exclude = [
+    "agent.md",
+    "docs/agentic_ai_programming_best_practices.md",
+    "docs/AI-Smells-Agents-Avoid.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -45,3 +72,9 @@ line-length = 100
 [tool.mypy]
 python_version = "3.10"
 strict = true
+
+# pyOpenVBA is an untyped runtime dependency used only by the workbook reader
+# (lazily imported). It ships no type stubs, so allow the import.
+[[tool.mypy.overrides]]
+module = ["pyopenvba", "pyopenvba.*"]
+ignore_missing_imports = true

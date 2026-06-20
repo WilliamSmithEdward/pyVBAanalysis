@@ -1,14 +1,14 @@
 """Rule family: declaration-site rules.
 
-Ported from xlide_vscode/src/analyzer/diagnostics/rules/declarations.ts. This
-slice is the self-contained subset (procedure headers, identifier spelling,
-reserved names, Dim initializers, unexpected declaration tokens, type-declaration
+Ported from xlide_vscode/src/analyzer/diagnostics/rules/declarations.ts. The
+self-contained checks cover procedure headers, identifier spelling, reserved
+names, Dim initializers, unexpected declaration tokens, type-declaration
 characters, Option placement/duplication, empty Type, parameter/identifier
-limits, UDT parameter constraints). The rules that need type inference, the
-member-completion context, constant-expression evaluation, or host/runtime
-resolution (parameter defaults, fixed-length-string bounds, As-type-name
-validation, property setter/accessor value types, non-constant values, parameter
-order) are deferred to later slices / M8 / M9.
+limits, and UDT parameter constraints. The checks that draw on type inference,
+the member-completion context, constant-expression evaluation, or host/runtime
+resolution are here too: parameter defaults (non-constant), fixed-length-string
+bounds, As-type-name validation, property setter/accessor value types,
+non-constant Const/Enum values, and parameter order.
 """
 
 from __future__ import annotations
@@ -415,10 +415,10 @@ def check_reserved_declaration_names(source: str, mod: ModuleNode, activity: Con
 
 # -- checkPropertySetterValueParameters ------------------------------------
 
-# Object-value branch (propertyLetObjectValue) is DEFERRED: it needs
-# resolveKnownObjectAssignmentType (host/project class resolution), which the port
-# does not yet expose as a richer typed result. The three branches below are pure
-# signature/structure checks and are sound without that surface.
+# The object-value branch (propertyLetObjectValue) resolves the final value
+# parameter's type through _resolve_known_object_assignment_type (host/project
+# class resolution) and reports an object-typed Property Let value. The other three
+# branches are pure signature/structure checks that need no type surface.
 
 
 def _property_setter_return_type_span(source: str, proc: ProcedureNode) -> Span:
@@ -990,10 +990,10 @@ def check_type_declaration_character_as_clause(mod: ModuleNode, activity: Condit
 # -- checkFixedLengthStringBounds ------------------------------------------
 
 # MS-VBAL fixed-length String bounds (VBE oracle: "Invalid length for fixed-length
-# string"). The active rule resolves decimal integer literal sizes and same
+# string"). The rule resolves decimal integer literal sizes and same
 # module/procedure Const aliases that reduce to a decimal integer literal; unknown,
-# duplicate, string, and compound constants stay deferred until broader
-# constant-expression semantics are verified.
+# duplicate, string, and compound constants are deliberately left unresolved (no
+# size, so no diagnostic), which keeps the rule free of false positives.
 _FIXED_LENGTH_STRING_MIN = 1
 _FIXED_LENGTH_STRING_MAX = 65526
 
@@ -1390,7 +1390,7 @@ def check_non_constant_parameter_defaults(
 
     Object-typed parameters are skipped: their defaults are owned by the
     parameter-default-type-mismatch rule (\"must be Nothing\"). Host-class object
-    typing resolves to None here (M9), so those parameters are still scanned —
+    typing resolves to None here by design, so those parameters are still scanned -
     sound, since a non-constant default is invalid regardless of the object type.
     """
     for member in active_module_members(mod, activity):

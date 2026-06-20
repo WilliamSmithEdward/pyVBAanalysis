@@ -65,7 +65,7 @@ def resolve_exhaustive_member_surface(
     """The member surface at a member-access dot, but ONLY when it is exhaustive.
 
     Ported from resolveExhaustiveMemberSurface (shared.ts). Returns None unless the
-    resolved receiver type yields an exhaustive surface — the no-false-positive gate
+    resolved receiver type yields an exhaustive surface, the no-false-positive gate
     for member-not-found: a non-exhaustive host type, Object/Variant, or unresolved
     receiver produces no surface, so no member can be proven absent.
     """

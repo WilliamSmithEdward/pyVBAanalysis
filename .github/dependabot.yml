@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # Keep the GitHub Actions pinned in the workflows current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Keep the Python tooling and the runtime dependency current.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly

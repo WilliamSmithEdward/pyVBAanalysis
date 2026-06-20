@@ -2,7 +2,7 @@
 
 Ported from xlide_vscode/src/analyzer/diagnostics/rules/argumentShape.ts. A bare
 array variable, or a same-module user-defined Type value, passed where a parameter
-is a scalar — or a scalar/Variant passed where a parameter is an array — is a VBE
+is a scalar, or a scalar/Variant passed where a parameter is an array, is a VBE
 compile error. Decides purely on declared SHAPE (array-ness / UDT-ness), never on
 element-type coercion. Fires only on a single bare identifier argument whose
 declared shape resolves to a provable array or same-module Type; quiet on Variant

@@ -14,6 +14,7 @@ this rule catalogue, so the full audited set is 117.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, TypeGuard
 
@@ -53,19 +54,45 @@ class DiagnosticRuleMetadata:
     allow_severity_downgrade: bool | None = None
 
 
+# Public-facing display strings must not carry internal tool names. The vendored
+# rule_metadata.json mirrors the source catalogue verbatim (kept byte-identical so the
+# data-package manifest checksum stays valid and the file is safe to regenerate), so
+# the two presentation fields are sanitized here, at the load seam, before they reach
+# the public API, the CLI JSON output, and the generated catalogue.
+_SPEC_REFERENCE_REPLACEMENTS = {
+    "docs/xlide_vba_com_test_runner.md": "VBA test directive comment syntax",
+    "docs/xlide_vba_analysis_suppression_comments.md": (
+        "Analysis suppression directive comment syntax"
+    ),
+}
+
+
+def _public_title(title: str) -> str:
+    # e.g. "Invalid XLIDE VBA test directive" -> "Invalid VBA test directive".
+    return title.replace("XLIDE ", "")
+
+
+def _public_spec_reference(spec_reference: str | None) -> str | None:
+    if spec_reference is None:
+        return None
+    spec_reference = _SPEC_REFERENCE_REPLACEMENTS.get(spec_reference, spec_reference)
+    # "VBE oracle" is the internal evidence harness; name the compiler it models.
+    return spec_reference.replace("VBE oracle", "VBE compiler")
+
+
 def _build(rule_name: str, raw: dict[str, Any]) -> DiagnosticRuleMetadata:
     scopes_raw = raw.get("suppressionScopes")
     return DiagnosticRuleMetadata(
         rule_name=rule_name,
         code=raw["code"],
-        title=raw["title"],
+        title=_public_title(raw["title"]),
         default_severity=DiagnosticSeverity(raw["defaultSeverity"]),
         category=DiagnosticCategory(raw["category"]),
         vbe_compile_equivalent=raw["vbeCompileEquivalent"],
         diagnostic_kind=DiagnosticEvidenceKind(raw["diagnosticKind"]),
         source=raw["source"],
         confidence=raw["confidence"],
-        spec_reference=raw.get("specReference"),
+        spec_reference=_public_spec_reference(raw.get("specReference")),
         requires_whole_project=raw.get("requiresWholeProject"),
         suppression_scopes=(
             tuple(DiagnosticSuppressionScope(s) for s in scopes_raw) if scopes_raw is not None else None
@@ -162,6 +189,32 @@ def normalize_diagnostic_severity_override(code: str | None, value: object) -> s
     if not is_diagnostic_severity_override(value):
         return None
     return value if value in allowed_diagnostic_severity_overrides_for_code(code) else None
+
+
+def validate_severity_overrides(overrides: Mapping[str, object] | None) -> None:
+    """Raise ValueError if any override names an unknown code or a value that code
+    does not allow.
+
+    The analyzer silently ignores an invalid override (an unknown code, or a value
+    outside a code's policy), so call this to catch a typo in a configuration or a
+    CI flag instead of having it quietly do nothing.
+    """
+    if not overrides:
+        return
+    problems: list[str] = []
+    for code, value in overrides.items():
+        if diagnostic_metadata_for_code(code) is None:
+            problems.append(f"unknown diagnostic code {code!r}")
+            continue
+        if not is_diagnostic_severity_override(value):
+            problems.append(f"invalid severity value {value!r} for {code!r}")
+            continue
+        allowed = allowed_diagnostic_severity_overrides_for_code(code)
+        if value not in allowed:
+            allowed_text = ", ".join(allowed) if allowed else "none"
+            problems.append(f"severity {value!r} not allowed for {code!r} (allowed: {allowed_text})")
+    if problems:
+        raise ValueError("invalid severity override(s): " + "; ".join(problems))
 
 
 def diagnostic_suppression_scopes_for_code(

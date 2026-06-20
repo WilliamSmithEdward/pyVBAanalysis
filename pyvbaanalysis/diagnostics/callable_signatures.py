@@ -5,8 +5,8 @@ xlide_vscode/src/analyzer/diagnostics/typeInference.ts. Builds the module +
 project callable signature tables the call/argument rules resolve against, the
 source-name shadow scope that suppresses an intrinsic diagnostic when a user
 declares the same name, and the scoped integer-constant lookup. Host/runtime
-function signatures and external constants are deferred (M9): they resolve to
-None, which is precision-only (never a false positive).
+function signatures and external constants deliberately resolve to None, which
+is precision-only (never a false positive).
 """
 
 from __future__ import annotations
@@ -413,7 +413,8 @@ class _ScopedIntegerConstantLookup:
     def get(self, name: str, /) -> int | None:
         key = name.lower()
         if "." in key:
-            # External (runtime/host) qualified constants are deferred to M9.
+            # External (runtime/host) qualified constants are resolved only from
+            # the provided constant map; anything else is left unresolved.
             return self._constants.get(key) if key in self._constants else None
         binding = resolve_bare_identifier_binding(
             BareIdentifierResolutionInput(

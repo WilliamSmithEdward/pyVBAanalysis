@@ -6,7 +6,8 @@ confidence mismatches: ByRef exact-type mismatches, non-numeric string operands
 in a numeric argument, numeric-literal overflow, and scalar/object
 incompatibilities. Unknowns and Variant are accepted, and VBA's normal coercions
 are allowed. The parenthesized object-member call surface needs the member-
-completion context and is deferred to M9 (omitting it only drops detections).
+completion context, so it is deliberately not checked here (omitting it only
+drops detections, never adds a false one).
 """
 
 from __future__ import annotations

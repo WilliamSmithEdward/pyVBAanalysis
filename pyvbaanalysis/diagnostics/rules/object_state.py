@@ -12,7 +12,7 @@ the member-completion engine), so host-typed locals like `Dim ws As Worksheet`
 count as object variables via resolve_host_alias; and the member-surface
 suppression (hasDefiniteMissingMember) is wired to the exhaustive member surface so
 an objectVariableNotSet report is suppressed when the member is provably missing
-(suppression-only — it can REMOVE a diagnostic, never add one). The
+(suppression-only, it can REMOVE a diagnostic, never add one). The
 scalar-member-access rule in the same XLIDE family needs the type environment +
 member surface and lands in M8.
 """

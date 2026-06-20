@@ -5,9 +5,11 @@ builds its symbols and conditional-compilation activity, then drives every rule 
 the ordered DIAGNOSTIC_RULE_REGISTRY, buffering per rule and flushing in registry
 order. It never throws: any internal failure yields an empty list.
 
-The editor-only edit-span helpers (incompleteExpressionEditSpan and friends) are
-completion-UI and out of scope. The member-completion context is deferred until
-the member rules and host layer land.
+The member-completion context is assembled once per pass here
+(diagnostic_member_completion_context) and shared through RulePassContext.member_ctx;
+the member, object-state, call-shape, and type rules consume it. The editor-only
+edit-span helpers (incompleteExpressionEditSpan and friends) are completion-UI and
+out of scope.
 """
 
 from __future__ import annotations
@@ -59,7 +61,14 @@ def analyze_module(source: str, opts: AnalyzeModuleOptions | None = None) -> lis
 def _run_rules(source: str, opts: AnalyzeModuleOptions) -> list[VbaDiagnostic]:
     module_name = opts.module_name or "Module"
     module_kind = opts.module_kind or ModuleSymbolKind.STANDARD
-    overrides = opts.severity_overrides
+    # Match override codes case-insensitively: codes are canonically lowercase, and
+    # validate_severity_overrides resolves them case-insensitively, so the apply path
+    # must too (otherwise a mis-cased key validates but is then silently ignored).
+    overrides = (
+        {code.lower(): value for code, value in opts.severity_overrides.items()}
+        if opts.severity_overrides is not None
+        else None
+    )
 
     def push_into(sink: list[VbaDiagnostic]) -> PushFn:
         def push(

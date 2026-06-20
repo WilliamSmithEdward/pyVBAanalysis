@@ -1,11 +1,11 @@
-"""Rule family: control-flow rules (self-contained slice).
+"""Rule family: control-flow rules.
 
 Ported from xlide_vscode/src/analyzer/diagnostics/rules/controlFlow.ts: Exit
 statement kinds, statement context (If/Then, Case/loop-exit/leading-dot
 placement), For/Next control-variable matching, duplicate Case Else, Else without
-If, and malformed leaf statements. The label rules (need flow/procedureLabels),
-the For Each element/source type rule (type inference + host), and the
-conditional-compilation branch-order rule (shared cc helper) are deferred.
+If, malformed leaf statements, the duplicate/undefined label rules (over
+flow/procedureLabels), the For Each element/source type rule (type inference +
+host model), and the conditional-compilation branch-order rule (shared cc helper).
 """
 
 from __future__ import annotations

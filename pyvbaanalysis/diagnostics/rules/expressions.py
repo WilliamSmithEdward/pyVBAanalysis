@@ -1,10 +1,11 @@
 """Rule family: expression-syntax rules.
 
 Ported from xlide_vscode/src/analyzer/diagnostics/rules/expressions.ts: unbalanced
-parentheses and division by a provably-zero divisor. The remaining rules in the
-family (invalid-expression-syntax and the parenthesized/parenless call-shape
-rules) need the member-completion context and runtime-function surfaces, so they
-stay deferred until those host layers land.
+parentheses, division by a provably-zero divisor, invalid-expression-syntax
+(incomplete member access, the unsupported `?` operator, invalid operator runs),
+and the call-shape rules (the parenthesized/parenless Call-statement and
+expression-call forms). The call-shape and member-access rules ride the
+member-completion context and runtime-function surfaces.
 """
 
 from __future__ import annotations
@@ -347,7 +348,7 @@ def _implicit_parenthesized_member_call(
 ) -> tuple[str, Span] | None:
     """Port of implicitParenthesizedMemberCall: a standalone `obj.Method()` with empty
     parentheses. A leading-dot form (`.Method()` inside With) only counts when the
-    member resolves against the receiver surface — the no-false-positive gate for an
+    member resolves against the receiver surface, the no-false-positive gate for an
     unknown With receiver."""
     call = standalone_empty_parenthesized_call_statement(source, span)
     if call is None or not call.is_member:

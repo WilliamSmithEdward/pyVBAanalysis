@@ -277,7 +277,7 @@ def check_member_assignment_types(
     """Port of checkMemberAssignmentTypes: `obj.Member = value` type compatibility.
 
     Only source-backed project members carry writability, so a host member (whose
-    writability is unknown) and an unresolved receiver both yield no diagnostic — the
+    writability is unknown) and an unresolved receiver both yield no diagnostic, the
     no-false-positive gate. The expected value type is the member's declared write
     type (falling back to its return type)."""
     if not member_ctx.project_class_members:

@@ -1,7 +1,7 @@
 """Shared AST/statement traversal utilities for the diagnostics engine.
 
 Ported from walker.ts. Pure: no rule logic, no diagnostics. The dataflow-coupled
-helper localsPassedAsCallArguments is deferred until the dataflow layer (M7).
+helper locals_passed_as_call_arguments lives in the dataflow module, not here.
 """
 
 from __future__ import annotations
