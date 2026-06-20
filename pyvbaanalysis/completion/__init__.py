@@ -13,6 +13,7 @@ from .member_access import (
     MemberCompletionEntry,
     ResolvedMemberSurface,
     is_known_object_assignment_type,
+    resolve_exact_member_completion,
     resolve_member_surface_at,
     resolve_receiver_type_at,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "MemberCompletionEntry",
     "ResolvedMemberSurface",
     "is_known_object_assignment_type",
+    "resolve_exact_member_completion",
     "resolve_member_surface_at",
     "resolve_receiver_type_at",
     "OLE_AUTOMATION_TYPES",

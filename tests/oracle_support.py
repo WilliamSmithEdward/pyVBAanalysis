@@ -37,12 +37,14 @@ def case_codes(case: OracleCase) -> set[str]:
     for module in case.modules:
         index.set_module(ModuleInput(module.name, _kind(module.module_type), module.source))
     project_procedures = index.procedure_signatures()
+    project_class_members = index.project_class_members()
     out: set[str] = set()
     for module in case.modules:
         opts = AnalyzeModuleOptions(
             module_name=module.name,
             module_kind=_kind(module.module_type),
             project_procedures=project_procedures,
+            project_class_members=project_class_members,
             project_integer_constants=index.visible_external_integer_constant_expressions(module.name),
             project_visible_symbols=index.visible_identifier_symbols(module.name),
             project_types=index.visible_type_names(module.name),

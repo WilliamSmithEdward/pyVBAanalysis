@@ -84,10 +84,15 @@ class MemberCompletionContext:
 
 @dataclass(frozen=True, slots=True)
 class MemberCompletionEntry:
-    """One member of a resolved surface. The diagnostics read only ``name``."""
+    """One member of a resolved surface. Mirrors XLIDE's CompletionMemberSource: most
+    diagnostics read only ``name``/``kind``, but the assignment-type rule reads
+    ``returns``/``writable``/``write_type`` from the exact resolved member."""
 
     name: str
     kind: str
+    returns: str | None = None
+    writable: bool | None = None
+    write_type: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +177,28 @@ def resolve_member_surface_at(
     return ResolvedMemberSurface(
         owner=surface.owner, members=list(surface.members), exhaustive=surface.exhaustive
     )
+
+
+def resolve_exact_member_completion(
+    source: str, member_name: str, member_end_offset: int, ctx: MemberCompletionContext | None = None
+) -> MemberCompletionEntry | None:
+    """Port of resolveExactMemberCompletion / resolveMemberCompletionNamed: the single
+    resolved member named ``member_name`` whose access dot ends before
+    ``member_end_offset``, carrying its ``returns``/``writable``/``write_type``.
+
+    Returns None when the receiver does not resolve or the member is absent from the
+    surface. The assignment-type rule uses the member's writable/write_type to decide
+    read-only and value-type compatibility (the no-FP gate: an unresolved member or a
+    member whose writability is unknown yields no diagnostic)."""
+    ctx = ctx if ctx is not None else MemberCompletionContext()
+    current_type = resolve_receiver_type_at(source, member_end_offset, ctx)
+    if current_type is None:
+        return None
+    surface = _member_surface_for_type(current_type, ctx)
+    if surface is None:
+        return None
+    lower = member_name.lower()
+    return next((m for m in surface.members if m.name.lower() == lower), None)
 
 
 def resolve_receiver_type_at(
@@ -639,8 +666,13 @@ def _member_surface_for_type(
 
 
 def _host_member_entries(members: Sequence[HostMember]) -> list[MemberCompletionEntry]:
+    # Host metadata never proves source-writability, so writable/write_type stay None
+    # (the assignment-type rule treats writable === undefined as "cannot decide").
     return [
-        MemberCompletionEntry(name=m["name"], kind=m.get("kind", "property")) for m in members
+        MemberCompletionEntry(
+            name=m["name"], kind=m.get("kind", "property"), returns=m.get("returns")
+        )
+        for m in members
     ]
 
 
@@ -650,7 +682,14 @@ def _project_member_entries(
     if project_type is None:
         return []
     return [
-        MemberCompletionEntry(name=m.name, kind=m.kind) for m in project_type.members
+        MemberCompletionEntry(
+            name=m.name,
+            kind=m.kind,
+            returns=m.returns,
+            writable=m.writable,
+            write_type=m.write_type,
+        )
+        for m in project_type.members
     ]
 
 

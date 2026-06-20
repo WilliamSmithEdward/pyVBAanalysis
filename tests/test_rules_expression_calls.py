@@ -1,4 +1,10 @@
-"""M8: parenthesized/parenless call-shape + expression-syntax rules (expressions.ts)."""
+"""M8/M10: parenthesized/parenless call-shape + expression-syntax rules (expressions.ts).
+
+M10 slice 3 un-defers the standalone member-call parentheses form (`obj.Method()` ->
+call-statement-forbids-parens). A leading-dot member call (`.Method()` inside With)
+only fires when the member resolves against the receiver surface (no-FP gate); the
+bare leading-dot incomplete-member case already fires through the parser.
+"""
 
 from __future__ import annotations
 
@@ -24,16 +30,11 @@ def _codes(source: str) -> set[str]:
     return {d.code for d in analyze_module(source)}
 
 
-# Standalone member-call parentheses (obj.Method()) and leading-dot member access
-# inside a With block need the host member-completion / With surface, deferred to M9.
-_M9_MEMBER = frozenset(
-    {
-        "implicit_member_call_parentheses_compile",
-        "standalone_zero_arg_method_call_compile",
-        "standalone_range_property_empty_compile",
-        "bare_leading_member_access_inside_with_compile",
-    }
-)
+def test_standalone_member_call_parens_fires() -> None:
+    # obj.Method() as a statement with empty parens is forbidden.
+    assert "call-statement-forbids-parens" in _codes(
+        "Public Sub S()\n    ThisWorkbook.CanCheckIn()\nEnd Sub\n"
+    )
 
 
 def test_call_requires_parens() -> None:
@@ -68,7 +69,7 @@ def test_valid_calls_silent() -> None:
 def test_oracle_asserted_cases() -> None:
     for code in _CODES:
         if asserted_cases(code):
-            assert assert_oracle_behavior(code, skip_ids=_M9_MEMBER) > 0
+            assert assert_oracle_behavior(code) > 0
 
 
 def test_no_false_positives_on_accepted_cases() -> None:

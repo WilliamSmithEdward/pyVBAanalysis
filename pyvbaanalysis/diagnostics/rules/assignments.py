@@ -9,7 +9,15 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 
+from ...completion.member_access import (
+    MemberCompletionContext,
+    resolve_exact_member_completion,
+)
+from ...completion.member_access import (
+    is_known_object_assignment_type as is_known_object_assignment_type_ctx,
+)
 from ...conditional import ConditionalActivityTracker
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
 from ...lexer.token_kinds import TokenKind, VbaToken
@@ -35,6 +43,8 @@ from ...types.type_inference import (
 )
 from ...types.type_names import is_known_object_assignment_type, is_known_scalar_type, normalize_type
 from ..argument_inference import (
+    SourceDeclaredTypeResolver,
+    SourceQualifiedDeclaredTypeResolver,
     incompatibility_reason,
     infer_argument_type,
     nonnumeric_string_arithmetic_operand,
@@ -47,6 +57,7 @@ from ..call_extraction import (
     named_argument_slot,
 )
 from ..callable_signatures import (
+    SourceNameScope,
     build_module_type_signatures,
     callable_signature_for_call,
     callable_type_signatures_for,
@@ -58,12 +69,17 @@ from ..walker import (
     active_module_members,
     bare_assignment_target,
     declared_name_span,
+    first_executable_token_index,
     for_each_statement,
     set_assignment_target,
+    statement_tokens,
     statement_tokens_after_leading_label,
     strip_header_brackets,
     token_name,
+    token_text,
+    top_level_operator_index,
 )
+from .type_of_is import object_assignment_incompatibility_reason
 
 
 def check_const_assignment(
@@ -105,10 +121,11 @@ def check_assignment_types(
     mod: ModuleNode,
     symbols: ModuleSymbols,
     project_visible_symbols: Sequence[VbaSymbol] | None,
+    member_ctx: MemberCompletionContext,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
 ) -> None:
-    """Bare scalar-assignment type compatibility (the member-access surface is M9)."""
+    """Scalar and member-access assignment type compatibility (`x = v`, `obj.M = v`)."""
     module_signatures = build_module_type_signatures(symbols)
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
@@ -198,6 +215,150 @@ def check_assignment_types(
             )
 
         for_each_statement(member.body, visit, activity)
+        check_member_assignment_types(
+            source, member, env, module_signatures, source_names, member_ctx, activity,
+            push, resolve_expression_type, resolve_qualified_expression_type,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _MemberAssignmentTarget:
+    member: str
+    label: str
+    member_span: Span
+    value_tokens: list[VbaToken]
+    uses_set: bool
+
+
+def _member_assignment_target(source: str, span: Span) -> _MemberAssignmentTarget | None:
+    """Port of memberAssignmentTarget: an `obj.Member = value` / `Set obj.Member = ...`
+    LHS whose last two tokens are `. Member`. Returns None for bare or compound LHS."""
+    toks = statement_tokens(source, span)
+    i = first_executable_token_index(toks)
+    if i >= len(toks):
+        return None
+    uses_set = token_text(toks[i]) == "set"
+    if uses_set or token_text(toks[i]) == "let":
+        i += 1
+    eq = top_level_operator_index(toks[i:], "=")
+    if eq < 0:
+        return None
+    equals_index = i + eq
+    lhs = toks[i:equals_index]
+    if len(lhs) < 2:
+        return None
+    member_tok = lhs[-1]
+    member_name = token_name(member_tok)
+    if not member_name or lhs[-2].raw_text != ".":
+        return None
+    if any(t.kind is TokenKind.OPERATOR and t.raw_text == "=" for t in lhs):
+        return None
+    return _MemberAssignmentTarget(
+        member=member_name,
+        label=source[span.start + lhs[0].start : span.start + member_tok.end].strip(),
+        member_span=Span(span.start + member_tok.start, span.start + member_tok.end),
+        value_tokens=list(toks[equals_index + 1 :]),
+        uses_set=uses_set,
+    )
+
+
+def check_member_assignment_types(
+    source: str,
+    member: ProcedureNode,
+    env: Mapping[str, str],
+    module_signatures: Mapping[str, CallableTypeSignature],
+    source_names: SourceNameScope,
+    member_ctx: MemberCompletionContext,
+    activity: ConditionalActivityTracker | None,
+    push: PushFn,
+    resolve_expression_type: SourceDeclaredTypeResolver | None,
+    resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None,
+) -> None:
+    """Port of checkMemberAssignmentTypes: `obj.Member = value` type compatibility.
+
+    Only source-backed project members carry writability, so a host member (whose
+    writability is unknown) and an unresolved receiver both yield no diagnostic — the
+    no-false-positive gate. The expected value type is the member's declared write
+    type (falling back to its return type)."""
+    if not member_ctx.project_class_members:
+        return
+
+    def visit(stmt: LeafStatementNode) -> None:
+        assignment = _member_assignment_target(source, stmt.span)
+        if assignment is None:
+            return
+        target = resolve_exact_member_completion(
+            source, assignment.member, assignment.member_span.end, member_ctx
+        )
+        if target is None or target.writable is None:
+            return
+        if target.writable is False:
+            push(
+                "readonlyMemberAssignment",
+                f"Cannot assign to read-only property '{assignment.label}'.",
+                assignment.member_span,
+            )
+            return
+        expected = target.write_type if target.write_type is not None else target.returns
+        if assignment.uses_set:
+            if expected and is_known_scalar_type(normalize_type(expected) or ""):
+                push(
+                    "setRequiresObject",
+                    f"Set assignment requires an object-valued target, but '{assignment.label}' "
+                    f"expects {expected}.",
+                    assignment.member_span,
+                )
+                return
+            actual = infer_argument_type(
+                assignment.value_tokens, stmt.span.start, env, module_signatures, source_names,
+                resolve_expression_type, resolve_qualified_expression_type,
+            )
+            reason = object_assignment_incompatibility_reason(expected, actual, member_ctx)
+            if reason:
+                push(
+                    "assignmentObjectTypeMismatch",
+                    f"Object assignment to '{assignment.label}' expects {expected}, but got "
+                    f"{actual.label if actual is not None else None}. {reason}",
+                    actual.span if actual is not None else assignment.member_span,
+                )
+            return
+        if is_known_object_assignment_type_ctx(expected, member_ctx):
+            push(
+                "setRequired",
+                f"Object assignment to '{assignment.label}' requires Set because it expects {expected}.",
+                assignment.member_span,
+            )
+            return
+        if not expected or normalize_type(expected) == "object":
+            return
+        string_arithmetic = nonnumeric_string_arithmetic_operand(
+            expected, assignment.value_tokens, stmt.span.start
+        )
+        if string_arithmetic is not None:
+            push(
+                "stringArithmeticCoercion",
+                f"Assignment to '{assignment.label}' expects {expected}, but this numeric expression "
+                f"contains {string_arithmetic.label}. This will raise Run-time error '13': "
+                "Type mismatch.",
+                string_arithmetic.span,
+            )
+            return
+        actual = infer_argument_type(
+            assignment.value_tokens, stmt.span.start, env, module_signatures, source_names,
+            resolve_expression_type, resolve_qualified_expression_type,
+        )
+        if actual is None:
+            return
+        reason = incompatibility_reason(expected, actual)
+        if not reason:
+            return
+        push(
+            "assignmentTypeMismatch",
+            f"Assignment to '{assignment.label}' expects {expected}, but got {actual.label}. {reason}",
+            actual.span,
+        )
+
+    for_each_statement(member.body, visit, activity)
 
 
 def _array_assignment_to_scalar_source(
@@ -243,30 +404,52 @@ def check_set_assignments(
     source: str,
     symbols: ModuleSymbols,
     project_visible_symbols: Sequence[VbaSymbol] | None,
+    member_ctx: MemberCompletionContext,
     push: PushFn,
 ) -> ProcedureStatementVisitor:
-    """`Set x = ...` where x is a declared scalar requires an object variable.
-
-    The object-valued target branch (Set against an incompatible object type) needs
-    the host member surface and is deferred to M9.
-    """
+    """`Set x = ...` where x is a declared scalar requires an object variable; a Set to
+    an object target of a provably-incompatible object type is reported too."""
+    module_signatures = build_module_type_signatures(symbols)
 
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
         env = type_environment_for(symbols, member)
+        source_names = source_name_scope_for(symbols, member, project_visible_symbols)
         proc_sym = procedure_symbol_for(symbols, member)
+
+        def resolve_expression_type(name: str) -> SourceDeclaredType:
+            return declared_value_type_for_source_binding(symbols, proc_sym, project_visible_symbols, name)
+
+        def resolve_qualified_expression_type(qualifier: str, name: str) -> SourceDeclaredType:
+            return declared_value_type_for_qualified_source_binding(
+                symbols, project_visible_symbols, qualifier, name
+            )
 
         def visitor(stmt: LeafStatementNode) -> None:
             target = set_assignment_target(source, stmt.span)
             if target is None:
                 return
-            name, span, _value_tokens = target
+            name, span, value_tokens = target
             target_declared_type = declared_type_for_source_binding(
                 symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.ASSIGNMENT_TARGET
             )
             expected = target_declared_type.as_type if target_declared_type.resolved else env.get(name.lower())
             target_type = normalize_type(expected)
             if not target_type or not is_known_scalar_type(target_type):
-                return  # object/unknown target: object-type mismatch is deferred (M9)
+                if not is_known_object_assignment_type_ctx(expected, member_ctx):
+                    return
+                actual = infer_argument_type(
+                    value_tokens, stmt.span.start, env, module_signatures, source_names,
+                    resolve_expression_type, resolve_qualified_expression_type,
+                )
+                reason = object_assignment_incompatibility_reason(expected, actual, member_ctx)
+                if reason:
+                    push(
+                        "assignmentObjectTypeMismatch",
+                        f"Object assignment to '{name}' expects {expected}, but got "
+                        f"{actual.label if actual is not None else None}. {reason}",
+                        actual.span if actual is not None else span,
+                    )
+                return
             push(
                 "setRequiresObject",
                 f"Set assignment requires an object variable, but '{name}' is declared as {expected}.",

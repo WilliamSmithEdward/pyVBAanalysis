@@ -13,7 +13,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from ...completion.type_completion import resolve_type_name
 from ...conditional import ConditionalActivity, ConditionalActivityTracker
+from ...host.host_model import HostObjectModel
 from ...flow.procedure_labels import (
     collect_procedure_label_declarations,
     collect_procedure_label_references,
@@ -41,7 +43,7 @@ from ...parser.nodes import (
     is_leaf_statement,
 )
 from ...symbols.name_resolution import BareIdentifierContext
-from ...symbols.symbol_model import ModuleSymbols, VbaSymbol
+from ...symbols.symbol_model import ModuleSymbols, VbaProjectTypeName, VbaSymbol
 from ...types.type_inference import (
     DeclaredValueShape,
     SourceDeclaredShape,
@@ -82,13 +84,17 @@ def check_for_each_loop_types(
     mod: ModuleNode,
     symbols: ModuleSymbols,
     project_visible_symbols: Sequence[VbaSymbol] | None,
+    project_types: Sequence[VbaProjectTypeName] | None,
+    model: HostObjectModel | None,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
 ) -> None:
     """A For Each control variable must be Variant/Object; its source a collection/array.
 
-    User-defined-Type, Enum, and host-class typing need the host/project type
-    registry and are deferred to M9; the known-scalar cases are fully covered here.
+    User-defined-Type and Enum control-variable typing resolves through the
+    project-type registry / host model (resolveTypeName); a UDT- or Enum-declared
+    control variable is reported with its specific shape, a host class is accepted,
+    and the known-scalar cases are flagged As-is.
     """
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
@@ -101,12 +107,16 @@ def check_for_each_loop_types(
                 symbols, proc_sym, project_visible_symbols, name, context
             )
 
-        _check_for_each_loop_types_in_body(member.body, shapes, activity, push, resolve_shape)
+        _check_for_each_loop_types_in_body(
+            member.body, shapes, project_types, model, activity, push, resolve_shape
+        )
 
 
 def _check_for_each_loop_types_in_body(
     body: list[BodyNode],
     shapes: Mapping[str, DeclaredValueShape],
+    project_types: Sequence[VbaProjectTypeName] | None,
+    model: HostObjectModel | None,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
     resolve_shape: _ShapeResolver,
@@ -116,14 +126,22 @@ def _check_for_each_loop_types_in_body(
             continue
         if isinstance(node, _BLOCK_NODES):
             if isinstance(node, ForBlockNode):
-                _check_for_each_control_variable_type(node, shapes, push, resolve_shape)
-                _check_for_each_source_type(node, shapes, push, resolve_shape)
-            _check_for_each_loop_types_in_body(node.body, shapes, activity, push, resolve_shape)
+                _check_for_each_control_variable_type(
+                    node, shapes, project_types, model, push, resolve_shape
+                )
+                _check_for_each_source_type(
+                    node, shapes, project_types, model, push, resolve_shape
+                )
+            _check_for_each_loop_types_in_body(
+                node.body, shapes, project_types, model, activity, push, resolve_shape
+            )
 
 
 def _check_for_each_control_variable_type(
     node: ForBlockNode,
     shapes: Mapping[str, DeclaredValueShape],
+    project_types: Sequence[VbaProjectTypeName] | None,
+    model: HostObjectModel | None,
     push: PushFn,
     resolve_shape: _ShapeResolver,
 ) -> None:
@@ -133,7 +151,7 @@ def _check_for_each_control_variable_type(
     shape = resolved.shape if resolved.resolved else shapes.get(node.control_variable.lower())
     if shape is None:
         return
-    problem = _for_each_scalar_problem(shape, allow_array_message=True)
+    problem = _for_each_control_variable_type_problem(shape, project_types, model)
     if problem is None:
         return
     push(
@@ -147,6 +165,8 @@ def _check_for_each_control_variable_type(
 def _check_for_each_source_type(
     node: ForBlockNode,
     shapes: Mapping[str, DeclaredValueShape],
+    project_types: Sequence[VbaProjectTypeName] | None,
+    model: HostObjectModel | None,
     push: PushFn,
     resolve_shape: _ShapeResolver,
 ) -> None:
@@ -159,7 +179,7 @@ def _check_for_each_source_type(
     shape = resolved.shape if resolved.resolved else shapes.get(source_name.lower())
     if shape is None:
         return
-    problem = _for_each_scalar_problem(shape, allow_array_message=False)
+    problem = _for_each_source_type_problem(shape, project_types, model)
     if problem is None:
         return
     push(
@@ -169,16 +189,43 @@ def _check_for_each_source_type(
     )
 
 
-def _for_each_scalar_problem(shape: DeclaredValueShape, *, allow_array_message: bool) -> str | None:
+def _for_each_control_variable_type_problem(
+    shape: DeclaredValueShape,
+    project_types: Sequence[VbaProjectTypeName] | None,
+    model: HostObjectModel | None,
+) -> str | None:
     if shape.is_array:
-        return "it is an array variable" if allow_array_message else None
+        return "it is an array variable"
     if not shape.as_type:
+        return None
+    resolved = resolve_type_name(shape.as_type, project_types, model)
+    if resolved is not None and resolved.kind == "userType":
+        return f"it is declared As user-defined Type '{shape.as_type}'"
+    if resolved is not None and resolved.kind == "enum":
+        return f"it is declared As Enum '{shape.as_type}'"
+    if resolved is not None and resolved.kind != "primitive":
         return None
     normalized = normalize_type(shape.as_type)
     if not normalized or normalized in ("variant", "object"):
         return None
-    # User-defined-Type / Enum / host-class names resolve to None here (M9); only
-    # the known-scalar declaration is flagged.
+    if is_known_scalar_type(normalized):
+        return f"it is declared As {shape.as_type}"
+    return None
+
+
+def _for_each_source_type_problem(
+    shape: DeclaredValueShape,
+    project_types: Sequence[VbaProjectTypeName] | None,
+    model: HostObjectModel | None,
+) -> str | None:
+    if shape.is_array or not shape.as_type:
+        return None
+    resolved = resolve_type_name(shape.as_type, project_types, model)
+    if resolved is not None and resolved.kind != "primitive":
+        return None
+    normalized = normalize_type(shape.as_type)
+    if not normalized or normalized in ("variant", "object"):
+        return None
     if is_known_scalar_type(normalized):
         return f"it is declared As {shape.as_type}"
     return None

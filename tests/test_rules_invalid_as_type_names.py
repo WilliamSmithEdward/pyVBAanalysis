@@ -1,18 +1,19 @@
-"""M9: invalidAsTypeNames rule (declarations.ts parity, SAFE branches only).
+"""M10: invalidAsTypeNames rule (declarations.ts FULL parity).
 
-Ships the self-contained fallback branches (invalid-as-type-name): a type-position
-name that resolves to NO known type AND is a reserved VBA identifier, a VBA runtime
-function, or a known project non-type declaration. DEFERS (no-op): the ambiguous
-project-type branch, the invalidNewTypeName creatable-type branch, and qualified
-references — all need the project-type/external registry the port lacks. A
-conservative type-resolution gate (primitives + host aliases + OLE + same-module
-Enum/Type + project class/document/userform + project_types when supplied)
-suppresses false positives on real types (e.g. `Long`, host `Filter`).
-
-The one asserted oracle case (runtime_function_as_type_name_int -> a `Dim x As Int`
-where `Int` is a VBA runtime function) is in the shipped runtime branch, so no
-skip_ids. The rule is wired in the real registry, so a plain analyze_module
-exercises it.
+Every type-name reference is resolved with resolveTypeName over the project-type
+registry (opts.project_types) + host model, exactly as XLIDE does. Branches:
+  - invalid-as-type-name: an ambiguous project-type name (multiple visible project
+    types share it), a reserved VBA identifier, a VBA runtime function, or a known
+    project non-type declaration that does not resolve to a real type.
+  - invalid-new-type-name: a `New` reference (`As New T` / `New T`) to a type that
+    resolves but is NOT creatable and is NOT a host type (only project classes and
+    UserForms may be created with New). WithEvents `As New` is exempt.
+Qualified references (`Mod.Type`) resolve through the module-qualified candidate
+set. The no-false-positive guarantee comes from resolveTypeName itself plus the
+project-type context the caller threads in (e.g. `Long`/`Filter` resolve, so they
+never fall through to the reserved/runtime branches). The ambiguous and
+invalid-new-type-name branches need project context (project_types), so the
+positives for them thread a ProjectIndex in.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ from pyvbaanalysis.diagnostics import AnalyzeModuleOptions, analyze_module
 from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
 
 _CODE = "invalid-as-type-name"
+_NEW_CODE = "invalid-new-type-name"
+_CODES = (_CODE, _NEW_CODE)
 
 
 _STD = AnalyzeModuleOptions(module_name="Module1", module_kind=ModuleSymbolKind.STANDARD)
@@ -34,6 +37,22 @@ _STD = AnalyzeModuleOptions(module_name="Module1", module_kind=ModuleSymbolKind.
 
 def _codes(source: str, opts: AnalyzeModuleOptions | None = None) -> set[str]:
     return {d.code for d in analyze_module(source, opts)}
+
+
+def _project_codes(modules: list[tuple[str, ModuleSymbolKind, str]], target: str) -> set[str]:
+    """Codes for `target` analyzed with the full project context threaded in."""
+    index = ProjectIndex()
+    for name, kind, src in modules:
+        index.set_module(ModuleInput(name, kind, src))
+    target_src = next(src for name, _k, src in modules if name == target)
+    opts = AnalyzeModuleOptions(
+        module_name=target,
+        module_kind=next(k for n, k, _s in modules if n == target),
+        project_types=index.visible_type_names(target),
+        project_class_members=index.project_class_members(),
+        known_non_type_names=index.visible_non_type_names(target),
+    )
+    return {d.code for d in analyze_module(target_src, opts)}
 
 
 # -- direct positives ------------------------------------------------------
@@ -117,9 +136,66 @@ def test_project_class_type_is_silent() -> None:
     assert _CODE not in _codes(entry, opts)
 
 
-def test_qualified_reference_is_silent() -> None:
-    # Qualified names are deferred (need the registry) -> no diagnostic.
+def test_qualified_reference_unresolved_is_silent() -> None:
+    # `Foo.Bar` resolves to nothing (no project module Foo) and the member `Bar` is
+    # not reserved / runtime / a known non-type, so it stays silent — matching XLIDE.
     assert _CODE not in _codes("Public Sub S()\n    Dim x As Foo.Bar\nEnd Sub", _STD)
+
+
+# -- new branches: ambiguous + invalid-new-type-name -----------------------
+
+
+def test_ambiguous_project_type_fires() -> None:
+    # A class module `Thing` and an Enum `Thing` in another module collide; the bare
+    # `As Thing` reference is ambiguous across the project tier.
+    mods = [
+        ("Thing", ModuleSymbolKind.CLASS, "Public Sub M()\nEnd Sub\n"),
+        ("ModB", ModuleSymbolKind.STANDARD, "Public Enum Thing\n    A = 1\nEnd Enum\n"),
+        ("ModC", ModuleSymbolKind.STANDARD, "Public Sub S()\n    Dim x As Thing\nEnd Sub\n"),
+    ]
+    assert _CODE in _project_codes(mods, "ModC")
+
+
+def test_new_user_type_fires() -> None:
+    src = (
+        "Public Type TPoint\n    X As Long\nEnd Type\n\n"
+        "Public Sub S()\n    Dim p As New TPoint\nEnd Sub\n"
+    )
+    assert _NEW_CODE in _project_codes([("Module1", ModuleSymbolKind.STANDARD, src)], "Module1")
+
+
+def test_new_enum_fires() -> None:
+    src = (
+        "Public Enum EColor\n    Red = 1\nEnd Enum\n\n"
+        "Public Sub S()\n    Dim c As New EColor\nEnd Sub\n"
+    )
+    assert _NEW_CODE in _project_codes([("Module1", ModuleSymbolKind.STANDARD, src)], "Module1")
+
+
+def test_new_creatable_class_is_silent() -> None:
+    # `New Person` where Person is a project class module is legal (creatable).
+    mods = [
+        ("Person", ModuleSymbolKind.CLASS, "Public Sub Save()\nEnd Sub\n"),
+        ("Module1", ModuleSymbolKind.STANDARD, "Public Sub S()\n    Dim p As New Person\nEnd Sub\n"),
+    ]
+    assert _NEW_CODE not in _project_codes(mods, "Module1")
+
+
+def test_new_host_type_is_silent() -> None:
+    # `New Collection` is a host object-model type; host types are exempt from the
+    # New-creatable rule.
+    src = "Public Sub S()\n    Dim c As New Collection\nEnd Sub\n"
+    assert _NEW_CODE not in _project_codes([("Module1", ModuleSymbolKind.STANDARD, src)], "Module1")
+
+
+def test_withevents_new_is_silent() -> None:
+    # `WithEvents x As New T` is exempt from invalid-new-type-name even though it is
+    # a New declaration; a creatable class is the valid target and stays silent.
+    mods = [
+        ("Sink", ModuleSymbolKind.CLASS, "Public Event Fired()\n"),
+        ("Watcher", ModuleSymbolKind.CLASS, "Private WithEvents s As New Sink\n"),
+    ]
+    assert _NEW_CODE not in _project_codes(mods, "Watcher")
 
 
 # -- oracle ----------------------------------------------------------------
@@ -147,8 +223,9 @@ def test_oracle_asserted_cases() -> None:
 
 
 def test_no_false_positives_on_accepted_cases() -> None:
-    # invalid-as-type-name is a compile-error diagnostic, so every accepted case
-    # constrains it: it must never fire on compile-valid code.
+    # Both invalid-as-type-name and invalid-new-type-name are compile-error
+    # diagnostics, so every accepted case constrains them: they must never fire on
+    # compile-valid code (evaluated with the full project context the harness threads in).
     for case in accepted_cases():
-        offenders = oracle_false_positives(case, (_CODE,))
-        assert not offenders, f"{case.id}: {_CODE} false positive"
+        offenders = oracle_false_positives(case, _CODES)
+        assert not offenders, f"{case.id}: {sorted(offenders)} false positive"

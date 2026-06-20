@@ -16,14 +16,19 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Union
+from typing import Literal, Union
 
+from ...completion.member_access import MemberCompletionContext
+from ...completion.type_completion import (
+    TypeCompletionKind,
+    is_creatable_type_completion,
+    resolve_type_name,
+)
 from ...conditional import (
     ConditionalActivity,
     ConditionalActivityTracker,
     collect_conditional_directives,
 )
-from ...host import resolve_host_alias
 from ...lexer.keyword_table import OPERATOR_IDENTIFIERS, is_reserved_identifier
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize
@@ -88,6 +93,9 @@ from .shared import (
     name_token_hit,
     scan_conditional_compilation_branch_order,
 )
+# resolveKnownObjectAssignmentType lives in XLIDE's shared typeInference.ts; the
+# port keeps it next to its other consumer (typeOfIs) and shares it from there.
+from .type_of_is import _resolve_known_object_assignment_type
 
 # Access/storage modifiers that may lead a procedure declaration.
 _PROC_MODIFIERS: frozenset[str] = frozenset({"public", "private", "friend", "global", "static"})
@@ -453,7 +461,7 @@ def _property_setter_return_type_span(source: str, proc: ProcedureNode) -> Span:
     return Span(header.start + as_tok.start, header.start + end_tok.end)
 
 
-def check_property_setter_value_parameters(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+def check_property_setter_value_parameters(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, member_ctx: MemberCompletionContext, push: PushFn) -> None:
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode) or member.proc_kind not in (
             ProcKind.PROPERTY_LET,
@@ -480,8 +488,18 @@ def check_property_setter_value_parameters(source: str, mod: ModuleNode, activit
                         f"declared As {value_param.as_type}.",
                         declared_name_span(source, value_param.span, value_param.name),
                     )
-            # else: Property Let object-value (propertyLetObjectValue) DEFERRED —
-            # needs resolveKnownObjectAssignmentType (host/project), no-op here.
+            else:
+                object_type = _resolve_known_object_assignment_type(
+                    value_param.as_type, member_ctx
+                )
+                if object_type is not None:
+                    push(
+                        "propertyLetObjectValue",
+                        f"Property Let '{member.name}' final value parameter "
+                        f"'{value_param.name}' must not be an object reference; use "
+                        f"Property Set because it is declared As {object_type.display}.",
+                        declared_name_span(source, value_param.span, value_param.name),
+                    )
             continue
         push(
             "propertySetterMissingValue",
@@ -492,35 +510,37 @@ def check_property_setter_value_parameters(source: str, mod: ModuleNode, activit
 
 # -- checkInvalidAsTypeNames (safe branches) -------------------------------
 #
-# Port of checkInvalidAsTypeNames / collectTypeNameReferences. Only the
-# self-contained fallback branches ship: a type-position name that resolves to NO
-# known type AND is a reserved VBA identifier, a VBA runtime function, or a known
-# project non-type declaration. DEFERRED (no-op, sound):
-#   - ambiguous project-type branch   (needs the project-type registry)
-#   - host-ambiguous reporting         (needs the project-type registry)
-#   - invalidNewTypeName / creatable   (needs isCreatableTypeCompletion + registry)
-# The reserved/runtime branches are gated by `_resolves_to_known_type`, which is a
-# conservative union of every type signal the port DOES have (primitives, host
-# aliases, OLE IUnknown, same-module enums/Types, project class/document/userform
-# members, and `opts.project_types` when supplied). Without that gate a primitive
-# word (`Long` is reserved) or a host type that shares a runtime-function name
-# (`Filter`) would be a false positive. Qualified references (`Mod.Type`) are
-# skipped: resolving the qualifier needs the project-type/external registry, so the
-# sound choice is to stay silent on them.
+# Full port of checkInvalidAsTypeNames / collectTypeNameReferences. Each type-name
+# reference (As-clause, As New, New expression, TypeOf...Is, Implements, return
+# type) is resolved with resolveTypeName over the project-type registry
+# (opts.project_types) + host model. A name that resolves to the 'ambiguous' marker
+# (multiple visible project types share it), a New reference to a non-creatable
+# non-host type, a reserved VBA identifier, a VBA runtime function, or a known
+# project non-type declaration is reported; anything that resolves to a real type is
+# accepted. Qualified references (`Mod.Type`) resolve through the module-qualified
+# candidate set. The no-false-positive guarantee comes from resolveTypeName itself
+# (faithful to XLIDE) plus the project-type context the caller threads in.
 
-_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_OLE_AUTOMATION_TYPE_NAMES: frozenset[str] = frozenset({"iunknown"})
+_TypeNameReferenceKind = Literal[
+    "declaration", "newDeclaration", "newExpression", "typeOfIs", "implements"
+]
 
 
 @dataclass(frozen=True, slots=True)
 class _TypeNameRef:
     name: str
     span: Span
-    qualified: bool
+    kind: _TypeNameReferenceKind
+    qualifier: str | None = None
+
+
+def _type_reference_lookup_name(ref: _TypeNameRef) -> str:
+    """Port of typeReferenceLookupName: qualified refs look up as `Qualifier.Member`."""
+    return f"{ref.qualifier}.{ref.name}" if ref.qualifier else ref.name
 
 
 def _type_name_ref_from_tokens(
-    toks: Sequence[VbaToken], type_index: int, base: int
+    toks: Sequence[VbaToken], type_index: int, base: int, kind: _TypeNameReferenceKind
 ) -> _TypeNameRef | None:
     first = _at(toks, type_index)
     if first is None:
@@ -531,14 +551,15 @@ def _type_name_ref_from_tokens(
     dot = _at(toks, type_index + 1)
     member_tok = _at(toks, type_index + 2) if dot is not None and dot.raw_text == "." else None
     if member_tok is None:
-        return _TypeNameRef(name=first_name, span=Span(base + first.start, base + first.end), qualified=False)
+        return _TypeNameRef(name=first_name, span=Span(base + first.start, base + first.end), kind=kind)
     member_name = token_name(member_tok)
     if not member_name:
-        return _TypeNameRef(name=first_name, span=Span(base + first.start, base + first.end), qualified=False)
+        return _TypeNameRef(name=first_name, span=Span(base + first.start, base + first.end), kind=kind)
     return _TypeNameRef(
         name=member_name,
         span=Span(base + member_tok.start, base + member_tok.end),
-        qualified=True,
+        kind=kind,
+        qualifier=first_name,
     )
 
 
@@ -548,9 +569,11 @@ def _type_name_after_as(source: str, span: Span) -> _TypeNameRef | None:
         if token_text(tok) != "as":
             continue
         type_index = i + 1
+        kind: _TypeNameReferenceKind = "declaration"
         if token_text(_at(toks, type_index)) == "new":
             type_index += 1
-        ref = _type_name_ref_from_tokens(toks, type_index, span.start)
+            kind = "newDeclaration"
+        ref = _type_name_ref_from_tokens(toks, type_index, span.start, kind)
         if ref is not None:
             return ref
     return None
@@ -570,7 +593,7 @@ def _return_type_name_ref(source: str, proc: ProcedureNode) -> _TypeNameRef | No
             continue
         if depth != 0 or token_text(tok) != "as":
             continue
-        return _type_name_ref_from_tokens(toks, i + 1, header.start)
+        return _type_name_ref_from_tokens(toks, i + 1, header.start, "declaration")
     return None
 
 
@@ -580,7 +603,7 @@ def _type_names_after_new(source: str, span: Span) -> list[_TypeNameRef]:
     for i, tok in enumerate(toks):
         if token_text(tok) != "new":
             continue
-        ref = _type_name_ref_from_tokens(toks, i + 1, span.start)
+        ref = _type_name_ref_from_tokens(toks, i + 1, span.start, "newExpression")
         if ref is not None:
             out.append(ref)
     return out
@@ -597,7 +620,7 @@ def _type_names_after_typeof_is(source: str, span: Span) -> list[_TypeNameRef]:
             continue
         if not saw_typeof or lower != "is":
             continue
-        ref = _type_name_ref_from_tokens(toks, i + 1, span.start)
+        ref = _type_name_ref_from_tokens(toks, i + 1, span.start, "typeOfIs")
         if ref is not None:
             out.append(ref)
         saw_typeof = False
@@ -632,7 +655,8 @@ def _collect_implements_refs(source: str) -> list[_TypeNameRef]:
                     _TypeNameRef(
                         name=raw_name[dot + 1 :],
                         span=Span(line_start + column + dot + 1, line_start + column + len(raw_name)),
-                        qualified=True,
+                        kind="implements",
+                        qualifier=raw_name[:dot],
                     )
                 )
             elif column >= 0:
@@ -640,7 +664,7 @@ def _collect_implements_refs(source: str) -> list[_TypeNameRef]:
                     _TypeNameRef(
                         name=raw_name,
                         span=Span(line_start + column, line_start + column + len(raw_name)),
-                        qualified=False,
+                        kind="implements",
                     )
                 )
         if line_end == length:
@@ -693,64 +717,82 @@ def _collect_type_name_references(source: str, mod: ModuleNode) -> list[_TypeNam
     return out
 
 
-def _module_defined_type_names(mod: ModuleNode) -> set[str]:
-    """Lowercased names of types DEFINED in this module (Enum, user Type).
+_TYPE_KIND_LABEL_FOR_NEW: dict[TypeCompletionKind, str] = {
+    "primitive": "a VBA primitive type",
+    "external": "an external interface type",
+    "host": "an Excel object-model type",
+    "document": "a document module type",
+    "enum": "an Enum type",
+    "userType": "a user-defined Type",
+    "ambiguous": "an ambiguous project type",
+    "module": "a module qualifier",
+    "class": "a creatable project type",
+    "userform": "a creatable project type",
+}
 
-    A same-module type can shadow a built-in/runtime name, so it must never be
-    flagged as a non-type. Project class/document/userform names come from
-    `opts.project_class_members` instead.
-    """
-    names: set[str] = set()
-    for member in mod.members:
-        if isinstance(member, (TypeNode, EnumNode)) and member.name:
-            names.add(member.name.lower())
-    return names
+
+def _is_new_type_reference(kind: _TypeNameReferenceKind) -> bool:
+    return kind == "newExpression" or kind == "newDeclaration"
 
 
-def _resolves_to_known_type(
-    name: str, mod_type_names: set[str], opts: AnalyzeModuleOptions
-) -> bool:
-    """Conservative union of every type signal available to the port.
+def _collect_with_events_new_declaration_spans(
+    mod: ModuleNode, activity: ConditionalActivityTracker | None
+) -> list[Span]:
+    """Port of collectWithEventsNewDeclarationSpans: the spans of `WithEvents x As
+    New T` declarations. `New` on a WithEvents declaration is legal (the field is
+    initialized lazily), so its New reference is exempt from invalidNewTypeName."""
+    spans: list[Span] = []
 
-    Mirrors the part of resolveTypeName the port CAN evaluate: primitives, host
-    aliases/types, OLE IUnknown, same-module Enum/Type definitions, project
-    class/document/userform members, and `opts.project_types` when the registry is
-    supplied. Returns True when `name` could be a valid type, suppressing the
-    fallback branches (no-FP)."""
-    lower = name.lower()
-    normalized = normalize_type(name)
-    if normalized == "object" or normalized == "variant" or is_known_scalar_type(normalized or ""):
-        return True
-    if lower in _OLE_AUTOMATION_TYPE_NAMES:
-        return True
-    if resolve_host_alias(name, opts.host_model) is not None:
-        return True
-    if lower in mod_type_names:
-        return True
-    for project_type in opts.project_class_members or []:
-        if project_type.name.lower() == lower:
-            return True
-    for project_type_name in opts.project_types or []:
-        candidate = getattr(project_type_name, "name", None)
-        if isinstance(candidate, str) and candidate.lower() == lower:
-            return True
-    return False
+    def inspect(group: VariableGroupNode) -> None:
+        if not group.with_events or is_inactive_node(activity, group):
+            return
+        for decl in group.declarations:
+            if decl.is_new:
+                spans.append(decl.span)
+
+    for member in active_module_members(mod, activity):
+        if isinstance(member, VariableGroupNode):
+            inspect(member)
+            continue
+        if isinstance(member, ProcedureNode):
+            for_each_variable_group(member.body, inspect, activity)
+    return spans
 
 
 def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, opts: AnalyzeModuleOptions, push: PushFn) -> None:
-    mod_type_names = _module_defined_type_names(mod)
+    with_events_new_spans = _collect_with_events_new_declaration_spans(mod, activity)
     known_non_type_names = opts.known_non_type_names or frozenset()
     for ref in _collect_type_name_references(source, mod):
         if activity is not None and activity.is_inactive(ref.span):
             continue
-        if ref.qualified:
-            # Qualified-name resolution needs the project-type/external registry the
-            # port lacks; staying silent is the sound choice. (DEFERRED)
+        lookup_name = _type_reference_lookup_name(ref)
+        resolved = resolve_type_name(lookup_name, opts.project_types, opts.host_model)
+        if resolved is not None and resolved.kind == "ambiguous":
+            push(
+                "invalidAsTypeName",
+                f"'{ref.name}' is ambiguous because multiple visible project types use that name.",
+                ref.span,
+            )
             continue
-        if _resolves_to_known_type(ref.name, mod_type_names, opts):
+        if (
+            resolved is not None
+            and _is_new_type_reference(ref.kind)
+            and not is_creatable_type_completion(resolved)
+            and resolved.kind != "host"
+        ):
+            if ref.kind == "newDeclaration" and any(
+                _contains_span(span, ref.span) for span in with_events_new_spans
+            ):
+                continue
+            push(
+                "invalidNewTypeName",
+                f"'{ref.name}' is {_TYPE_KIND_LABEL_FOR_NEW[resolved.kind]} and cannot be used "
+                "with New. New can create project classes and UserForms only.",
+                ref.span,
+            )
             continue
-        # Ambiguous / invalidNewTypeName branches DEFERRED (need the project-type
-        # registry). Only the self-contained fallbacks below ship.
+        if resolved is not None:
+            continue
         if is_reserved_identifier(ref.name):
             push(
                 "invalidAsTypeName",

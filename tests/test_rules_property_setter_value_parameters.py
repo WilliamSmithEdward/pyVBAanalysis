@@ -1,14 +1,16 @@
-"""M9: propertySetterValueParameters rule (declarations.ts parity, safe branches).
+"""M10: propertySetterValueParameters rule (declarations.ts full parity).
 
-Ships the pure signature/structure branches:
+Ships every branch:
   - property-setter-missing-value   (Let/Set with no parameters)
   - property-setter-return-type     (Let/Set declares an As return type)
   - property-set-scalar-value       (Property Set final value param is scalar)
-DEFERS the propertyLetObjectValue branch (object-value resolution needs the host /
-project class-assignment surface). The one asserted oracle case
-(corpus_prop_005_compile -> property-setter-missing-value) is in a shipped branch,
-so no skip_ids. The rule is wired in the real registry, so a plain analyze_module
-exercises it.
+  - property-let-object-value       (Property Let final value param is an object)
+The propertyLetObjectValue branch (M10 slice 3c) resolves the value-param type via
+resolveKnownObjectAssignmentType over the host / project class-assignment surface,
+reusing the same helper as typeOfIsAlwaysFalse. It is a compile-error code with no
+asserted oracle case (the corpus has no positive), so it is covered by direct unit
+positives plus the all-accepted no-FP sweep. The rule is wired in the real
+registry, so a plain analyze_module exercises every branch.
 """
 
 from __future__ import annotations
@@ -21,11 +23,12 @@ from oracle_support import (  # type: ignore[attr-defined]
 
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions, analyze_module
 
-# Codes the shipped branches emit; the no-FP sweep checks all three.
+# Codes the rule emits; the no-FP sweep checks all four.
 _CODES = (
     "property-setter-missing-value",
     "property-setter-return-type",
     "property-set-scalar-value",
+    "property-let-object-value",
 )
 _ORACLE_CODE = "property-setter-missing-value"
 
@@ -58,6 +61,20 @@ def test_let_return_type_fires() -> None:
 def test_set_scalar_value_fires() -> None:
     assert "property-set-scalar-value" in _codes(
         "Public Property Set P(ByVal v As Long)\nEnd Property"
+    )
+
+
+def test_let_generic_object_value_fires() -> None:
+    # A Property Let whose final value param is As Object must use Property Set.
+    assert "property-let-object-value" in _codes(
+        "Public Property Let P(ByVal v As Object)\nEnd Property"
+    )
+
+
+def test_let_host_object_value_fires() -> None:
+    # As Range resolves to a host object type (host model loaded by default).
+    assert "property-let-object-value" in _codes(
+        "Public Property Let P(ByVal v As Range)\nEnd Property"
     )
 
 

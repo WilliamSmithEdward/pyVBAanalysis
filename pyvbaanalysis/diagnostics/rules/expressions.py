@@ -12,6 +12,10 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping, Sequence
 
+from ...completion.member_access import (
+    MemberCompletionContext,
+    resolve_exact_member_completion,
+)
 from ...conditional import ConditionalActivityTracker
 from ...constants.integer_constant_expression import (
     IntegerConstantLookup,
@@ -283,13 +287,14 @@ def check_call_parens(
     symbols: ModuleSymbols,
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None,
     project_visible_symbols: Sequence[VbaSymbol] | None,
+    member_ctx: MemberCompletionContext,
     push: PushFn,
 ) -> ProcedureStatementVisitor:
     """A `Call` statement needs parentheses; a bare zero-arg call cannot use `()`.
 
-    The standalone member-call form (`obj.Method()`) needs the host member surface
-    and is deferred to M9.
-    """
+    The standalone member-call form (`obj.Method()`) is reported too; a leading-dot
+    member call (`.Method()` inside With) only fires when the member resolves against
+    the receiver surface (the no-FP gate)."""
     module_signatures = callable_type_signatures_for(symbols, project_procedures)
 
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
@@ -322,10 +327,38 @@ def check_call_parens(
                     _bare_call_forbids_parens_message(name, module_signatures, source_names),
                     span,
                 )
+            implicit = _implicit_parenthesized_member_call(source, stmt.span, member_ctx)
+            if implicit is not None:
+                _name, span = implicit
+                push(
+                    "callStatementForbidsParens",
+                    "Standalone zero-argument member calls cannot use empty parentheses unless "
+                    "they are prefixed with Call or used in an expression.",
+                    span,
+                )
 
         return visitor
 
     return factory
+
+
+def _implicit_parenthesized_member_call(
+    source: str, span: Span, member_ctx: MemberCompletionContext
+) -> tuple[str, Span] | None:
+    """Port of implicitParenthesizedMemberCall: a standalone `obj.Method()` with empty
+    parentheses. A leading-dot form (`.Method()` inside With) only counts when the
+    member resolves against the receiver surface — the no-false-positive gate for an
+    unknown With receiver."""
+    call = standalone_empty_parenthesized_call_statement(source, span)
+    if call is None or not call.is_member:
+        return None
+    if (
+        call.starts_with_leading_dot
+        and resolve_exact_member_completion(source, call.name, call.callee_end_offset, member_ctx)
+        is None
+    ):
+        return None
+    return (call.name, call.span)
 
 
 def _bare_call_forbids_parens_message(

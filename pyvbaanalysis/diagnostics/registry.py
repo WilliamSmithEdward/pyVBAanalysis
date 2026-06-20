@@ -189,7 +189,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="reservedDeclarationNames", run=lambda ctx, push: check_reserved_declaration_names(ctx.source, ctx.mod, ctx.activity, push)),
     # propertySetterValueParameters: structural branches only; the propertyLetObjectValue
     # object-value branch (resolveKnownObjectAssignmentType over the project surface) no-ops.
-    DiagnosticRuleEntry(name="propertySetterValueParameters", run=lambda ctx, push: check_property_setter_value_parameters(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="propertySetterValueParameters", run=lambda ctx, push: check_property_setter_value_parameters(ctx.source, ctx.mod, ctx.activity, ctx.member_ctx, push)),
     DiagnosticRuleEntry(name="propertyAccessorSignatures", run=lambda ctx, push: check_property_accessor_signatures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="parameterOrder", run=lambda ctx, push: check_parameter_order(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="parameterDefaultValues", run=lambda ctx, push: check_parameter_default_values(ctx.source, ctx.mod, ctx.activity, push)),
@@ -226,9 +226,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     # invalidAsTypeNames: reserved/runtime/known-non-type fallback branches only; the
     # project-type-registry and creatable-type (New) branches no-op (M10).
     DiagnosticRuleEntry(name="invalidAsTypeNames", run=lambda ctx, push: check_invalid_as_type_names(ctx.source, ctx.mod, ctx.activity, ctx.opts, push)),
-    DiagnosticRuleEntry(name="callParens", procedure_statements=lambda ctx, push: check_call_parens(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
+    DiagnosticRuleEntry(name="callParens", procedure_statements=lambda ctx, push: check_call_parens(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, ctx.member_ctx, push)),
     DiagnosticRuleEntry(name="expressionCallParens", procedure_statements=lambda ctx, push: check_expression_call_parens(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
-    DiagnosticRuleEntry(name="setAssignments", procedure_statements=lambda ctx, push: check_set_assignments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
+    DiagnosticRuleEntry(name="setAssignments", procedure_statements=lambda ctx, push: check_set_assignments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, ctx.member_ctx, push)),
     # -- control-flow family (positions 59-66, self-contained subset) --
     DiagnosticRuleEntry(name="exitStatements", procedure_statements=lambda ctx, push: check_exit_statements(ctx.source, push)),
     DiagnosticRuleEntry(name="duplicateLabels", run=lambda ctx, push: check_duplicate_labels(ctx.source, ctx.mod, ctx.activity, push)),
@@ -238,7 +238,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="duplicateCaseElse", run=lambda ctx, push: check_duplicate_case_else(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="malformedStatements", run=lambda ctx, push: check_malformed_statements(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="elseWithoutIf", run=lambda ctx, push: check_else_without_if(ctx.source, ctx.mod, ctx.activity, push)),
-    DiagnosticRuleEntry(name="forEachLoopTypes", run=lambda ctx, push: check_for_each_loop_types(ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.activity, push)),
+    DiagnosticRuleEntry(name="forEachLoopTypes", run=lambda ctx, push: check_for_each_loop_types(ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.opts.project_types, ctx.member_ctx.model, ctx.activity, push)),
     DiagnosticRuleEntry(name="arrayBoundIntrinsicArguments", procedure_statements=lambda ctx, push: check_array_bound_intrinsic_arguments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="scalarMemberAccess", procedure_statements=lambda ctx, push: check_scalar_member_access(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="objectVariableNotSet", run=lambda ctx, push: check_object_variable_not_set(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push, ctx.member_ctx)),
@@ -248,7 +248,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="argumentTypes", procedure_statements=lambda ctx, push: check_argument_types(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="runtimeArgumentValues", procedure_statements=lambda ctx, push: check_runtime_argument_values(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_integer_constants, ctx.opts.project_visible_symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="runtimeConversionValues", procedure_statements=lambda ctx, push: check_runtime_conversion_values(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
-    DiagnosticRuleEntry(name="assignmentTypes", run=lambda ctx, push: check_assignment_types(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.activity, push)),
+    DiagnosticRuleEntry(name="assignmentTypes", run=lambda ctx, push: check_assignment_types(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.member_ctx, ctx.activity, push)),
     DiagnosticRuleEntry(name="typeOfIsAlwaysFalse", procedure_expressions=lambda ctx, push: check_typeof_is_compatibility(ctx.symbols, ctx.member_ctx, push)),
     DiagnosticRuleEntry(name="typeofMissingOperand", run=lambda ctx, push: check_typeof_missing_operand(ctx.source, ctx.activity, push)),
     DiagnosticRuleEntry(name="isOperatorNonObject", procedure_expressions=lambda ctx, push: check_is_operator_operands(ctx.symbols, push)),

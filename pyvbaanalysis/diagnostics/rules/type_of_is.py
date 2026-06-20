@@ -44,6 +44,7 @@ from ...parser.nodes import (
 from ...symbols.symbol_model import ModuleSymbols
 from ...types.type_inference import type_environment_for
 from ...types.type_names import is_known_scalar_type, normalize_type
+from ..call_extraction import InferredArgumentType
 from ..context import PushFn
 from ..exprwalk import ProcedureExpressionVisitor
 
@@ -217,6 +218,37 @@ def _object_assignment_incompatible(
     if actual.kind == "project" and _implements_object_type(actual, expected):
         return False
     return True
+
+
+def object_assignment_incompatibility_reason(
+    expected_raw: str | None,
+    actual: InferredArgumentType | None,
+    member_ctx: MemberCompletionContext,
+) -> str | None:
+    """Port of objectAssignmentIncompatibilityReason: why an object-position target
+    typed `expected_raw` cannot accept `actual`, or None when it can (the no-FP gate).
+
+    Reused by the member-assignment Set branch. Returns the human reason string XLIDE
+    emits; None whenever the operands are not both provably-incompatible object types
+    (Variant/Nothing/generic/implements all stay quiet)."""
+    expected = _resolve_known_object_assignment_type(expected_raw, member_ctx)
+    if expected is None or actual is None:
+        return None
+    actual_type = normalize_type(actual.type_)
+    if not actual_type or actual_type in ("variant", "nothing"):
+        return None
+    if is_known_scalar_type(actual_type):
+        return "An object assignment requires an object value."
+    if expected.kind == "generic":
+        return None
+    actual_object = _resolve_known_object_assignment_type(actual.type_, member_ctx)
+    if actual_object is None or actual_object.kind == "generic":
+        return None
+    if expected.key == actual_object.key:
+        return None
+    if actual_object.kind == "project" and _implements_object_type(actual_object, expected):
+        return None
+    return f"This object type is not compatible with {expected.display}."
 
 
 def _is_implemented_by_any_project_class(
