@@ -23,6 +23,7 @@ from ..symbols.symbol_model import (
     ModuleSymbols,
     VbaProcedureSignature,
     VbaProjectClassMembers,
+    VbaProjectTypeName,
     VbaSymbol,
 )
 from .model import VbaDiagnosticData
@@ -32,8 +33,8 @@ from .model import VbaDiagnosticData
 class AnalyzeModuleOptions:
     """Inputs for analyze_module.
 
-    Fields typed Any (document_type, project_types, host_model) carry host/completion
-    types that are ported in a later milestone; no engine-skeleton rule reads them.
+    Fields typed Any (document_type, host_model) carry host/completion types that
+    are ported in a later milestone; no engine-skeleton rule reads them.
     """
 
     module_name: str | None = None
@@ -48,7 +49,9 @@ class AnalyzeModuleOptions:
     # Exported callable signatures grouped by lowercased procedure name.
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None = None
     project_class_members: Sequence[VbaProjectClassMembers] | None = None
-    project_types: Any = None  # list[ProjectTypeName] (completion; deferred)
+    # Project-defined type names (class/document/userform, user Type, Enum) visible
+    # to this module — the registry the type-name resolver searches.
+    project_types: Sequence[VbaProjectTypeName] | None = None
     project_visible_symbols: Sequence[VbaSymbol] | None = None
     known_non_type_names: AbstractSet[str] | None = None
     project_integer_constants: Mapping[str, str | None] | None = None

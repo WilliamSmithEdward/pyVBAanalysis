@@ -35,6 +35,7 @@ def _case_codes(case: OracleCase) -> set[str]:
             project_class_members=project_class_members,
             project_integer_constants=index.visible_external_integer_constant_expressions(module.name),
             project_visible_symbols=index.visible_identifier_symbols(module.name),
+            project_types=index.visible_type_names(module.name),
             known_procedures=index.visible_procedure_names(module.name),
             known_identifiers=index.visible_identifier_names(module.name),
             known_non_type_names=index.visible_non_type_names(module.name),
