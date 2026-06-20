@@ -23,7 +23,25 @@ from ..symbols import ModuleSymbolKind
 _VB_NAME_RE = re.compile(
     r'^\s*Attribute\s+VB_Name\s*=\s*"([^"]*)"', re.IGNORECASE | re.MULTILINE
 )
-_VB_BASE_RE = re.compile(r"^\s*Attribute\s+VB_Base\s*=", re.IGNORECASE | re.MULTILINE)
+# A document module's VB_Base names a host document coclass; a class module's
+# VB_Base (present in workbook reads, absent in .cls file exports) names the generic
+# VBA class base instead. Classify on the GUID value, not the mere presence of the
+# attribute, so class modules read out of a workbook are not mistaken for documents.
+_VB_BASE_GUID_RE = re.compile(
+    r'^\s*Attribute\s+VB_Base\s*=\s*"?0?\{?'
+    r"([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})",
+    re.IGNORECASE | re.MULTILINE,
+)
+# The Excel host document-module coclass CLSIDs. A document module's VB_Base is one
+# of these; a class module's is the generic VBA class base
+# ({FCFB3D2A-A0FA-1068-A738-08002B3371B5}), which is deliberately not listed.
+_DOCUMENT_BASE_GUIDS = frozenset(
+    {
+        "00020819-0000-0000-C000-000000000046",  # Excel.Workbook (ThisWorkbook)
+        "00020820-0000-0000-C000-000000000046",  # Excel.Worksheet (sheet modules)
+        "00020821-0000-0000-C000-000000000046",  # Excel.Chart (chart sheet modules)
+    }
+)
 # A UserForm designer block opens with ``Begin {GUID} Name`` (a 38-char braced GUID).
 _DESIGNER_BEGIN_RE = re.compile(r"^\s*Begin\s*\{[0-9A-Fa-f-]{36}\}", re.MULTILINE)
 _VERSION_FORM_RE = re.compile(r"^\s*VERSION\s+5\.", re.IGNORECASE)
@@ -87,17 +105,18 @@ def classify_module_kind(
     """Classify a module as standard, class, document, or UserForm.
 
     Signals, strongest first: a UserForm designer block or ``.frm`` extension; an
-    ``Attribute VB_Base`` line (the host-bound document modules, e.g. ThisWorkbook);
-    then the file extension or the pyOpenVBA standard/other flag; falling back to the
-    ``VERSION ... CLASS`` header. ``pyopenvba_standard`` is True for a pyOpenVBA
-    standard module, False for its "other" bucket (class/document/designer), or None
-    when no workbook reader supplied it.
+    ``Attribute VB_Base`` line whose GUID is a host document coclass (ThisWorkbook,
+    sheet, or chart modules); then the file extension or the pyOpenVBA standard/other
+    flag; falling back to the ``VERSION ... CLASS`` header. ``pyopenvba_standard`` is
+    True for a pyOpenVBA standard module, False for its "other" bucket
+    (class/document/designer), or None when no workbook reader supplied it.
     """
     ext = (extension or "").lower().lstrip(".")
     head = text[:8000]
     if ext == "frm" or _VERSION_FORM_RE.match(head) or _DESIGNER_BEGIN_RE.search(head):
         return ModuleSymbolKind.USERFORM
-    if _VB_BASE_RE.search(head):
+    base = _VB_BASE_GUID_RE.search(head)
+    if base is not None and base.group(1).upper() in _DOCUMENT_BASE_GUIDS:
         return ModuleSymbolKind.DOCUMENT
     if ext == "bas":
         return ModuleSymbolKind.STANDARD

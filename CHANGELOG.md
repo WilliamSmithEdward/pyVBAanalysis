@@ -5,6 +5,33 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 1.1.0 - 2026-06-20
+
+### Added
+
+* Inline suppression: `'@pyvba-ignore`, `'@pyvba-ignore-next-line`, and
+  `'@pyvba-ignore-file` comment directives suppress diagnostics from within the source
+  (optional comma-separated code list, case-insensitive, with a `-- reason` trailer). A
+  malformed directive is reported as `analysis-suppression-directive`. A new
+  `inline_suppression` option and a `--no-inline-suppression` CLI flag turn it off for
+  an audit run.
+* A `whole_project` flag on `analyze_project`, `analyze_loose_file` (default False for a
+  single file), and `analyze_loose_files`, plus a `--partial-project` CLI flag and
+  automatic partial treatment of a single targeted file.
+* Usage-guide sections for inline suppression, "Whole project vs a single file", and
+  "Use in CI".
+
+### Fixed
+
+* Workbook reader: class modules read out of a workbook were misclassified as document
+  modules (they carry a `VB_Base` line like documents, but with the generic VBA class
+  base GUID). Classification now keys on the GUID, so `New SomeClass` for a workbook
+  class is no longer reported as `invalid-new-type-name`.
+* Single-file analysis no longer emits the whole-project checks (`undeclared-variable`,
+  `unknown-call`, `member-not-found`) as false positives: a rule that needs every module
+  is skipped when the analyzed set is not the complete project, since a symbol declared
+  in an unseen module is indistinguishable from an undefined one.
+
 ## 1.0.0 - 2026-06-20
 
 The first public release: a pure-Python static analyzer for Excel VBA with a

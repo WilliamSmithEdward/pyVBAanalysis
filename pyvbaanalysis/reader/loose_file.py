@@ -62,11 +62,17 @@ def analyze_loose_file(
     *,
     severity_overrides: Mapping[str, str] | None = None,
     conditional_compilation: ConditionalCompilationEnvironment | None = None,
+    whole_project: bool = False,
+    inline_suppression: bool = True,
 ) -> list[VbaDiagnostic]:
     """Analyze a single loose VBA file and return its diagnostics.
 
-    The file is analyzed as a one-module project. To resolve references across
-    several files, use analyze_loose_files so they share project context.
+    The file is analyzed as a one-module project. Because that is a partial view of
+    any real project, ``whole_project`` defaults to False, which suppresses the rules
+    that need every module (undeclared-variable, unknown-call, member-not-found) so a
+    symbol defined in another file is not reported as undefined. Pass
+    ``whole_project=True`` if this file genuinely is the entire project, or use
+    analyze_loose_files to analyze several files together with shared context.
     ``conditional_compilation`` sets the #If/#Const baseline.
     """
     module = load_loose_module(path)
@@ -74,6 +80,8 @@ def analyze_loose_file(
         [ModuleInput(module_name=module.name, module_kind=module.kind, source=module.source)],
         severity_overrides=severity_overrides,
         conditional_compilation=conditional_compilation,
+        whole_project=whole_project,
+        inline_suppression=inline_suppression,
     )
     return results[module.name]
 
@@ -84,12 +92,16 @@ def analyze_loose_files(
     only: Iterable[str] | None = None,
     severity_overrides: Mapping[str, str] | None = None,
     conditional_compilation: ConditionalCompilationEnvironment | None = None,
+    whole_project: bool = True,
+    inline_suppression: bool = True,
 ) -> dict[str, list[VbaDiagnostic]]:
     """Analyze several loose VBA files as one project with cross-module context.
 
     Returns a dict mapping module name to that module's diagnostics. Pass ``only`` to
     report just the named modules while still indexing every file for context.
-    ``conditional_compilation`` sets a project-wide #If/#Const baseline.
+    ``conditional_compilation`` sets a project-wide #If/#Const baseline. ``whole_project``
+    defaults to True (these files are treated as the whole project); pass False if they
+    are only a fragment, to suppress the rules that need every module.
     """
     modules = [load_loose_module(path) for path in paths]
     inputs = [
@@ -101,4 +113,6 @@ def analyze_loose_files(
         only=only,
         severity_overrides=severity_overrides,
         conditional_compilation=conditional_compilation,
+        whole_project=whole_project,
+        inline_suppression=inline_suppression,
     )

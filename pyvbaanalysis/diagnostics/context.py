@@ -43,6 +43,16 @@ class AnalyzeModuleOptions:
 
     module_name: str | None = None
     module_kind: ModuleSymbolKind | None = None
+    # True when the cross-module fields below represent the COMPLETE project (every
+    # module that could define a symbol visible here). False for a partial view, e.g.
+    # a single file analyzed in isolation; that suppresses the rules that need the
+    # whole project (undeclared-variable, unknown-call, member-not-found), since a
+    # symbol declared in an unseen module is then indistinguishable from an undefined
+    # one and reporting it would be a false positive.
+    whole_project: bool = True
+    # Honor ``'@pyvba-ignore`` suppression directives in the source. Set False to
+    # report every diagnostic regardless of in-source suppression (an audit run).
+    inline_suppression: bool = True
     document_type: Any = None  # EventHandlerDocumentType (from the completion package)
     # Per-rule severity overrides keyed by stable diagnostic code; "off" disables.
     severity_overrides: Mapping[str, str] | None = None

@@ -96,6 +96,8 @@ def _analyze_loose_group(
     paths: Sequence[Path],
     only: Sequence[str] | None,
     severity_overrides: dict[str, str] | None,
+    whole_project: bool,
+    inline_suppression: bool,
 ) -> tuple[list[_ProjectResult], list[str], list[str]]:
     if not paths:
         return [], [], []
@@ -129,7 +131,11 @@ def _analyze_loose_group(
         ModuleInput(module_name=m.name, module_kind=m.kind, source=m.source) for m in unique
     ]
     diagnostics = analyze_project(
-        inputs, only=only or None, severity_overrides=severity_overrides or None
+        inputs,
+        only=only or None,
+        severity_overrides=severity_overrides or None,
+        whole_project=whole_project,
+        inline_suppression=inline_suppression,
     )
     sources = {m.name: m.source for m in unique}
     return [_ProjectResult("(loose files)", diagnostics, sources)], warnings, errors
@@ -139,6 +145,7 @@ def _analyze_workbook_group(
     paths: Sequence[Path],
     only: Sequence[str] | None,
     severity_overrides: dict[str, str] | None,
+    inline_suppression: bool,
 ) -> tuple[list[_ProjectResult], list[str]]:
     results: list[_ProjectResult] = []
     errors: list[str] = []
@@ -152,7 +159,10 @@ def _analyze_workbook_group(
             ModuleInput(module_name=m.name, module_kind=m.kind, source=m.source) for m in modules
         ]
         diagnostics = analyze_project(
-            inputs, only=only or None, severity_overrides=severity_overrides or None
+            inputs,
+            only=only or None,
+            severity_overrides=severity_overrides or None,
+            inline_suppression=inline_suppression,
         )
         sources = {m.name: m.source for m in modules}
         results.append(_ProjectResult(str(path), diagnostics, sources))
@@ -262,6 +272,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="hide these diagnostic codes from the report; repeatable",
     )
     parser.add_argument(
+        "--partial-project",
+        action="store_true",
+        help="treat the input as a fragment of a larger project: skip the whole-project "
+        "checks (undeclared-variable, unknown-call, member-not-found) that need every "
+        "module. A single targeted file is treated as partial automatically.",
+    )
+    parser.add_argument(
+        "--no-inline-suppression",
+        action="store_true",
+        help="ignore '@pyvba-ignore directives in the source and report every "
+        "diagnostic (an audit run).",
+    )
+    parser.add_argument(
         "--fail-level",
         choices=("error", "warning", "information"),
         default="information",
@@ -315,8 +338,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     unknown = [p for p in loose_paths if p.suffix.lower() not in LOOSE_EXTENSIONS]
     loose_paths = [p for p in loose_paths if p.suffix.lower() in LOOSE_EXTENSIONS]
 
-    loose_results, warnings, loose_errors = _analyze_loose_group(loose_paths, args.only, overrides)
-    workbook_results, workbook_errors = _analyze_workbook_group(workbook_paths, args.only, overrides)
+    # A single targeted file is a partial view of any real project, so the whole-project
+    # rules are suppressed for it; a folder or several files are treated as the project.
+    loose_whole_project = not (args.partial_project or len(loose_paths) <= 1)
+    inline_suppression = not args.no_inline_suppression
+    loose_results, warnings, loose_errors = _analyze_loose_group(
+        loose_paths, args.only, overrides, loose_whole_project, inline_suppression
+    )
+    workbook_results, workbook_errors = _analyze_workbook_group(
+        workbook_paths, args.only, overrides, inline_suppression
+    )
     results = [*loose_results, *workbook_results]
     errors = [*loose_errors, *workbook_errors]
     _filter_codes(results, args.select, args.ignore)

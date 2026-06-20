@@ -34,6 +34,8 @@ def analyze_module_options_for(
     *,
     severity_overrides: Mapping[str, str] | None = None,
     conditional_compilation: ConditionalCompilationEnvironment | None = None,
+    whole_project: bool = True,
+    inline_suppression: bool = True,
 ) -> AnalyzeModuleOptions:
     """Build the AnalyzeModuleOptions for one module from a populated ProjectIndex.
 
@@ -43,10 +45,15 @@ def analyze_module_options_for(
     visibility queries see the whole project, not just this module.
     ``conditional_compilation`` sets the #If/#Const baseline for this module's
     diagnostic pass (the index uses it for symbol building separately).
+    ``whole_project`` declares whether the index holds the complete project; pass
+    False when it does not (a single file in isolation) to suppress the rules that
+    require the whole project rather than report them as false positives.
     """
     return AnalyzeModuleOptions(
         module_name=module_name,
         module_kind=module_kind,
+        whole_project=whole_project,
+        inline_suppression=inline_suppression,
         severity_overrides=severity_overrides,
         conditional_compilation=conditional_compilation,
         project_procedures=index.procedure_signatures(),
@@ -103,6 +110,8 @@ def analyze_project(
     only: Iterable[str] | None = None,
     severity_overrides: Mapping[str, str] | None = None,
     conditional_compilation: ConditionalCompilationEnvironment | None = None,
+    whole_project: bool = True,
+    inline_suppression: bool = True,
 ) -> dict[str, list[VbaDiagnostic]]:
     """Analyze a whole VBA project with full cross-module context.
 
@@ -116,6 +125,13 @@ def analyze_project(
     baseline for the #If/#Const directives (a module's own
     ModuleInput.conditional_compilation still wins). Without it the built-in defaults
     apply (VBA7 and Win64 true, Win32 and Mac false).
+
+    ``whole_project`` declares whether ``modules`` is the complete project. Leave it
+    True when it is (a workbook, or a folder of all the project's modules). Pass False
+    when it is only a fragment (a single file, or a subset that omits modules this code
+    references): the rules that need the whole project (undeclared-variable,
+    unknown-call, member-not-found) are then suppressed rather than reported, because a
+    symbol declared in an omitted module is indistinguishable from an undefined one.
 
     Returns a dict mapping module name to that module's diagnostics, preserving the
     input order of the analyzed modules. Module names must be unique within the
@@ -141,6 +157,8 @@ def analyze_project(
             module.module_kind,
             severity_overrides=severity_overrides,
             conditional_compilation=module.conditional_compilation or conditional_compilation,
+            whole_project=whole_project,
+            inline_suppression=inline_suppression,
         )
         results[module.module_name] = analyze_module(module.source, opts)
     return results

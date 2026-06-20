@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from pyvbaanalysis import AnalyzeModuleOptions, analyze_module
 from pyvbaanalysis.reader import (
     LooseFileReadError,
     analyze_loose_file,
@@ -84,6 +85,24 @@ def test_classify_document_via_vb_base() -> None:
     assert classify_module_kind(_DOC, extension=".cls") is ModuleSymbolKind.DOCUMENT
 
 
+def test_classify_workbook_class_with_vb_base_is_class() -> None:
+    # Workbook reads carry a VB_Base line on class modules too, with the generic VBA
+    # class base GUID; that must classify as CLASS, not DOCUMENT (only a host document
+    # coclass GUID means a document module).
+    class_text = (
+        'Attribute VB_Name = "stdThing"\r\n'
+        'Attribute VB_Base = "0{FCFB3D2A-A0FA-1068-A738-08002B3371B5}"\r\n'
+        "Attribute VB_PredeclaredId = True\r\n"
+        "Option Explicit\r\nPublic Sub Go()\r\nEnd Sub\r\n"
+    )
+    assert classify_module_kind(class_text, pyopenvba_standard=False) is ModuleSymbolKind.CLASS
+    # The same module with a real host document coclass GUID is a document.
+    doc_text = class_text.replace(
+        "FCFB3D2A-A0FA-1068-A738-08002B3371B5", "00020820-0000-0000-C000-000000000046"
+    )
+    assert classify_module_kind(doc_text, pyopenvba_standard=False) is ModuleSymbolKind.DOCUMENT
+
+
 def test_classify_userform_via_designer_block_without_extension() -> None:
     assert classify_module_kind(_FRM) is ModuleSymbolKind.USERFORM
 
@@ -140,6 +159,34 @@ def test_loose_file_encoding_fallback(tmp_path: Path) -> None:
     path.write_bytes(content.encode("cp1252"))
     module = load_loose_module(path)
     assert module.name == "Mod1" and module.kind is ModuleSymbolKind.STANDARD
+
+
+def test_analyze_loose_file_suppresses_cross_module_rules(tmp_path: Path) -> None:
+    # A single file in isolation must not report undeclared-variable / unknown-call for
+    # symbols that may be declared in a module it cannot see.
+    src = (
+        'Attribute VB_Name = "Mod1"\r\nOption Explicit\r\n'
+        "Public Sub S()\r\n    Call HelperElsewhere\r\n    n = GlobalElsewhere\r\nEnd Sub\r\n"
+    )
+    path = _write(tmp_path, "Mod1.bas", src)
+    codes = {d.code for d in analyze_loose_file(path)}
+    assert "unknown-call" not in codes and "undeclared-variable" not in codes
+    # Opting into whole-project treatment (this file genuinely is the project) surfaces them.
+    whole = {d.code for d in analyze_loose_file(path, whole_project=True)}
+    assert "unknown-call" in whole
+
+
+def test_whole_project_flag_gates_cross_module_rules() -> None:
+    src = "Option Explicit\nPublic Sub S()\n    Call HelperElsewhere\nEnd Sub\n"
+    base = {
+        "module_name": "Mod1",
+        "module_kind": ModuleSymbolKind.STANDARD,
+        "known_procedures": frozenset({"s"}),
+    }
+    fires = {d.code for d in analyze_module(src, AnalyzeModuleOptions(**base, whole_project=True))}
+    assert "unknown-call" in fires
+    silent = {d.code for d in analyze_module(src, AnalyzeModuleOptions(**base, whole_project=False))}
+    assert "unknown-call" not in silent
 
 
 def test_load_loose_module_on_directory_raises_contained_error(tmp_path: Path) -> None:

@@ -84,6 +84,7 @@ def analyze_workbook(
     only: Iterable[str] | None = None,
     severity_overrides: Mapping[str, str] | None = None,
     conditional_compilation: ConditionalCompilationEnvironment | None = None,
+    inline_suppression: bool = True,
 ) -> dict[str, list[VbaDiagnostic]]:
     """Analyze every VBA module in an Excel file with full cross-module context.
 
@@ -101,4 +102,5 @@ def analyze_workbook(
         only=only,
         severity_overrides=severity_overrides,
         conditional_compilation=conditional_compilation,
+        inline_suppression=inline_suppression,
     )

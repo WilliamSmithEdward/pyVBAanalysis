@@ -11,11 +11,11 @@ These are re-exported at the package root for convenience:
 | Symbol | Role |
 | --- | --- |
 | `analyze_module(source, opts=None)` | Analyze one module's source; returns `list[VbaDiagnostic]`. Never raises. |
-| `analyze_project(modules, *, only=None, severity_overrides=None, conditional_compilation=None)` | Analyze a set of `ModuleInput`s with cross-module context; returns `dict[str, list[VbaDiagnostic]]`. |
-| `analyze_loose_file(path, *, severity_overrides=None, conditional_compilation=None)` | Analyze one `.bas`/`.cls`/`.frm` file. |
-| `analyze_loose_files(paths, *, only=None, severity_overrides=None, conditional_compilation=None)` | Analyze several loose files as one project. |
-| `analyze_workbook(path, *, only=None, severity_overrides=None, conditional_compilation=None)` | Analyze the VBA in an Excel workbook (via pyOpenVBA). |
-| `analyze_module_options_for(index, name, kind, *, severity_overrides=None, conditional_compilation=None)` | Build per-module `AnalyzeModuleOptions` from a populated `ProjectIndex`. |
+| `analyze_project(modules, *, only=None, severity_overrides=None, conditional_compilation=None, whole_project=True, inline_suppression=True)` | Analyze a set of `ModuleInput`s with cross-module context; returns `dict[str, list[VbaDiagnostic]]`. `whole_project=False` for a partial set. |
+| `analyze_loose_file(path, *, severity_overrides=None, conditional_compilation=None, whole_project=False, inline_suppression=True)` | Analyze one `.bas`/`.cls`/`.frm` file (partial by default; the whole-project checks are skipped). |
+| `analyze_loose_files(paths, *, only=None, severity_overrides=None, conditional_compilation=None, whole_project=True, inline_suppression=True)` | Analyze several loose files as one project. |
+| `analyze_workbook(path, *, only=None, severity_overrides=None, conditional_compilation=None, inline_suppression=True)` | Analyze the VBA in an Excel workbook (via pyOpenVBA). |
+| `analyze_module_options_for(index, name, kind, *, severity_overrides=None, conditional_compilation=None, whole_project=True, inline_suppression=True)` | Build per-module `AnalyzeModuleOptions` from a populated `ProjectIndex`. |
 | `build_project_index(modules)` | A `ProjectIndex` with every module registered. |
 | `AnalyzeModuleOptions` | Inputs for `analyze_module` (name, kind, project context, overrides). |
 | `VbaDiagnostic` | A single diagnostic (`code`, `message`, `severity`, `span`, `spec_reference`). |

@@ -132,6 +132,10 @@ analyze_loose_file("Widget.cls")                       # one file
 analyze_loose_files(["Module1.bas", "Widget.cls"])     # several, as one project
 ```
 
+`analyze_loose_file` analyzes one file on its own, so the whole-project checks are
+skipped for it (see "Whole project vs a single file" below). Use `analyze_loose_files`
+to analyze several files together with shared cross-module context.
+
 ### Excel workbooks (.xlsm / .xlsb / .xlam / .xls)
 
 The workbook reader reads VBA directly out of an Excel file via pyOpenVBA (the one
@@ -152,6 +156,25 @@ The reader loads the workbook and its VBA into memory and does not bound the inp
 size, so impose your own limit (for example a maximum file size) before pointing it
 at untrusted files.
 
+## Whole project vs a single file
+
+Three checks need every module to be correct: `undeclared-variable`, `unknown-call`,
+and `member-not-found` resolve a name across the whole project, so a symbol declared
+in a module the analyzer cannot see would look undefined. To stay false-positive-free,
+those checks run only when the analyzed set is the complete project and are skipped
+for a partial view:
+
+* `analyze_workbook` and `analyze_loose_files` treat their input as the whole project
+  (a workbook holds every module; a set of files is taken as the project).
+* `analyze_loose_file` analyzes one file in isolation, so it is partial by default.
+  Pass `whole_project=True` if that single file really is the entire project.
+* `analyze_project` defaults to whole-project; pass `whole_project=False` for a fragment.
+* On the command line, a folder or several files is a whole project, a single targeted
+  file is partial automatically, and `--partial-project` forces partial for any input.
+
+Every other check is local or resolves positively (it reports only when it can prove
+the problem), so a partial view never turns it into a false positive.
+
 ## Adjust or silence diagnostics
 
 `severity_overrides` maps a code to `"off"`, `"information"`, `"warning"`, or
@@ -166,6 +189,34 @@ analyze_project(modules, severity_overrides={"option-explicit-missing": "off"})
 An invalid override (an unknown code, or a value a code does not allow) is silently
 ignored during analysis. Call `validate_severity_overrides` to catch a typo before
 it quietly does nothing; it raises `ValueError` with the offending entries.
+
+### Inline suppression
+
+Suppress diagnostics from within the source with `'@pyvba-ignore` comment directives:
+
+```vba
+'@pyvba-ignore-file: option-explicit-missing
+
+Sub Demo()
+    Dim a(10 To 1) As Long  '@pyvba-ignore: array-declaration-impossible-bounds
+End Sub
+```
+
+* `'@pyvba-ignore` suppresses diagnostics on its own line (write it as a trailing comment).
+* `'@pyvba-ignore-next-line` suppresses the following line.
+* `'@pyvba-ignore-file` suppresses the whole module; place it before the first
+  non-comment, non-attribute line.
+
+Each takes an optional `: code1, code2` list (omit it, or write `all`, to suppress every
+code); codes match case-insensitively, and a `-- reason` trailer is free text. A
+malformed directive (an unknown code, an unknown verb, or a misplaced `-ignore-file`) is
+reported as `analysis-suppression-directive` and suppresses nothing. Directives are
+single-apostrophe comments; `'''` doc comments and `Rem` comments are not directives, and
+the two structural codes (`missing-block-closer`, `unmatched-block-closer`) are not
+suppressible this way.
+
+Pass `inline_suppression=False` (library) or `--no-inline-suppression` (CLI) to ignore
+every directive and report all diagnostics, for an audit run.
 
 ## Command line
 
@@ -187,6 +238,8 @@ Flags:
 | `--severity CODE=LEVEL` | Override a code's severity (`off`/`information`/`warning`/`error`); repeatable. An invalid code or value exits 2. |
 | `--select CODE` | Report only these codes; repeatable. Codes match case-insensitively; an unknown code exits 2. |
 | `--ignore CODE` | Hide these codes from the report; repeatable. Codes match case-insensitively; an unknown code exits 2. |
+| `--partial-project` | Treat the input as a fragment of a larger project: skip the whole-project checks (`undeclared-variable`, `unknown-call`, `member-not-found`). A single targeted file is treated as partial automatically. |
+| `--no-inline-suppression` | Ignore `'@pyvba-ignore` directives in the source and report every diagnostic (an audit run). |
 | `--fail-level LEVEL` | Exit non-zero only when a diagnostic at or above `error`/`warning`/`information` is reported (default `information`, meaning any). |
 | `--format text\|json` | Output format (default `text`). |
 
@@ -223,3 +276,29 @@ diagnostics are reported or a file cannot be read, and `2` for a usage error.
 ```
 
 `start` and `end` are character offsets; `line` and `column` are 1-based.
+
+## Use in CI
+
+`pyvbaanalysis` exits non-zero when it reports a diagnostic, so it gates a build
+directly. A GitHub Actions job that fails on errors and lets warnings through:
+
+```yaml
+name: VBA lint
+on: [push, pull_request]
+jobs:
+  vba:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyvbaanalysis
+      - run: pyvbaanalysis path/to/vba --fail-level error
+```
+
+Point the last step at a folder of exported `.bas` / `.cls` / `.frm` files or at a
+workbook. Tune the gate with the flags above: `--fail-level warning` to also fail on
+warnings, `--severity option-explicit-missing=off` or `--ignore <code>` to mute a
+code, and `--partial-project` when the checked-in files are only a fragment of the
+project. Use `--format json` if a later step needs to parse the results.

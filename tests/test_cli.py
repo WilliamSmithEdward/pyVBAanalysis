@@ -167,6 +167,53 @@ def test_cli_only_filters_modules(tmp_path: Path, capsys: pytest.CaptureFixture[
     assert modules == {"Mod2"}
 
 
+def test_cli_single_file_skips_cross_module_rules(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A single targeted file is a partial view: cross-module rules are suppressed.
+    src = (
+        'Attribute VB_Name = "Mod1"\r\nOption Explicit\r\n'
+        "Public Sub S()\r\n    Call HelperElsewhere\r\nEnd Sub\r\n"
+    )
+    path = _write(tmp_path / "Mod1.bas", src)
+    code = main([str(path)])
+    out = capsys.readouterr().out
+    assert "unknown-call" not in out
+    assert code == 0
+
+
+def test_cli_partial_project_flag(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # Two files (a folder) are a whole project by default, so a call to a sub absent
+    # from the set fires unknown-call; --partial-project suppresses it.
+    caller = (
+        'Attribute VB_Name = "ModA"\r\nOption Explicit\r\n'
+        "Public Sub S()\r\n    Call OnlyInModC\r\nEnd Sub\r\n"
+    )
+    other = 'Attribute VB_Name = "ModB"\r\nOption Explicit\r\nPublic Sub T()\r\nEnd Sub\r\n'
+    _write(tmp_path / "ModA.bas", caller)
+    _write(tmp_path / "ModB.bas", other)
+    code_full = main([str(tmp_path)])
+    assert "unknown-call" in capsys.readouterr().out and code_full == 1
+    code_partial = main([str(tmp_path), "--partial-project"])
+    assert "unknown-call" not in capsys.readouterr().out and code_partial == 0
+
+
+def test_cli_inline_suppression(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    src = (
+        'Attribute VB_Name = "Mod1"\r\nOption Explicit\r\nSub S()\r\n'
+        "    Dim a(10 To 1) As Long  '@pyvba-ignore: array-declaration-impossible-bounds\r\n"
+        "End Sub\r\n"
+    )
+    path = _write(tmp_path / "Mod1.bas", src)
+    # Honored by default: the diagnostic is suppressed, so the run is clean.
+    assert main([str(path)]) == 0
+    capsys.readouterr()
+    # --no-inline-suppression reports it anyway (audit mode).
+    code = main([str(path), "--no-inline-suppression"])
+    assert code == 1
+    assert "array-declaration-impossible-bounds" in capsys.readouterr().out
+
+
 def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         main(["--version"])
