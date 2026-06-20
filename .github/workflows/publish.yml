@@ -1,0 +1,41 @@
+name: Publish to PyPI
+
+# Publishes pyvbaanalysis to PyPI when a GitHub Release is published, using
+# PyPI Trusted Publishing (OIDC) — no API tokens are stored anywhere.
+#
+# One-time PyPI setup (maintainer): PyPI -> account -> Publishing -> add a
+# pending publisher with project `pyvbaanalysis`, owner `WilliamSmithEdward`,
+# repo `pyVBAanalysis`, workflow `publish.yml`, environment `pypi`.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pyvbaanalysis
+    permissions:
+      id-token: write # OIDC token for PyPI Trusted Publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package + dev/build tools
+        run: python -m pip install -e ".[dev,build]"
+      - name: Test gate (pytest / ruff / mypy)
+        run: |
+          python -m pytest -q
+          python -m ruff check .
+          python -m mypy pyvbaanalysis
+      - name: Build sdist + wheel
+        run: python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
