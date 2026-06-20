@@ -7,4 +7,4 @@ parse_module, tokenize, ProjectIndex) is added incrementally during the port,
 starting at milestone M0.
 """
 
-__version__ = "0.0.0"
+__version__ = "1.0.0"
