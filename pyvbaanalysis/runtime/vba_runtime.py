@@ -118,6 +118,21 @@ VBA_RUNTIME_FUNCTIONS: tuple[VbaRuntimeFunction, ...] = (
     _fn("ChrW", "ChrW(CharCode) As String", "String"),
     _fn("Asc", "Asc(String) As Integer", "Integer"),
     _fn("AscW", "AscW(String) As Integer", "Integer"),
+    # -- Byte-string functions (the ...B variants operate on byte positions) --
+    _fn("LeftB", "LeftB(String, Length) As String", "String"),
+    _fn("LeftB$", "LeftB$(String, Length) As String", "String"),
+    _fn("RightB", "RightB(String, Length) As String", "String"),
+    _fn("RightB$", "RightB$(String, Length) As String", "String"),
+    _fn("MidB", "MidB(String, Start, [Length]) As String", "String"),
+    _fn("MidB$", "MidB$(String, Start, [Length]) As String", "String"),
+    _fn("InStrB", "InStrB([Start], String1, String2, [Compare As VbCompareMethod]) As Long", "Long"),
+    _fn("AscB", "AscB(String) As Integer", "Integer"),
+    _fn("ChrB", "ChrB(CharCode) As String", "String"),
+    _fn("ChrB$", "ChrB$(CharCode) As String", "String"),
+    # -- Pointer / memory intrinsics (hidden but always available in VBA) -----
+    _fn("VarPtr", "VarPtr(Variable) As LongPtr", "LongPtr"),
+    _fn("StrPtr", "StrPtr(StringVariable) As LongPtr", "LongPtr"),
+    _fn("ObjPtr", "ObjPtr(ObjectVariable) As LongPtr", "LongPtr"),
     # -- Type conversion ----------------------------------------------------
     _fn("CBool", "CBool(Expression) As Boolean", "Boolean"),
     _fn("CByte", "CByte(Expression) As Byte", "Byte"),

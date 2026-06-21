@@ -86,6 +86,12 @@ DEFAULT_COMPILER_CONSTANTS: Mapping[str, ConditionalValue] = {
     "Win64": True,
     "Win32": False,
     "Mac": False,
+    # TWINBASIC is a twinBASIC compiler auto-constant; in Excel VBA it is undefined and
+    # therefore False (VBE-oracle verified). Modern libraries gate twinBASIC-only
+    # intrinsics behind #If TWINBASIC, so without this default those inactive branches
+    # were analyzed and produced false positives. Its value in VBA is known, so it is a
+    # default, not left unknown.
+    "TWINBASIC": False,
 }
 
 
@@ -442,7 +448,10 @@ def _js_number(raw: str) -> int | float | None:
 
 def _normalized_comparison_value(value: ConditionalValue) -> str:
     if isinstance(value, bool):
-        return "true" if value else "false"
+        # VBA numeric values: True = -1, False = 0. A boolean #Const compares equal to
+        # its numeric form, so `Mac = 0`, `TWINBASIC = 0`, and `VBA7 = -1` behave as the
+        # VBE evaluates them.
+        return "-1" if value else "0"
     return str(value).lower()
 
 

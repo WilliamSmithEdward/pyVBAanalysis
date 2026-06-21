@@ -33,7 +33,7 @@ from .project import analyze_module_options_for, analyze_project, build_project_
 from .reader import analyze_loose_file, analyze_loose_files, analyze_workbook
 from .symbols import ModuleInput, ModuleSymbolKind, ProjectIndex, ProjectIndexOptions
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 __all__ = [
     "AnalyzeModuleOptions",

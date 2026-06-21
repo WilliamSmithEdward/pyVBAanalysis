@@ -158,6 +158,12 @@ def _redim_target_from_group(
     name = token_name(name_tok) if name_tok is not None else None
     if name_tok is None or name is None:
         return None
+    # A qualified ReDim target (`ReDim x.arr(...)` / `ReDim x!arr(...)`) resizes a member
+    # array, not the base variable. The scalar/fixed-array shape checks apply only to a
+    # simple variable, and the member's declared shape is not resolvable here, so skip
+    # qualified targets rather than mistake the container for the array being resized.
+    if len(content) > 1 and content[1].raw_text in (".", "!"):
+        return None
     dimensions: list[_RedimDimension] = []
     if len(content) > 1 and content[1].raw_text == "(":
         close = match_paren_from(content, 1)

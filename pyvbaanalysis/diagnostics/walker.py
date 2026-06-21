@@ -238,7 +238,9 @@ def strip_header_brackets(text: str) -> str:
     return text[1:-1] if text.startswith("[") and text.endswith("]") else text
 
 
-def token_name(tok: VbaToken) -> str | None:
+def token_name(tok: VbaToken | None) -> str | None:
+    if tok is None:
+        return None
     if tok.kind is TokenKind.IDENTIFIER or tok.kind is TokenKind.KEYWORD:
         return tok.raw_text
     if tok.kind is TokenKind.BRACKETED_IDENTIFIER:

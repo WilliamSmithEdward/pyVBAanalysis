@@ -1202,6 +1202,10 @@ def check_parameter_order(source: str, mod: ModuleNode, activity: ConditionalAct
             continue
         params = member.params
         has_optional = any(p.optional for p in params)
+        # The final parameter of a Property Let/Set is the assigned value: mandatory by
+        # definition and exempt from the required-after-optional rule (MS-VBAL 5.3.1.5),
+        # so an Optional index parameter may legally precede it.
+        last_is_value_param = member.proc_kind in (ProcKind.PROPERTY_LET, ProcKind.PROPERTY_SET)
         optional_seen = False
         for i, p in enumerate(params):
             array_as_type = _parameter_array_as_type_syntax_hit(source, p)
@@ -1241,7 +1245,7 @@ def check_parameter_order(source: str, mod: ModuleNode, activity: ConditionalAct
             if p.optional:
                 optional_seen = True
                 continue
-            if optional_seen:
+            if optional_seen and not (last_is_value_param and i == len(params) - 1):
                 push(
                     "requiredParamAfterOptional",
                     f"Parameter '{p.name}' must be Optional because it follows an Optional parameter.",

@@ -5,6 +5,26 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 1.1.1 - 2026-06-20
+
+### Fixed
+
+Mirrors upstream XLIDE v2.5.x fixes that eliminate false positives on real-world
+workbooks (validated against the fastjson and stdVBA workbooks):
+
+* Recognize the hidden VBA intrinsics `VarPtr`/`StrPtr`/`ObjPtr` and the byte-string
+  family (`LeftB`/`RightB`/`MidB`/`InStrB`/`AscB`/`ChrB` and the `$` variants), plus the
+  `vbLongLong` constant, so they are no longer reported as `undeclared-variable`.
+* A qualified `ReDim` target (`ReDim x.arr(...)`) resizes a member array and is no longer
+  misreported as `scalar-redim` on the container variable.
+* `Exit Function` / `Exit Sub` inside a `Property Get` are accepted (the VBE allows
+  them), so they no longer raise `exit-wrong-proc`.
+* The mandatory value parameter of a `Property Let`/`Set` may follow an `Optional` index
+  parameter without a `required-param-after-optional` error.
+* Default the `TWINBASIC` compiler constant to False so twinBASIC-only `#If` branches are
+  inactive, and compare boolean `#Const` values by their VBA numeric form (`-1`/`0`).
+* Harden token-name handling against an empty token, matching the upstream null-guard.
+
 ## 1.1.0 - 2026-06-20
 
 ### Added

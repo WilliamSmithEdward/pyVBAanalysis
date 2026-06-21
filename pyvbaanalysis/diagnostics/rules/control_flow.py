@@ -279,6 +279,12 @@ def check_exit_statements(source: str, push: PushFn) -> ProcedureStatementVisito
     """Exit Sub/Function/Property must match the enclosing procedure kind."""
 
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
+        # VBE special-cases Property Get: it accepts `Exit Function` and `Exit Sub` in
+        # addition to `Exit Property` (oracle-verified), since a Property Get is
+        # internally value-returning. Property Let/Set and Sub/Function still require
+        # the matching keyword, so only Property Get is exempt.
+        if member.proc_kind is ProcKind.PROPERTY_GET:
+            return None
         expected = _expected_exit_word(member.proc_kind)
         label = _enclosing_proc_label(member.proc_kind)
 

@@ -42,7 +42,11 @@ def token_name(token: VbaToken | None) -> str | None:
     if token.kind in (TokenKind.IDENTIFIER, TokenKind.KEYWORD):
         return token.raw_text
     if token.kind is TokenKind.BRACKETED_IDENTIFIER:
-        return token.raw_text[1:-1]
+        # Strip the surrounding brackets, but only when both are present: the tokenizer
+        # still emits a bracketedIdentifier for an unterminated `[name` at line end,
+        # where a blind slice would drop a real character.
+        raw = token.raw_text
+        return raw[1:-1] if raw.startswith("[") and raw.endswith("]") else raw
     return None
 
 
