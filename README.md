@@ -13,8 +13,7 @@ It looks for more than a hundred kinds of problem, including:
 - Type errors, such as assigning a string to a `Long` or passing the wrong type to
   a procedure.
 - Undeclared variables and calls to procedures or members that do not exist.
-- Code the VBA compiler rejects: duplicate declarations, a missing `Option
-  Explicit`, malformed statements, or a `Declare` that lacks `PtrSafe` on 64-bit
+- Code the VBA compiler rejects: duplicate declarations, malformed statements, or a `Declare` that lacks `PtrSafe` on 64-bit
   Office.
 - Likely run-time failures, such as dividing by a constant zero or a type mismatch
   from a bad conversion.
