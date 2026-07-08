@@ -756,6 +756,14 @@ def _is_juxtaposable_value_start(tok: VbaToken | None) -> bool:
 def _ends_juxtaposable_value(tok: VbaToken | None) -> bool:
     if tok is None:
         return False
+    # A digit run glued to `&` lexes as a &-suffixed integer literal, but the
+    # VBE can read that `&` as CONCATENATION - it does when the digits overflow
+    # Long (VBE oracle suffix_long_amp_glued_concat_accepted: `s = 3000000000&"x"`
+    # is accepted) - so a &-suffixed integer literal never provably ends a
+    # value. The in-range form (`n = 5& 1`) is under-reported by design: a
+    # missed diagnostic beats a false positive on the oracle-verified concat.
+    if tok.kind is TokenKind.INTEGER_LITERAL and tok.raw_text.endswith("&"):
+        return False
     return tok.kind in _JUXTAPOSABLE_VALUE_KINDS or tok.raw_text in (")", "]")
 
 
@@ -790,15 +798,6 @@ def _juxtaposed_rhs_values(source: str, span: Span) -> tuple[str, Span] | None:
             continue
         nxt = toks[i + 1]
         if _ends_juxtaposable_value(toks[i]) and _is_juxtaposable_value_start(nxt):
-            # No-FP guard (oracle case suffix_long_amp_glued_concat_accepted):
-            # a digit run glued to `&` lexes as a &-suffixed integer literal, but
-            # the VBE can read that `&` as CONCATENATION (it does when the digits
-            # overflow Long, e.g. `3000000000&"x"` is accepted), so a &-suffixed
-            # integer literal followed by a value is never provably juxtaposed.
-            # Deliberate deviation from XLIDE, which flags its own accepted
-            # oracle control here; remove once the upstream rule is fixed.
-            if toks[i].kind is TokenKind.INTEGER_LITERAL and toks[i].raw_text.endswith("&"):
-                continue
             return (nxt.raw_text, absolute_span(span, nxt))
     return None
 

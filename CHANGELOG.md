@@ -87,11 +87,10 @@ word-operator widening introduced: a `Case Is > 5` comparison clause
 reported as `invalid-expression-syntax` (operator runs inside a Case body
 still are).
 
-One deliberate deviation from upstream, backed by the oracle corpus: a
-`&`-suffixed integer literal followed by a value (`s = 3000000000&"x"`) is not
-reported as juxtaposed, because the VBE reads that `&` as concatenation
-(oracle case `suffix_long_amp_glued_concat_accepted`); XLIDE currently flags
-its own accepted control there.
+Also mirrors the post-v2.5.11 XLIDE juxtaposition fix: a `&`-suffixed integer
+literal followed by a value (`s = 3000000000&"x"`) is not reported as
+juxtaposed, because the VBE can read that `&` as concatenation (oracle case
+`suffix_long_amp_glued_concat_accepted`).
 
 ## 1.1.1 - 2026-06-20
 

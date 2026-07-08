@@ -203,8 +203,16 @@ def test_juxtaposed_rhs_values_valid_forms_silent() -> None:
         'MsgBox "hello"',  # implicit call statement (no '=')
         "Debug.Print n",  # call statement
         "Foo n, 1",  # call statement with args
+        'n = 3000000000&"x"',  # glued & read by the VBE as concatenation
     ):
         assert not _flags_juxtaposition(body), body
+
+
+def test_glued_amp_concat_oracle_control_stays_clean() -> None:
+    # VBE oracle suffix_long_amp_glued_concat_accepted: the glued & is read as
+    # concatenation because 3000000000 overflows Long, so this compiles and runs.
+    src = 'Public Sub XlideOracleEntry()\n    Dim s As String\n    s = 3000000000&"x"\nEnd Sub\n'
+    assert "invalid-expression-syntax" not in _codes(src)
 
 
 def test_valid_calls_silent() -> None:
