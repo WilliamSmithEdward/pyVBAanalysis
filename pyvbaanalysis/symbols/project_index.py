@@ -689,7 +689,7 @@ class ProjectIndex:
                 definitions=[],
                 reason=f"Module '{module_name}' is not indexed.",
             )
-        return resolve_bare_identifier_binding(
+        resolution = resolve_bare_identifier_binding(
             BareIdentifierResolutionInput(
                 current_module=home,
                 name=name,
@@ -699,6 +699,34 @@ class ProjectIndex:
                 project_visible_symbols=self.visible_identifier_symbols(module_name),
             )
         )
+        # Document/UserForm code names (Sheet1, UserForm1) are object-module
+        # globals that visible_identifier_names reports as declared but
+        # visible_identifier_symbols omits, so a bare reference would otherwise
+        # resolve to nothing. Additively fall back to the module root symbol when
+        # the source ladder found no match, keeping definition resolution
+        # consistent with the diagnostics that treat the name as bound.
+        if resolution.scope is BareIdentifierResolutionScope.UNRESOLVED:
+            object_module = self._document_or_userform_module_named(name)
+            if object_module is not None:
+                resolution.scope = BareIdentifierResolutionScope.PROJECT
+                resolution.tier = BareIdentifierResolutionScope.PROJECT
+                resolution.definitions = [object_module.root]
+                resolution.reason = (
+                    f"object-module global {context.value} binding for '{name}' "
+                    f"in {object_module.module_name}."
+                )
+        return resolution
+
+    def _document_or_userform_module_named(self, name: str) -> ModuleSymbols | None:
+        """The Document/UserForm module whose code name matches ``name``
+        (case-insensitive). These code names act as global object variables."""
+        mod = self._modules.get(name.lower())
+        if mod is not None and mod.module_kind in (
+            ModuleSymbolKind.DOCUMENT,
+            ModuleSymbolKind.USERFORM,
+        ):
+            return mod
+        return None
 
     def resolve_qualified_definition(self, qualifier: str, name: str) -> list[VbaSymbol]:
         mod = self._modules.get(qualifier.lower())
@@ -717,7 +745,9 @@ class ProjectIndex:
 
         if home is not None and resolved is not None:
             if resolved.scope is BareIdentifierResolutionScope.LOCAL:
-                enclosing = self._enclosing_procedure(home, offset)
+                # Reuse the enclosing procedure resolve_bare_identifier already
+                # computed instead of re-running the O(n) scan on this hot path.
+                enclosing = resolved.enclosing_procedure
                 return ReferenceScope(
                     kind="local",
                     definitions=list(resolved.definitions),

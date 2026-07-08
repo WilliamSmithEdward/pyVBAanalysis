@@ -123,6 +123,11 @@ _BLOCK_CLOSERS: dict[str, str] = {
     "select": "endselect",
 }
 
+# VBE accepts End Sub/Function/Property interchangeably as procedure closers
+# (oracle-verified: the mismatch compiles), so a wrong one still closes the
+# procedure and is reported as a warning, not a missing-closer error.
+_PROCEDURE_CLOSERS: frozenset[str] = frozenset({"endsub", "endfunction", "endproperty"})
+
 _END_CLOSERS: dict[str, str] = {
     "if": "endif",
     "with": "endwith",
@@ -708,6 +713,21 @@ class _Parser:
             if ck == expected:
                 end_stmt = self._cursor.next()
                 closed = True
+                break
+            if ck in _PROCEDURE_CLOSERS:
+                # Mismatched procedure closer: the VBE still closes the procedure
+                # (End Sub/Function/Property are interchangeable), so this is a
+                # style warning anchored on the opener, and parsing continues as
+                # if the expected closer had appeared.
+                end_stmt = self._cursor.next()
+                closed = True
+                self._diag(
+                    head,
+                    f"Procedure '{name}' is closed with '{_CLOSER_LABELS[ck]}'; "
+                    f"use '{_CLOSER_LABELS[expected]}' to match the opening keyword.",
+                    ParseSeverity.WARNING,
+                    "MS-VBAL 5.3.1",
+                )
                 break
             stmt_tokens = code_tokens(stmt)
             if self._is_attribute(stmt_tokens):

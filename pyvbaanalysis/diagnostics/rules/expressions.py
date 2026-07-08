@@ -46,6 +46,7 @@ from ...call.call_context import (
     explicit_call_statement_argument_without_parens,
     explicit_call_statement_target,
     standalone_empty_parenthesized_call_statement,
+    standalone_multi_arg_parenthesized_call_statement,
 )
 from ..call_extraction import CallableTypeSignature, callable_accepts_zero_arguments
 from ..callable_signatures import (
@@ -246,12 +247,32 @@ def _zero_divisor_atom_token_group(
         and member is not None
         and member_name
     ):
+        # Only treat `first.member` as the complete divisor when nothing extends
+        # the member-access chain past it; otherwise `a.Zero.Foo` / `a.Zero(i)`
+        # would mis-match on the inner `a.Zero == 0` lookup.
+        if not _is_divisor_atom_boundary(toks[start + 3] if start + 3 < len(toks) else None):
+            return None
         return (
             [first, toks[start + 1], member]
             if constants.get(f"{first_name}.{member_name}".lower()) == 0
             else None
         )
-    return [first] if _is_zero_divisor_atom(first, constants) else None
+    # A bare atom only stands alone when it is not itself a member-access head or
+    # a call target (a following '.' or '(' means more of the expression follows).
+    if _is_zero_divisor_atom(first, constants) and _is_divisor_atom_boundary(
+        toks[start + 1] if start + 1 < len(toks) else None
+    ):
+        return [first]
+    return None
+
+
+def _is_divisor_atom_boundary(tok: VbaToken | None) -> bool:
+    """True when tok terminates a divisor atom: end-of-tokens, or anything that is
+    NOT a member-access dot or call-opening paren (either of those means the atom
+    continues, so the group is not the whole divisor)."""
+    if tok is None:
+        return True
+    return tok.raw_text != "." and tok.raw_text != "("
 
 
 def _is_zero_divisor_atom(tok: VbaToken | None, constants: IntegerConstantLookup) -> bool:
@@ -326,6 +347,18 @@ def check_call_parens(
                 push(
                     "callStatementForbidsParens",
                     _bare_call_forbids_parens_message(name, module_signatures, source_names),
+                    span,
+                )
+            multi_arg = _implicit_parenthesized_multi_arg_call(
+                source, stmt.span, module_signatures, source_names
+            )
+            if multi_arg is not None:
+                name, span = multi_arg
+                push(
+                    "callStatementMultiArgParens",
+                    f"A standalone call cannot enclose multiple arguments in parentheses; "
+                    f"use 'Call {name}(...)' or remove the parentheses ('{name} arg1, arg2'). "
+                    f"VBA rejects this form as a compile error.",
                     span,
                 )
             implicit = _implicit_parenthesized_member_call(source, stmt.span, member_ctx)
@@ -414,6 +447,37 @@ def _implicit_parenthesized_bare_callable_call(
         return None
     signature = callable_signature_for(call.name, module_signatures, source_names)
     if signature is None or not callable_accepts_zero_arguments(signature):
+        return None
+    return (call.name, call.span)
+
+
+def _implicit_parenthesized_multi_arg_call(
+    source: str,
+    span: Span,
+    module_signatures: Mapping[str, CallableTypeSignature],
+    source_names: SourceNameScope | None,
+) -> tuple[str, Span] | None:
+    """Port of implicitParenthesizedMultiArgCall: a standalone `mySub2("a", "b", "c")`
+    wraps a multi-argument list in parentheses without `Call` (the VBE "Expected: ="
+    compile error). Scoped to a callee that resolves to a known procedure so unknown
+    names (which could be array indexing or external references) stay silent:
+
+    * bare names bind to same-module/unique-exported project Sub/Function/Declare;
+    * `Module.Proc(...)` binds to an exported standard-module procedure through its
+      deterministic qualified key (the same resolution the argument-count rule uses).
+
+    Object member/property calls (`obj.Method(a, b)`) are deliberately deferred: a
+    non-empty single-argument member form is legal (`ActiveSheet.Range("A1")`) and
+    multi-argument member/default-member forms are unproven. The single-argument
+    ByVal-grouping form is excluded by the >= 2 argument guard in the shared helper."""
+    call = standalone_multi_arg_parenthesized_call_statement(source, span)
+    if call is None:
+        return None
+    if call.is_member:
+        if not call.qualifier or qualified_procedure_key(call.qualifier, call.name) not in module_signatures:
+            return None
+        return (f"{call.qualifier}.{call.name}", call.span)
+    if callable_signature_for(call.name, module_signatures, source_names) is None:
         return None
     return (call.name, call.span)
 
@@ -606,6 +670,16 @@ def check_invalid_expression_syntax(
                     f"Invalid operator sequence '{text}'; this will fail to compile as a syntax error.",
                     hit_span,
                 )
+                return
+            juxtaposed = _juxtaposed_rhs_values(source, stmt.span)
+            if juxtaposed is not None:
+                text, hit_span = juxtaposed
+                push(
+                    "invalidExpressionSyntax",
+                    f"Unexpected '{text}' after a complete expression; expected end of "
+                    f"statement. This will fail to compile as a syntax error.",
+                    hit_span,
+                )
 
         return visitor
 
@@ -652,11 +726,80 @@ def _unsupported_question_mark_operator(source: str, span: Span) -> Span | None:
 
 
 def _is_non_unary_binary_operator(tok: VbaToken | None) -> bool:
+    # VBA word operators (And/Or/Xor/Eqv/Imp/Mod/Like/Is) lex as keyword tokens,
+    # so accept those alongside symbolic operator tokens (e.g. ':=') by matching
+    # on the lowercased text rather than the token kind.
     return (
         tok is not None
-        and tok.kind is TokenKind.OPERATOR
+        and tok.kind in (TokenKind.OPERATOR, TokenKind.KEYWORD)
         and token_text(tok) in _NON_UNARY_BINARY_OPERATORS
     )
+
+
+_JUXTAPOSABLE_VALUE_KINDS = frozenset(
+    {
+        TokenKind.INTEGER_LITERAL,
+        TokenKind.FLOAT_LITERAL,
+        TokenKind.DATE_LITERAL,
+        TokenKind.STRING_LITERAL,
+        TokenKind.IDENTIFIER,
+        TokenKind.BRACKETED_IDENTIFIER,
+    }
+)
+
+
+def _is_juxtaposable_value_start(tok: VbaToken | None) -> bool:
+    return tok is not None and tok.kind in _JUXTAPOSABLE_VALUE_KINDS
+
+
+def _ends_juxtaposable_value(tok: VbaToken | None) -> bool:
+    if tok is None:
+        return False
+    return tok.kind in _JUXTAPOSABLE_VALUE_KINDS or tok.raw_text in (")", "]")
+
+
+def _juxtaposed_rhs_values(source: str, span: Span) -> tuple[str, Span] | None:
+    """Detects two juxtaposed value expressions in an assignment RHS - a complete
+    value (literal / identifier / call / index) immediately followed by another
+    value starter with no operator between, e.g. `n = 1 n 1` or
+    `n = 1 MsgBox("hello") 1`. That is a VBE "Expected: end of statement" syntax
+    error which the lenient parser otherwise silently drops to a raw statement.
+
+    Scoped to the TOP LEVEL of an assignment RHS (a top-level standalone `=` on a
+    statement that is not a non-assignment leader) so it cannot misfire on:
+    implicit call statements (`MsgBox x` - no `=`), a call written with a space
+    (`Foo (x)` - the next token is `(`, not a value start), jagged-array access
+    (`arr(1)(2)` - `(` again), a trailing type-suffix/operator (`Count&` - `&` is
+    not a value start), or anything inside parentheses (depth > 0 is skipped)."""
+    toks = statement_tokens(source, span)
+    if len(toks) == 0 or _is_non_assignment_statement_leader(token_text(toks[0])):
+        return None
+    eq = top_level_operator_index(toks, "=")
+    if eq < 0:
+        return None
+    depth = 0
+    for i in range(eq + 1, len(toks) - 1):
+        raw = toks[i].raw_text
+        if raw in ("(", "["):
+            depth += 1
+            continue
+        if raw in (")", "]"):
+            depth = depth - 1 if depth > 0 else 0
+        if depth != 0:
+            continue
+        nxt = toks[i + 1]
+        if _ends_juxtaposable_value(toks[i]) and _is_juxtaposable_value_start(nxt):
+            # No-FP guard (oracle case suffix_long_amp_glued_concat_accepted):
+            # a digit run glued to `&` lexes as a &-suffixed integer literal, but
+            # the VBE can read that `&` as CONCATENATION (it does when the digits
+            # overflow Long, e.g. `3000000000&"x"` is accepted), so a &-suffixed
+            # integer literal followed by a value is never provably juxtaposed.
+            # Deliberate deviation from XLIDE, which flags its own accepted
+            # oracle control here; remove once the upstream rule is fixed.
+            if toks[i].kind is TokenKind.INTEGER_LITERAL and toks[i].raw_text.endswith("&"):
+                continue
+            return (nxt.raw_text, absolute_span(span, nxt))
+    return None
 
 
 def _invalid_operator_sequence(source: str, span: Span) -> tuple[str, Span] | None:

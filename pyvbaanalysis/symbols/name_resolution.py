@@ -41,6 +41,10 @@ class BareIdentifierResolution:
     definitions: list[VbaSymbol]
     reason: str
     tier: BareIdentifierResolutionScope | None = None
+    # The procedure enclosing the resolved offset, echoed back from the input so
+    # hot-path callers (reference_scope) can reuse it instead of re-running the
+    # O(n) enclosing-procedure scan.
+    enclosing_procedure: VbaSymbol | None = None
 
 
 @dataclass(slots=True)
@@ -234,6 +238,7 @@ def _resolution(
         tier=tier,
         definitions=definitions,
         reason=f"{label} {input.context.value} binding for '{input.name}' in {owner}.",
+        enclosing_procedure=input.enclosing_procedure,
     )
 
 

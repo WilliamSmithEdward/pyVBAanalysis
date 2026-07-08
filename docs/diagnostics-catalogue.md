@@ -1,6 +1,6 @@
 # Diagnostic catalogue
 
-The diagnostic codes pyVBAanalysis can emit, generated from the rule metadata (`tools/generate_diagnostics_catalogue.py`). This table lists the 115 rule-metadata codes across 6 categories. A further 2 structural block-balance codes (`missing-block-closer`, `unmatched-block-closer`) are emitted by the parser pass and are not in the metadata table, for a full set of 117 codes.
+The diagnostic codes pyVBAanalysis can emit, generated from the rule metadata (`tools/generate_diagnostics_catalogue.py`). This table lists the 117 rule-metadata codes across 6 categories. A further 3 structural block-balance codes (`mismatched-end-keyword`, `missing-block-closer`, `unmatched-block-closer`) are emitted by the parser pass and are not in the metadata table, for a full set of 120 codes.
 
 Each code is reported only when it is provably correct; anything unknown or ambiguous stays quiet (the no-false-positive discipline). The **kind** column says what a code means: a *compile error* is rejected by the VBE compiler, a *runtime error* is a deterministic Run-time error, a *runtime risk* is a likely fault, and *style* is advisory.
 
@@ -116,7 +116,7 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `runtime-conversion-value` | Invalid runtime conversion value | error | runtime error | MS-VBAL 5.6 / VBA runtime conversion and VBE compiler runtime error 13 |
 | `scalar-member-access` | Member access on scalar variable | error | compile error | VBE compiler: Invalid qualifier / Syntax error |
 | `scalar-redim` | Scalar variable cannot be ReDimmed | error | compile error | MS-VBAL ReDim statement / VBE compiler: Expected array |
-| `set-required` | Object assignment requires Set | error | compile error | MS-VBAL 5.4.3 / Set statement |
+| `set-required` | Object assignment requires Set | error | runtime error | VBE runtime error 91: Object variable or With block variable not set (MS-VBAL 5.4.3 / Set statement) |
 | `set-requires-object` | Set assignment requires an object variable | error | compile error | MS-VBAL 5.4.3 |
 | `string-arithmetic-coercion` | Nonnumeric string in numeric expression | error | runtime error | MS-VBAL 5.6 / runtime type coercion |
 | `typeof-is-always-false` | 'TypeOf ... Is' is always False | warning | runtime risk | MS-VBAL 5.6 (TypeOf...Is expression) |
@@ -131,15 +131,17 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `option-explicit-missing` | Option Explicit is not specified | warning | style-policy | MS-VBAL 5.2.4.1.1 |
 | `vba-test-directive` | Invalid VBA test directive | warning | style-policy | VBA test directive comment syntax |
 
-## Syntax (15)
+## Syntax (17)
 
 | Code | Title | Default | Kind | Spec reference |
 | --- | --- | --- | --- | --- |
 | `call-requires-parens` | Call statement requires parentheses around arguments | error | compile error | MS-VBAL 5.4.2.1 |
 | `call-statement-forbids-parens` | Standalone zero-argument call cannot use empty parentheses | error | compile error | MS-VBAL 5.4.2.1 |
+| `call-statement-multi-arg-parens` | Standalone call cannot parenthesize multiple arguments | error | compile error | MS-VBAL 5.4.2.1 |
 | `else-branch-order` | Else branch must be final in conditional block | error | compile error | MS-VBAL 3.4 / 5.4.2.1 |
 | `expression-call-requires-parens` | Function call in an expression requires parentheses around arguments | error | compile error | MS-VBAL 5.6.9 |
 | `if-missing-then` | If statement is missing Then | error | compile error | MS-VBAL 5.4.2.1 |
+| `if-reserved-keyword-in-condition` | Reserved keyword in If condition | error | compile error | MS-VBAL 5.4.2.1 (If block) / 3.3.5.2 (reserved identifiers) / VBE compiler: Syntax error |
 | `invalid-erase-target` | Erase target must be a variable or array name | error | compile error | MS-VBAL Erase statement |
 | `invalid-explicit-call-target` | Invalid explicit Call target | error | compile error | VBE compiler: Syntax error |
 | `invalid-expression-syntax` | Invalid expression syntax | error | compile error | MS-VBAL 5.6 / VBE compiler: Syntax error |

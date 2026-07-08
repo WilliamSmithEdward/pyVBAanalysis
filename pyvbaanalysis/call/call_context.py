@@ -63,6 +63,19 @@ class ExplicitCallStatementArgumentList:
     argument_span: Span
 
 
+@dataclass(frozen=True, slots=True)
+class MultiArgParenthesizedCallStatementTarget:
+    name: str
+    span: Span
+    is_member: bool
+    # The module/object qualifier when the statement is a simple two-segment
+    # `Qualifier.Callee(args)` form (used to recognize module-qualified
+    # standard-module calls). None for bare calls, leading-dot With members,
+    # and deeper receiver chains.
+    qualifier: str | None
+    argument_count: int
+
+
 def _statement_tokens_after_leading_line_number(source: str, span: Span) -> list[VbaToken]:
     return tokens_without_leading_line_number(statement_tokens(source, span.start, span.end))
 
@@ -117,8 +130,16 @@ def bare_call_statement_target(source: str, span: Span) -> BareCallStatementTarg
     if r in (".", ":"):
         return None
     if not explicit_call and r == "(":
-        return None
-    if not explicit_call:
+        # `Name (expr), arg2, ...` is a parenless call statement whose first
+        # argument is a parenthesized (ByVal-forcing) group. Treat the group as
+        # an argument only when the statement continues past the matching `)`
+        # with something other than a callee-chain continuation (`.member` or
+        # `(index)`). `Name (expr)` alone stays on the expression-call path.
+        close = match_paren_from(toks, idx + 1)
+        after_close = toks[close + 1] if 0 <= close and close + 1 < len(toks) else None
+        if after_close is None or after_close.raw_text in (".", "("):
+            return None
+    elif not explicit_call:
         gap = source[span.start + callee.end : span.start + next_tok.start]
         if _WHITESPACE.search(gap) is None:
             return None
@@ -216,6 +237,72 @@ def standalone_empty_parenthesized_call_statement(
             span=Span(span.start + toks[i].start, span.start + toks[close].end),
         )
     return None
+
+
+def standalone_multi_arg_parenthesized_call_statement(
+    source: str, span: Span
+) -> MultiArgParenthesizedCallStatementTarget | None:
+    """A standalone (non-``Call``) statement of the form ``callee(arg1, arg2, ...)``
+    whose parentheses wrap the entire statement and enclose two or more top-level
+    arguments, or None.
+
+    In statement context VBA only accepts a parenless argument list (``callee a, b``)
+    or an explicit ``Call callee(a, b)``; wrapping a multi-argument list in
+    parentheses forms an index-expression that the VBE rejects as the "Expected: ="
+    compile error. The single-argument form (``callee(a)``, legal ByVal grouping) and
+    the empty-parentheses form (owned by
+    standalone_empty_parenthesized_call_statement) are intentionally excluded.
+    """
+    toks = _statement_tokens_after_leading_line_number(source, span)
+    if len(toks) < 4 or token_word(toks[0]) == "call" or _top_level_token_index(toks, "=") >= 0:
+        return None
+    for i in range(len(toks) - 2):
+        name = token_name(toks[i])
+        if not name or toks[i + 1].raw_text != "(":
+            continue
+        close = match_paren_from(toks, i + 1)
+        if close != len(toks) - 1 or not _is_complete_statement_chain_through_empty_call(
+            toks, i, close
+        ):
+            continue
+        argument_count = _top_level_argument_count(toks, i + 1, close)
+        if argument_count < 2:
+            continue
+        is_member = i > 0 and toks[i - 1].raw_text == "."
+        # Only the simple `Qualifier.Callee(args)` form (callee is the second
+        # token) carries a qualifier; leading-dot With members and deeper chains
+        # are object receivers, not module qualifiers.
+        qualifier = (
+            token_name(toks[0]) if is_member and i == 2 and toks[0].raw_text != "." else None
+        )
+        # Span the whole qualified expression so the squiggle covers
+        # `Qualifier.Callee(args)`, not just the callee.
+        start_tok = toks[0] if qualifier else toks[i]
+        return MultiArgParenthesizedCallStatementTarget(
+            name=name,
+            is_member=is_member,
+            qualifier=qualifier,
+            argument_count=argument_count,
+            span=Span(span.start + start_tok.start, span.start + toks[close].end),
+        )
+    return None
+
+
+def _top_level_argument_count(toks: list[VbaToken], open_index: int, close_index: int) -> int:
+    """Top-level (depth-0) comma-separated arguments inside the paren pair; empty parens count as zero."""
+    depth = 0
+    commas = 0
+    has_content = False
+    for k in range(open_index + 1, close_index):
+        raw = toks[k].raw_text
+        if raw in ("(", "["):
+            depth += 1
+        elif raw in (")", "]"):
+            depth -= 1
+        elif depth == 0 and raw == ",":
+            commas += 1
+        has_content = True
+    return commas + 1 if has_content else 0
 
 
 def _consume_callable_chain(tokens: list[VbaToken], start: int) -> int | None:

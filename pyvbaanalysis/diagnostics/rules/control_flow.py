@@ -31,6 +31,7 @@ from ...parser.nodes import (
     DoBlockNode,
     ForBlockNode,
     IfBlockNode,
+    IfBranchKind,
     LeafStatementNode,
     ModuleNode,
     ProcedureNode,
@@ -412,9 +413,64 @@ def _check_context_body(
             _check_context_body(source, node.body, replace(ctx, with_depth=ctx.with_depth + 1), activity, push)
         elif isinstance(node, SelectBlockNode):
             _check_context_body(source, node.body, replace(ctx, select_depth=ctx.select_depth + 1), activity, push)
-        elif isinstance(node, (IfBlockNode, WhileBlockNode)):
+        elif isinstance(node, IfBlockNode):
+            _check_malformed_if_headers(source, node, push)
+            _check_context_body(source, node.body, ctx, activity, push)
+        elif isinstance(node, WhileBlockNode):
             _check_context_body(source, node.body, ctx, activity, push)
         # ConditionalDirective / VariableGroup: no context check.
+
+
+# Reserved keywords that can never appear inside a value expression, so finding
+# one in a block-If branch condition is always a malformed header. `If`, `Else`,
+# and `ElseIf` are statement-keywords and `Then` is a marker-keyword
+# (MS-VBAL 3.3.5.2); none has any expression meaning. Operator keywords
+# (`And`, `Or`, `Not`, `Is`, `TypeOf`, `New`, ...) are intentionally excluded.
+_IF_CONDITION_RESERVED_KEYWORDS: frozenset[str] = frozenset({"if", "then", "else", "elseif"})
+
+
+def _check_malformed_if_headers(source: str, node: IfBlockNode, push: PushFn) -> None:
+    """Flags a reserved If-control keyword sitting inside a block-If branch's
+    condition, which the VBE rejects with a Syntax error. Covers `If If True Then`
+    (the `If` keyword where the condition expression belongs) and
+    `If True Then Then` (a second `Then` before the block-opening `Then`).
+
+    No false positives: it only matches `if`/`then`/`else`/`elseif` KEYWORD tokens,
+    so identifiers that merely contain those substrings (`IfCount`, `ThenValue`)
+    and legal expression keywords are never flagged. `#If`/`#ElseIf` directives are
+    a separate ConditionalDirective node, not an IfBlock, so they never reach here."""
+    for branch in node.branches:
+        if branch.branch_kind is IfBranchKind.ELSE:
+            continue
+        toks = statement_tokens(source, branch.header_span)
+        # The branch's leading If/ElseIf keyword (skip a leading line number or label).
+        start_kw = -1
+        for i, tok in enumerate(toks):
+            if tok.kind is TokenKind.KEYWORD:
+                if token_text(tok) in ("if", "elseif"):
+                    start_kw = i
+                break
+            if tok.kind is not TokenKind.INTEGER_LITERAL and tok.raw_text != ":":
+                break
+        if start_kw < 0:
+            continue
+        # The block-opening `Then` is the last `then` keyword on the header line.
+        close_then = -1
+        for i in range(len(toks) - 1, start_kw, -1):
+            if toks[i].kind is TokenKind.KEYWORD and token_text(toks[i]) == "then":
+                close_then = i
+                break
+        if close_then < 0:
+            continue
+        for i in range(start_kw + 1, close_then):
+            tok = toks[i]
+            if tok.kind is TokenKind.KEYWORD and token_text(tok) in _IF_CONDITION_RESERVED_KEYWORDS:
+                push(
+                    "ifReservedKeywordInCondition",
+                    f"Unexpected '{tok.raw_text}' in the If condition.",
+                    absolute_span(branch.header_span, tok),
+                )
+                break
 
 
 # -- checkDuplicateLabels / checkUndefinedLabels ---------------------------

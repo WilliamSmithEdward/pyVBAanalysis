@@ -276,6 +276,15 @@ def _receiver_type_from_tokens(
     )
 
 
+def _is_explicit_element_accessor(name: str) -> bool:
+    """Members whose declared return IS the already-resolved element/result: the
+    default member (Item/_Default) and the creation method Add. A call to one of
+    these must not be element-indexed again, or a collection whose element is
+    itself a collection (e.g. SparklineGroups.Item(1)) over-resolves one level."""
+    lower = name.lower()
+    return lower == "item" or lower == "_default" or lower == "add"
+
+
 def _receiver_type_from_implicit_with_chain(
     with_type: str | None,
     chain: list[_ReceiverChainSegment],
@@ -288,8 +297,16 @@ def _receiver_type_from_implicit_with_chain(
         resolved = _resolve_any_member_return_type(current_type, segment.name, ctx)
         if resolved is None:
             return None
+        # A member called with arguments indexes into its return type; when that
+        # type is a host collection, _apply_default_member_return_type resolves the
+        # element (and no-ops otherwise). This holds for method-kind accessors too
+        # (e.g. ws.ChartObjects(1).Chart), so it must not be gated on kind. But
+        # Item/_Default/Add already return the resolved element/result, so they are
+        # not re-indexed (avoids over-resolving SparklineGroups.Item(1) one level).
         current_type = _apply_default_member_return_type(
-            resolved.type, segment.has_arguments and resolved.kind != "method", ctx
+            resolved.type,
+            segment.has_arguments and not _is_explicit_element_accessor(segment.name),
+            ctx,
         )
     return current_type
 
@@ -351,8 +368,13 @@ def _receiver_type_from_chain(
         resolved = _resolve_any_member_return_type(current_type, segment.name, ctx)
         if resolved is None:
             return None
+        # See _receiver_type_from_implicit_with_chain: argument-bearing members
+        # index into their return type unless they are the explicit element
+        # accessors (Item/_Default/Add), which already return the element.
         current_type = _apply_default_member_return_type(
-            resolved.type, segment.has_arguments and resolved.kind != "method", ctx
+            resolved.type,
+            segment.has_arguments and not _is_explicit_element_accessor(segment.name),
+            ctx,
         )
         s += 1
     return current_type
@@ -382,7 +404,11 @@ def _collect_receiver_chain_with_start(
             open_index = _match_paren_left(tokens, i)
             if open_index < 0:
                 return None
-            pending_has_arguments = True
+            # Empty parens foo() are a call with no index, not collection indexing;
+            # only a non-empty argument list resolves to an element (matches the
+            # assignment-inference path's argument_tokens check).
+            if open_index < i - 1:
+                pending_has_arguments = True
             i = open_index - 1
             continue
         if i < 0 or not is_ident_like(tokens[i]):
@@ -398,10 +424,35 @@ def _collect_receiver_chain_with_start(
     return _ReceiverChain(segments, start_index)
 
 
+# `Me` is the only VBA keyword that can terminate a receiver expression (`Me.`);
+# every other keyword before a dot (In, To, Then, ...) introduces a fresh
+# expression, so the dot is a leading implicit-With member access.
+_RECEIVER_TAIL_KEYWORDS: frozenset[str] = frozenset({"me"})
+
+
+def _precedes_leading_member_dot(token: VbaToken) -> bool:
+    """True when ``token`` (the token immediately before a ``.``) means the dot is
+    a LEADING implicit-With member-access dot rather than ``receiver.member``. A
+    dot is explicit only when preceded by something that terminates a receiver
+    expression: a plain identifier, a ``[Foo]`` foreign-name escape, ``Me``, or a
+    closing ``)``/``]``. Anything else - a statement boundary, an operator
+    (``=``, ``&``, ``+``, ...), ``(``/``,``, or an expression-introducing keyword
+    (``In``, ``To``, ``Then``, ...) - starts a new expression where ``.member``
+    binds to the active ``With`` block (e.g. ``For Each wb In .Workbooks``,
+    ``Set x = .Foo``)."""
+    if token.kind is TokenKind.IDENTIFIER or token.kind is TokenKind.BRACKETED_IDENTIFIER:
+        return False
+    if token.raw_text == ")" or token.raw_text == "]":
+        return False
+    if token.kind is TokenKind.KEYWORD and token.raw_text.lower() in _RECEIVER_TAIL_KEYWORDS:
+        return False
+    return True
+
+
 def _collect_implicit_with_chain(
     tokens: Sequence[VbaToken], end_index: int
 ) -> list[_ReceiverChainSegment] | None:
-    if end_index < 0 or _is_boundary(tokens[end_index]):
+    if end_index < 0 or _precedes_leading_member_dot(tokens[end_index]):
         return []
     segments: list[_ReceiverChainSegment] = []
     i = end_index
@@ -413,7 +464,11 @@ def _collect_implicit_with_chain(
             open_index = _match_paren_left(tokens, i)
             if open_index < 0:
                 return None
-            pending_has_arguments = True
+            # Empty parens foo() are a call with no index, not collection indexing;
+            # only a non-empty argument list resolves to an element (matches the
+            # assignment-inference path's argument_tokens check).
+            if open_index < i - 1:
+                pending_has_arguments = True
             i = open_index - 1
             continue
         if i < 0 or not is_ident_like(tokens[i]):
@@ -423,7 +478,7 @@ def _collect_implicit_with_chain(
         i -= 1
         if i >= 0 and tokens[i].raw_text == ".":
             prior = i - 1
-            if prior < 0 or _is_boundary(tokens[prior]):
+            if prior < 0 or _precedes_leading_member_dot(tokens[prior]):
                 return segments
             i = prior
             continue

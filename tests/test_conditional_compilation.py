@@ -89,9 +89,22 @@ def test_numeric_equality_parity() -> None:
     assert _activity_at(src, "Dim a") is _ACTIVE
 
 
-def test_hex_literal_is_unknown() -> None:
-    # &HFF is not in the JS Number() grammar -> undefined -> unknown branch.
-    assert _activity_at("#If &HFF Then\nDim a\n#End If", "Dim a") is _UNKNOWN
+def test_hex_and_octal_literals_evaluate() -> None:
+    # XLIDE v2.5.8: &H/&O literals parse with the correct radix, so a hex
+    # condition evaluates instead of falling to the unknown branch.
+    assert _activity_at("#If &HFF Then\nDim a\n#End If", "Dim a") is _ACTIVE
+    assert _activity_at("#If &H0 Then\nDim a\n#End If", "Dim a") is _INACTIVE
+    assert _activity_at("#If &O17 = 15 Then\nDim a\n#End If", "Dim a") is _ACTIVE
+
+
+def test_relational_operators() -> None:
+    # XLIDE v2.5.8: <, >, <=, >= join = and <> (booleans coerce to -1/0).
+    assert _activity_at("#If Win64 >= 1 Then\nDim a\n#End If", "Dim a") is _INACTIVE
+    assert _activity_at("#If Win64 < 0 Then\nDim a\n#End If", "Dim a") is _ACTIVE
+    assert _activity_at("#Const N = 5\n#If N > 4 Then\nDim a\n#End If", "Dim a") is _ACTIVE
+    assert _activity_at("#Const N = 5\n#If N < 4 Then\nDim a\n#End If", "Dim a") is _INACTIVE
+    # A non-numeric operand stays unmodeled -> unknown.
+    assert _activity_at('#Const S = "x"\n#If S > 1 Then\nDim a\n#End If', "Dim a") is _UNKNOWN
 
 
 def test_string_constant_comparison() -> None:

@@ -429,14 +429,26 @@ def _lowercased(
 _NUM_SUFFIX_RE = re.compile(r"[!#@%&^]$")
 
 
-def _js_number(raw: str) -> int | float | None:
-    """Mirror JavaScript Number(): decimal/float/exponent parse, else None.
+_HEX_LITERAL_RE = re.compile(r"^&[hH]([0-9A-Fa-f]+)$")
+_OCTAL_LITERAL_RE = re.compile(r"^&[oO]([0-7]+)$")
 
-    VBA &H/&O literals are not in the JS numeric grammar, so they yield None
-    (Number('&HFF') is NaN). Integer-valued results are returned as int so their
-    string form has no decimal point, matching JS String() in comparisons.
+
+def _js_number(raw: str) -> int | float | None:
+    """Mirror the upstream numeric-literal parse: hex/octal radix parse, then a
+    JavaScript-Number()-like decimal/float/exponent parse, else None.
+
+    VBA hex (&H10) / octal (&O17) literals are parsed with the correct radix
+    after stripping any trailing type-suffix char. Integer-valued results are
+    returned as int so their string form has no decimal point, matching JS
+    String() in comparisons.
     """
     text = _NUM_SUFFIX_RE.sub("", raw).strip()
+    hex_match = _HEX_LITERAL_RE.match(text)
+    if hex_match:
+        return int(hex_match.group(1), 16)
+    octal_match = _OCTAL_LITERAL_RE.match(text)
+    if octal_match:
+        return int(octal_match.group(1), 8)
     try:
         number = float(text)
     except ValueError:
@@ -444,6 +456,21 @@ def _js_number(raw: str) -> int | float | None:
     if not math.isfinite(number):
         return None
     return int(number) if number.is_integer() else number
+
+
+def _relational_number(value: ConditionalValue) -> int | float | None:
+    """Numeric value used for relational comparisons; None for non-numeric strings."""
+    if isinstance(value, bool):
+        # VBA coerces True -> -1, False -> 0 for numeric comparison.
+        return -1 if value else 0
+    if isinstance(value, (int, float)):
+        return value
+    # Mirror JS Number(string): a plain decimal/float parse, no radix prefixes.
+    try:
+        number = float(str(value).strip())
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _normalized_comparison_value(value: ConditionalValue) -> str:
@@ -491,14 +518,31 @@ class _ConditionalExpressionParser:
         left = self._parse_unary()
         op_token = self._peek()
         op = op_token.raw_text if op_token is not None else None
-        if op != "=" and op != "<>":
+        # Relational operators (<, >, <=, >=) join the existing equality (=, <>)
+        # handling so `#If Win64 >= 1 Then` and friends evaluate. Anything else
+        # (Like, etc.) is left to the caller as an unmodeled remainder.
+        if op not in ("=", "<>", "<", ">", "<=", ">="):
             return left
         self._index += 1
         right = self._parse_unary()
         if left is None or right is None:
             return None
-        same = _normalized_comparison_value(left) == _normalized_comparison_value(right)
-        return same if op == "=" else not same
+        if op in ("=", "<>"):
+            same = _normalized_comparison_value(left) == _normalized_comparison_value(right)
+            return same if op == "=" else not same
+        # Relational comparisons operate on the operands' numeric values (VBA
+        # coerces booleans to -1/0); a non-numeric operand stays unmodeled.
+        left_number = _relational_number(left)
+        right_number = _relational_number(right)
+        if left_number is None or right_number is None:
+            return None
+        if op == "<":
+            return left_number < right_number
+        if op == ">":
+            return left_number > right_number
+        if op == "<=":
+            return left_number <= right_number
+        return left_number >= right_number
 
     def _parse_unary(self) -> ConditionalValue | None:
         if self._match_word("not"):

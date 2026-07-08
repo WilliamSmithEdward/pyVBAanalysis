@@ -10,6 +10,7 @@ from pyvbaanalysis.diagnostics import analyze_module
 _CF_CODES = (
     "exit-wrong-proc",
     "if-missing-then",
+    "if-reserved-keyword-in-condition",
     "case-outside-select",
     "member-access-outside-with",
     "exit-outside-block",
@@ -38,6 +39,43 @@ def test_exit_statement_kind() -> None:
 def test_if_missing_then() -> None:
     assert "if-missing-then" in _codes("Sub S\n    If x\nEnd Sub")
     assert "if-missing-then" not in _codes("Sub S\n    If x Then y = 1\nEnd Sub")
+
+
+def test_if_reserved_keyword_in_condition() -> None:
+    # A duplicate If keyword where the condition belongs.
+    assert "if-reserved-keyword-in-condition" in _codes(
+        "Sub T()\n    If If True Then\n    End If\nEnd Sub\n"
+    )
+    # A second Then keyword in the block header.
+    assert "if-reserved-keyword-in-condition" in _codes(
+        "Sub T()\n    If True Then Then\n    End If\nEnd Sub\n"
+    )
+
+
+def test_if_reserved_keyword_silent_on_valid_forms() -> None:
+    # A well-formed block If / ElseIf / Else.
+    assert "if-reserved-keyword-in-condition" not in _codes(
+        "Sub T(ByVal a As Boolean, ByVal b As Boolean)\n"
+        "    If a Then\n    ElseIf b Then\n    Else\n    End If\nEnd Sub\n"
+    )
+    # Legal expression keywords (And/Not/TypeOf/Is).
+    assert "if-reserved-keyword-in-condition" not in _codes(
+        "Sub T(ByVal a As Boolean, ByVal b As Boolean, o As Object)\n"
+        "    If a And Not b Then\n    End If\n"
+        "    If TypeOf o Is Collection Then\n    End If\nEnd Sub\n"
+    )
+    # Identifiers that merely contain if/then.
+    assert "if-reserved-keyword-in-condition" not in _codes(
+        "Sub T(ByVal ifCount As Long, ByVal thenFlag As Boolean)\n"
+        "    If ifCount > 0 And thenFlag Then\n    End If\nEnd Sub\n"
+    )
+    # Single-line If and conditional-compilation directives.
+    assert "if-reserved-keyword-in-condition" not in _codes(
+        "Sub T(ByVal x As Boolean)\n    If x Then Exit Sub\nEnd Sub\n"
+    )
+    assert "if-reserved-keyword-in-condition" not in _codes(
+        "Sub T()\n#If VBA7 Then\n    Dim x As Long\n#End If\nEnd Sub\n"
+    )
 
 
 def test_case_outside_select() -> None:

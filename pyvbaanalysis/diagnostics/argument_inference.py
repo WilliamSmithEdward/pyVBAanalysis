@@ -417,7 +417,14 @@ def _split_top_level_operands(toks: list[VbaToken], operators: tuple[str, ...]) 
             if tok.kind is TokenKind.OPERATOR:
                 return []
             continue
-        if i == start or i == len(toks) - 1:
+        # A +/- at the start of an operand is a unary sign (e.g. `2 * -3`,
+        # `x + -1`); fold it into the following operand rather than treating it
+        # as a separator. Any other operator at the operand start is malformed.
+        if i == start:
+            if raw in ("+", "-"):
+                continue
+            return []
+        if i == len(toks) - 1:
             return []
         parts.append(toks[start:i])
         start = i + 1
@@ -592,6 +599,13 @@ def incompatibility_reason(expected_raw: str, actual: InferredArgumentType) -> s
     return None  # String accepts any stringifiable scalar; do not warn.
 
 
+def _format_numeric(value: float) -> str:
+    """Format a numeric value the way JS String() would: no '.0' on an integer."""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
 def _numeric_literal_overflow_reason(expected: str, actual: InferredArgumentType) -> str | None:
     if actual.numeric_value is None:
         return None
@@ -600,6 +614,14 @@ def _numeric_literal_overflow_reason(expected: str, actual: InferredArgumentType
         return None
     if bounds.min <= actual.numeric_value <= bounds.max:
         return None
+    # A resolved named constant must not be described as a "numeric literal"; name
+    # the constant and show its value instead.
+    if actual.numeric_constant_name is not None:
+        return (
+            f"The value of constant '{actual.numeric_constant_name}' "
+            f"({_format_numeric(actual.numeric_value)}) is outside the {bounds.label} range "
+            f"{bounds.min} to {bounds.max}. This will raise Run-time error '6': Overflow."
+        )
     literal = actual.numeric_text if actual.numeric_text is not None else str(actual.numeric_value)
     return (
         f"The numeric literal {literal} is outside the {bounds.label} range "

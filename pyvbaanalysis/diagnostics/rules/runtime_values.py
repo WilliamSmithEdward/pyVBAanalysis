@@ -146,15 +146,18 @@ def _runtime_argument_value_call_at(
     name = token_name(toks[index])
     if not name:
         return None
+    # Only a bare `Left(...)` or a genuine `VBA.Left(...)` is the intrinsic. The
+    # shared helper also rejects `obj.vba.Left(...)` via the third-token ('.')
+    # check that this ad-hoc logic previously omitted.
+    if not _is_bare_or_vba_qualified_intrinsic_call(toks, index):
+        return None
+    # A bare call can be shadowed by a source symbol; a `VBA.`-qualified one
+    # cannot, so only the bare form participates in the shadow gate below.
     qualifier = (
         token_name(toks[index - 2])
         if index >= 2 and toks[index - 1].raw_text == "."
         else None
     )
-    if index > 0 and toks[index - 1].raw_text == "." and not qualifier:
-        return None
-    if qualifier and qualifier.lower() != "vba":
-        return None
 
     paren_index = index + 1
     suffix = ""

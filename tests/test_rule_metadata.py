@@ -18,20 +18,24 @@ from pyvbaanalysis.diagnostics.model import VbaDiagnostic
 from pyvbaanalysis.evidence import DATA_DIR, load_audit, load_manifest
 from pyvbaanalysis.parser.nodes import Span
 
-# The two structural block-balance codes are emitted by the parser pass, not the
+# The structural block-balance codes are emitted by the parser pass, not the
 # rule catalogue, so they appear in the audit but not in rule_metadata.
-_STRUCTURAL_ONLY_CODES = {"missing-block-closer", "unmatched-block-closer"}
+_STRUCTURAL_ONLY_CODES = {
+    "missing-block-closer",
+    "unmatched-block-closer",
+    "mismatched-end-keyword",
+}
 
 
-def test_catalogue_loads_115_rules() -> None:
+def test_catalogue_loads_117_rules() -> None:
     rules = load_rule_metadata()
-    assert len(rules) == 115
+    assert len(rules) == 117
     assert rules == DIAGNOSTIC_RULES  # the eager catalogue matches a fresh load
 
 
 def test_codes_are_unique() -> None:
     codes = [meta.code for meta in DIAGNOSTIC_RULES.values()]
-    assert len(codes) == len(set(codes)) == 115
+    assert len(codes) == len(set(codes)) == 117
 
 
 def test_fields_are_typed_enums() -> None:
@@ -47,7 +51,7 @@ def test_fields_are_typed_enums() -> None:
 
 def test_rule_metadata_by_code() -> None:
     by_code = rule_metadata_by_code()
-    assert len(by_code) == 115
+    assert len(by_code) == 117
     assert by_code["unterminated-string"].rule_name == "unterminatedString"
     assert by_code["unterminated-string"].default_severity is DiagnosticSeverity.ERROR
 
@@ -61,7 +65,7 @@ def test_codes_align_with_audit() -> None:
 
 def test_manifest_records_rule_metadata() -> None:
     manifest = load_manifest()
-    assert manifest["ruleCount"] == 115
+    assert manifest["ruleCount"] == 117
     assert "rule_metadata.json" in manifest["files"]
     assert sorted(manifest["ruleNames"]) == sorted(DIAGNOSTIC_RULES.keys())
 

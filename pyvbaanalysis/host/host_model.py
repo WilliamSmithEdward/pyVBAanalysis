@@ -81,6 +81,7 @@ class _HostTypeIndex:
 class _HostModelIndex:
     members_by_type: dict[str, _HostTypeIndex]
     type_keys_by_lower: dict[str, str]
+    globals_by_lower: dict[str, str]
 
 
 _MODEL_INDEX_CACHE: dict[int, _HostModelIndex] = {}
@@ -110,7 +111,12 @@ def _host_model_index(model: HostObjectModel) -> _HostModelIndex:
             if lower not in by_lower_name:
                 by_lower_name[lower] = member
         members_by_type[key] = _HostTypeIndex(members, by_lower_name, raw_by_lower_name)
-    index = _HostModelIndex(members_by_type, type_keys_by_lower)
+    globals_by_lower: dict[str, str] = {}
+    for key, global_type in (model.get("globals") or {}).items():
+        key_lower = key.lower()
+        if key_lower not in globals_by_lower:
+            globals_by_lower[key_lower] = global_type
+    index = _HostModelIndex(members_by_type, type_keys_by_lower, globals_by_lower)
     _MODEL_INDEX_CACHE[id(model)] = index
     return index
 
@@ -136,12 +142,12 @@ def get_host_members(qualified: str, model: HostObjectModel | None = None) -> li
 
 
 def resolve_host_global(name: str, model: HostObjectModel | None = None) -> str | None:
-    """A host-injected global identifier (ThisWorkbook, Application, ...) -> qualified type."""
-    lower = name.lower()
-    for key, type_ in _default(model)["globals"].items():
-        if key.lower() == lower:
-            return type_
-    return None
+    """A host-injected global identifier (ThisWorkbook, Application, ...) -> qualified type.
+
+    O(1) via the cached, lowercase-keyed index (first-wins), instead of a linear
+    scan on every identifier-token lookup."""
+    resolved = _default(model)
+    return _host_model_index(resolved).globals_by_lower.get(name.lower())
 
 
 def resolve_host_constant(name: str, model: HostObjectModel | None = None) -> HostConstant | None:

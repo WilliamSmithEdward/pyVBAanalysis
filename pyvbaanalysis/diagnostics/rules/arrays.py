@@ -186,7 +186,10 @@ def _redim_target_from_group(
 
 
 def _redim_statement_targets(source: str, span: Span) -> list[_RedimTarget]:
-    toks = statement_tokens_after_leading_label(source, span)
+    return _redim_targets_from_tokens(span, statement_tokens_after_leading_label(source, span))
+
+
+def _redim_targets_from_tokens(span: Span, toks: Sequence[VbaToken]) -> list[_RedimTarget]:
     if not toks or token_text(toks[0]) != "redim":
         return []
     preserve = len(toks) > 1 and token_text(toks[1]) == "preserve"
@@ -196,6 +199,29 @@ def _redim_statement_targets(source: str, span: Span) -> list[_RedimTarget]:
         target = _redim_target_from_group(span, group, preserve)
         if target is not None:
             out.append(target)
+    return out
+
+
+def _single_line_if_redim_targets(source: str, span: Span) -> list[_RedimTarget]:
+    """ReDim allocations embedded in a single-line ``If cond Then ReDim a(...)``
+    (and its ``Else ReDim b(...)`` arm). The parser keeps single-line If
+    statements as one leaf, so _redim_statement_targets - which requires
+    ``redim`` as the first token - never sees them, and the generic index-access
+    scan would otherwise flag the ReDim's own target as an unallocated access."""
+    toks = statement_tokens_after_leading_label(source, span)
+    if not toks or token_text(toks[0]) != "if":
+        return []
+    out: list[_RedimTarget] = []
+    for i in range(1, len(toks) - 1):
+        word = token_text(toks[i])
+        if word not in ("then", "else") or token_text(toks[i + 1]) != "redim":
+            continue
+        end = len(toks)
+        for j in range(i + 2, len(toks)):
+            if token_text(toks[j]) == "else":
+                end = j
+                break
+        out.extend(_redim_targets_from_tokens(span, list(toks[i + 1 : end])))
     return out
 
 
@@ -795,7 +821,13 @@ def _check_unallocated_statement(
             if lower in arrays:
                 state[lower] = "unallocated"
         return
+    conditional_redims = _single_line_if_redim_targets(source, stmt.span)
     for name, hit_span in _unallocated_index_accesses(source, stmt.span, arrays, state):
+        # The "access" may be the target of a ReDim embedded in a single-line
+        # If...Then - the allocation itself, not a read. Suppress exactly that
+        # target's name-token span; bounds expressions still report.
+        if any(t.span == hit_span for t in conditional_redims):
+            continue
         push(
             "unallocatedDynamicArrayAccess",
             f"Dynamic array '{name}' is not allocated before indexed access. "
@@ -815,6 +847,13 @@ def _check_unallocated_statement(
     toks = statement_tokens_after_leading_label(source, stmt.span)
     for lower in tracked_locals_passed_as_call_arguments(toks, lambda name: name in arrays):
         if state.get(lower) == "unallocated":
+            state[lower] = "unknown"
+    # A conditional (single-line If) ReDim allocates only on one path, so move
+    # the array to 'unknown' - mirroring how block-If allocations degrade - not
+    # 'allocated'. The 'unallocated' guard keeps an already-allocated array precise.
+    for target in conditional_redims:
+        lower = target.name.lower()
+        if lower in arrays and target.dimensions and state.get(lower) == "unallocated":
             state[lower] = "unknown"
 
 
@@ -914,7 +953,10 @@ def _dynamic_array_touches_in_statement(
     source: str, stmt: LeafStatementNode, arrays: set[str]
 ) -> set[str]:
     out: set[str] = set()
-    for target in _redim_statement_targets(source, stmt.span):
+    for target in (
+        *_redim_statement_targets(source, stmt.span),
+        *_single_line_if_redim_targets(source, stmt.span),
+    ):
         if target.name.lower() in arrays:
             out.add(target.name.lower())
     for lower in _erase_statement_simple_targets(source, stmt.span):

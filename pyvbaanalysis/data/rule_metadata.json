@@ -341,10 +341,11 @@
     "title": "Object assignment requires Set",
     "defaultSeverity": "error",
     "category": "semantic",
-    "vbeCompileEquivalent": true,
-    "diagnosticKind": "compile-error",
+    "vbeCompileEquivalent": false,
+    "diagnosticKind": "deterministic-runtime-error",
     "source": "XLIDE",
-    "specReference": "MS-VBAL 5.4.3 / Set statement",
+    "specReference": "VBE runtime error 91: Object variable or With block variable not set (MS-VBAL 5.4.3 / Set statement)",
+    "allowSeverityDowngrade": true,
     "confidence": "high"
   },
   "typeOfIsAlwaysFalse": {
@@ -844,6 +845,17 @@
     "specReference": "MS-VBAL 5.6.9",
     "confidence": "high"
   },
+  "callStatementMultiArgParens": {
+    "code": "call-statement-multi-arg-parens",
+    "title": "Standalone call cannot parenthesize multiple arguments",
+    "defaultSeverity": "error",
+    "category": "syntax",
+    "vbeCompileEquivalent": true,
+    "diagnosticKind": "compile-error",
+    "source": "XLIDE",
+    "specReference": "MS-VBAL 5.4.2.1",
+    "confidence": "high"
+  },
   "invalidExpressionSyntax": {
     "code": "invalid-expression-syntax",
     "title": "Invalid expression syntax",
@@ -1029,6 +1041,17 @@
     "diagnosticKind": "compile-error",
     "source": "XLIDE",
     "specReference": "MS-VBAL 5.4.2.1",
+    "confidence": "high"
+  },
+  "ifReservedKeywordInCondition": {
+    "code": "if-reserved-keyword-in-condition",
+    "title": "Reserved keyword in If condition",
+    "defaultSeverity": "error",
+    "category": "syntax",
+    "vbeCompileEquivalent": true,
+    "diagnosticKind": "compile-error",
+    "source": "XLIDE",
+    "specReference": "MS-VBAL 5.4.2.1 (If block) / 3.3.5.2 (reserved identifiers) / VBE oracle: Syntax error",
     "confidence": "high"
   },
   "caseOutsideSelect": {

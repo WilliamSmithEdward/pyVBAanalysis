@@ -41,7 +41,7 @@ from ...types.type_inference import (
     procedure_symbol_for,
     type_environment_for,
 )
-from ...types.type_names import is_known_object_assignment_type, is_known_scalar_type, normalize_type
+from ...types.type_names import is_known_scalar_type, normalize_type
 from ..argument_inference import (
     SourceDeclaredTypeResolver,
     SourceQualifiedDeclaredTypeResolver,
@@ -167,7 +167,7 @@ def check_assignment_types(
             expected = target_type.as_type if target_type.resolved else env.get(name.lower())
             if not expected:
                 return
-            if is_known_object_assignment_type(expected):
+            if is_known_object_assignment_type_ctx(expected, member_ctx):
                 push(
                     "setRequired",
                     f"Object assignment to '{name}' requires Set because it is declared as {expected}.",
@@ -370,7 +370,10 @@ def _array_assignment_to_scalar_source(
     resolve_target_shape: Callable[[str], SourceDeclaredShape],
     resolve_source_shape: Callable[[str], SourceDeclaredShape],
 ) -> tuple[str, Span] | None:
-    if not _is_known_scalar_assignment_target(name, expected_type, shapes, resolve_target_shape):
+    target_scalar_type = _known_scalar_assignment_target_type(
+        name, expected_type, shapes, resolve_target_shape
+    )
+    if not target_scalar_type:
         return None
     if len(value_tokens) != 1:
         return None
@@ -382,22 +385,28 @@ def _array_assignment_to_scalar_source(
     source_shape = resolved.shape if resolved.resolved else shapes.get(source_name.lower())
     if source_shape is None or not source_shape.is_array:
         return None
+    # VBA special case (MS-VBAL Let-statement rules): a Byte array is directly
+    # assignable to a String scalar - the idiomatic encoding-conversion pattern
+    # (`s = bytes`). Only Byte element types are exempt; every other element
+    # type remains a compile error.
+    if target_scalar_type == "string" and normalize_type(source_shape.as_type) == "byte":
+        return None
     return (source_name, Span(base_offset + tok.start, base_offset + tok.end))
 
 
-def _is_known_scalar_assignment_target(
+def _known_scalar_assignment_target_type(
     name: str,
     expected_type: str,
     shapes: Mapping[str, DeclaredValueShape],
     resolve_shape: Callable[[str], SourceDeclaredShape],
-) -> bool:
+) -> str | None:
     resolved = resolve_shape(name)
     target_shape = resolved.shape if resolved.resolved else shapes.get(name.lower())
     if target_shape is not None and target_shape.is_array:
-        return False
+        return None
     as_type = target_shape.as_type if target_shape is not None else None
     normalized = normalize_type(as_type if as_type is not None else expected_type)
-    return normalized is not None and is_known_scalar_type(normalized)
+    return normalized if normalized is not None and is_known_scalar_type(normalized) else None
 
 
 def check_set_assignments(

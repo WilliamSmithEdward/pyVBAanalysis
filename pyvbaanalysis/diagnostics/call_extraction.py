@@ -17,10 +17,9 @@ from dataclasses import dataclass, field
 from ..call.call_context import bare_call_statement_target
 from ..lexer.token_helpers import match_paren_from
 from ..lexer.token_kinds import TokenKind, VbaToken
-from ..lexer.tokenize import tokenize
 from ..parser.nodes import Span
 from ..symbols.symbol_model import qualified_procedure_key
-from .context import PushFn
+from .context import PushFn, statement_tokens
 from .walker import first_executable_token_index, strip_header_brackets, token_name, token_text
 
 _STRING_LITERAL_QUOTES = (re.compile(r'^"'), re.compile(r'"$'))
@@ -51,6 +50,10 @@ class InferredArgumentType:
     string_value: str | None = None
     numeric_value: float | None = None
     numeric_text: str | None = None
+    # Set when numeric_value comes from a resolved named constant (e.g. xlChart)
+    # rather than a literal, so overflow messages can name the constant instead
+    # of calling its display name a "numeric literal".
+    numeric_constant_name: str | None = None
 
 
 @dataclass(slots=True)
@@ -160,11 +163,10 @@ def string_literal_value(raw: str) -> str:
 
 
 def _significant_slice_tokens(source: str, span: Span) -> list[VbaToken]:
-    return [
-        t
-        for t in tokenize(source[span.start : span.end])
-        if t.kind is not TokenKind.COMMENT and t.kind is not TokenKind.NEWLINE
-    ]
+    # Reuse the per-pass statement-token cache (slice-relative offsets, byte-
+    # identical to a raw tokenize of the slice) so a call statement is not
+    # re-lexed once per call-validation rule.
+    return statement_tokens(source, span)
 
 
 def _explicit_call_inner_args(toks: list[VbaToken], open_search_start: int) -> list[VbaToken] | None:
@@ -360,17 +362,22 @@ def validate_arity(
             seen.add(lower)
         return  # positional count is not validated alongside named arguments
 
-    for i in range(min(len(call.slots), len(params))):
-        param = params[i]
-        if not call.slots[i] and not param.optional and not param.param_array:
-            name = strip_header_brackets(param.name)
-            push(
-                "argumentCount",
-                f"Argument not optional: '{name}' is required by '{display_name}'.",
-                call.slot_spans[i] if call.slot_spans else call.name_span,
-            )
-
     n = len(call.slots)
+    # Per-slot 'Argument not optional' is only reported when the slot count is
+    # in range: when it already violates min/max, the count check below emits the
+    # single arity diagnostic instead, matching the named-arg path's one-error
+    # policy (e.g. `Foo(, 2, 3)` against `Sub Foo(a, b)` yields one diagnostic).
+    if required <= n <= maximum:
+        for i in range(min(len(call.slots), len(params))):
+            param = params[i]
+            if not call.slots[i] and not param.optional and not param.param_array:
+                name = strip_header_brackets(param.name)
+                push(
+                    "argumentCount",
+                    f"Argument not optional: '{name}' is required by '{display_name}'.",
+                    call.slot_spans[i] if call.slot_spans else call.name_span,
+                )
+
     if n < required or n > maximum:
         push(
             "argumentCount",

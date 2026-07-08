@@ -137,15 +137,29 @@ def _run_rules(source: str, opts: AnalyzeModuleOptions) -> list[VbaDiagnostic]:
         buffer: list[VbaDiagnostic] = []
         buffers.append(buffer)
         push = push_into(buffer)
-        if rule.run is not None:
-            rule.run(ctx, push)
-        if rule.procedure_statements is not None:
-            statement_visitors.append(rule.procedure_statements(ctx, push))
-        if rule.procedure_expressions is not None:
-            expression_visitors.append(rule.procedure_expressions(ctx, push))
+        # Isolate each rule: one rule throwing during construction or its eager
+        # run() must not discard every other rule's diagnostics for the module.
+        try:
+            if rule.run is not None:
+                rule.run(ctx, push)
+            if rule.procedure_statements is not None:
+                statement_visitors.append(rule.procedure_statements(ctx, push))
+            if rule.procedure_expressions is not None:
+                expression_visitors.append(rule.procedure_expressions(ctx, push))
+        except Exception:
+            # Degrade only this rule; keep the rest of the pass intact.
+            pass
 
-    walk_procedure_statements(ctx.mod, ctx.activity, statement_visitors)
-    walk_procedure_expressions(ctx.mod, ctx.activity, expression_visitors)
+    # A visitor throwing during a shared walk must not blank the run()-based
+    # diagnostics already collected, nor the other walk.
+    try:
+        walk_procedure_statements(ctx.mod, ctx.activity, statement_visitors)
+    except Exception:
+        pass
+    try:
+        walk_procedure_expressions(ctx.mod, ctx.activity, expression_visitors)
+    except Exception:
+        pass
 
     out: list[VbaDiagnostic] = []
     for buffer in buffers:

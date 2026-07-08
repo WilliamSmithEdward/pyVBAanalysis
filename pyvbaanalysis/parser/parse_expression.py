@@ -133,19 +133,46 @@ def parse_parenless_arguments(
     return _ExpressionParser(tokens, from_, to).parse_parenless_argument_list()
 
 
+# Recursive-descent depth cap so pathological input (thousands of nested parens,
+# a long unary chain) cannot overflow the interpreter stack and break the
+# documented "never throws" contract. Mirrors integer_constant_expression's
+# _MAX_RECURSION_DEPTH.
+_MAX_EXPRESSION_DEPTH = 256
+
+
 class _ExpressionParser:
-    __slots__ = ("_tokens", "_to", "index", "diagnostics")
+    __slots__ = ("_tokens", "_to", "index", "diagnostics", "_depth")
 
     def __init__(self, tokens: Sequence[VbaToken], from_: int, to: int) -> None:
         self._tokens = tokens
         self._to = to
         self.index = from_
         self.diagnostics: list[ParseDiagnostic] = []
+        self._depth = 0
 
     def parse(self) -> ExprNode | None:
         if self._at_end():
             return None
-        return self._parse_binary(0)
+        try:
+            return self._parse_binary(0)
+        except RecursionError:
+            # The depth cap bounds well below the interpreter limit, but the
+            # "never throws" contract must hold regardless of entry stack depth.
+            self._diag(self._peek(), "Expression nesting is too deep.")
+            self.index = self._to
+            return None
+
+    def _enter_expression_depth(self) -> bool:
+        """Increments the recursion-depth counter; returns False (and emits a
+        diagnostic, halting the parse) once _MAX_EXPRESSION_DEPTH is reached, so
+        the recursive descent below cannot overflow the stack on adversarial
+        input."""
+        if self._depth >= _MAX_EXPRESSION_DEPTH:
+            self._diag(self._peek(), "Expression nesting is too deep.")
+            self.index = self._to
+            return False
+        self._depth += 1
+        return True
 
     # --- token cursor -------------------------------------------------------
 
@@ -188,6 +215,14 @@ class _ExpressionParser:
     # --- precedence-climbing binary layer -----------------------------------
 
     def _parse_binary(self, min_prec: int) -> ExprNode | None:
+        if not self._enter_expression_depth():
+            return None
+        try:
+            return self._parse_binary_inner(min_prec)
+        finally:
+            self._depth -= 1
+
+    def _parse_binary_inner(self, min_prec: int) -> ExprNode | None:
         left: ExprNode | None
         # `Not` is a low-precedence prefix: recognise it only where a Not-expression
         # is allowed (at or below its binding power).
@@ -247,6 +282,14 @@ class _ExpressionParser:
     # --- unary / exponent ---------------------------------------------------
 
     def _parse_unary(self) -> ExprNode | None:
+        if not self._enter_expression_depth():
+            return None
+        try:
+            return self._parse_unary_inner()
+        finally:
+            self._depth -= 1
+
+    def _parse_unary_inner(self) -> ExprNode | None:
         token = self._peek()
         if token is None:
             self._diag(None, "Expected an expression.")
@@ -292,6 +335,14 @@ class _ExpressionParser:
         return base
 
     def _parse_signed_primary(self) -> ExprNode | None:
+        if not self._enter_expression_depth():
+            return None
+        try:
+            return self._parse_signed_primary_inner()
+        finally:
+            self._depth -= 1
+
+    def _parse_signed_primary_inner(self) -> ExprNode | None:
         """A postfix primary optionally preceded by sign(s) - the operand of ^."""
         token = self._peek()
         if token is not None and token.kind is TokenKind.OPERATOR and (token.raw_text == "-" or token.raw_text == "+"):

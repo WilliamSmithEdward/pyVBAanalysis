@@ -21,9 +21,10 @@ unknown code, or a misplaced ``-file`` directive) is reported as
 ``analysis-suppression-directive`` and suppresses nothing.
 
 Suppression is lexical and conditional-compilation-agnostic, applied as a
-post-analysis filter. It covers the rule-catalogue codes; the two structural codes
-(missing-block-closer, unmatched-block-closer) are emitted by the parser, not this
-engine, so they are not in its output and cannot be suppressed here. Member and block
+post-analysis filter. It covers the rule-catalogue codes; the structural codes
+(missing-block-closer, unmatched-block-closer, mismatched-end-keyword) are emitted
+by the parser, not this engine, so they are not in its output and cannot be
+suppressed here. Member and block
 scopes are intentionally out of scope. A directive never suppresses the
 analysis-suppression-directive diagnostic itself.
 """

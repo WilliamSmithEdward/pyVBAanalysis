@@ -248,6 +248,40 @@ def test_unclosed_procedure_diagnostic() -> None:
     assert any("missing End Sub" in d.message for d in module.diagnostics)
 
 
+def test_mismatched_end_keyword_is_warning_and_closes() -> None:
+    # VBE accepts End Sub/Function/Property interchangeably as procedure closers
+    # (oracle-verified), so the mismatch closes the procedure with one warning.
+    module = parse_module("Sub S()\n    x = 1\nEnd Function")
+    proc = module.members[0]
+    assert isinstance(proc, ProcedureNode)
+    assert proc.closed
+    assert len(module.diagnostics) == 1
+    diag = module.diagnostics[0]
+    assert diag.severity.value == "warning"
+    assert "closed with 'End Function'" in diag.message
+    assert "use 'End Sub'" in diag.message
+    # Anchored on the opener line.
+    assert diag.span.start == 0
+
+
+def test_mismatched_end_keyword_property_get_end_function() -> None:
+    # The oracle-verified case: Property Get ... End Function compiles.
+    module = parse_module("Property Get P() As Long\n    P = 1\nEnd Function")
+    proc = module.members[0]
+    assert isinstance(proc, ProcedureNode)
+    assert proc.proc_kind is ProcKind.PROPERTY_GET
+    assert proc.closed
+    assert [d.severity.value for d in module.diagnostics] == ["warning"]
+
+
+def test_mismatched_end_keyword_does_not_swallow_nested_blocks() -> None:
+    # A wrong procedure closer while an inner block is open is still the
+    # unmatched-closer error path, not the interchangeable-closer warning.
+    module = parse_module("Sub S()\n    If x Then\nEnd Function\nEnd Sub")
+    messages = [d.message for d in module.diagnostics]
+    assert any("Unexpected 'End Function'" in m for m in messages)
+
+
 def test_raw_statement_fallback() -> None:
     # GoTo / labels are not structured into Assignment/Call - they stay raw.
     proc = _only_proc("Sub S\n    GoTo Done\nDone:\nEnd Sub")

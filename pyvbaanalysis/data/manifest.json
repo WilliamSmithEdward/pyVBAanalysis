@@ -1,22 +1,22 @@
 {
   "sourceRepo": "WilliamSmithEdward/xlide_vscode",
-  "xlideVersion": "2.5.0",
+  "xlideVersion": "2.5.11",
   "files": {
     "vbe_oracle_cases.json": {
-      "sha256": "472baafc5a5a9fd2d82e058814d0cb3a96182f5936cef4581248ac54e650bdb3",
-      "bytes": 217258
+      "sha256": "4acc3ab50cb23b03a65b0564d2ea46fb28f6ec72d108f1432b24aa21ccb0a032",
+      "bytes": 225136
     },
     "diagnostic_influence_audit.json": {
-      "sha256": "d6f3c79be4e49b232aea898549154794402e2163ab458538572db01bdcdb62d4",
-      "bytes": 124800
+      "sha256": "cf7f9dcbea5a3a275dbd9e8084835de9d31535ca15eb8d99ffd755057dc32f97",
+      "bytes": 130738
     },
     "rule_metadata.json": {
-      "sha256": "4b5752cd772f424fd679b5ba929c0f60e9d89b8c6f3406b6435e314abf0b7382",
-      "bytes": 43127
+      "sha256": "992327af0c61b11b7313011876c185e087558ffa9b4dbb29dd14faae29e4d2b9",
+      "bytes": 44054
     }
   },
-  "oracleCaseCount": 397,
-  "diagnosticCodeCount": 117,
+  "oracleCaseCount": 412,
+  "diagnosticCodeCount": 120,
   "diagnosticCodes": [
     "ambiguous-enum-member",
     "analysis-suppression-directive",
@@ -34,6 +34,7 @@
     "byval-udt-parameter",
     "call-requires-parens",
     "call-statement-forbids-parens",
+    "call-statement-multi-arg-parens",
     "case-outside-select",
     "const-assignment",
     "const-value-not-constant",
@@ -65,6 +66,7 @@
     "friend-declaration",
     "identifier-too-long",
     "if-missing-then",
+    "if-reserved-keyword-in-condition",
     "implements-statement-placement",
     "invalid-as-type-name",
     "invalid-assignment-target",
@@ -82,6 +84,7 @@
     "member-access-outside-with",
     "member-not-found",
     "mid-statement-literal-target",
+    "mismatched-end-keyword",
     "missing-block-closer",
     "missing-return-assignment",
     "module-declaration-after-procedure",
@@ -136,7 +139,7 @@
     "vba-test-directive",
     "withevents-declaration"
   ],
-  "ruleCount": 115,
+  "ruleCount": 117,
   "ruleNames": [
     "ambiguousEnumMember",
     "analysisSuppressionDirective",
@@ -154,6 +157,7 @@
     "byvalUdtParameter",
     "callRequiresParens",
     "callStatementForbidsParens",
+    "callStatementMultiArgParens",
     "caseOutsideSelect",
     "constAssignment",
     "constValueNotConstant",
@@ -185,6 +189,7 @@
     "friendDeclaration",
     "identifierTooLong",
     "ifMissingThen",
+    "ifReservedKeywordInCondition",
     "implementsStatementPlacement",
     "invalidAsTypeName",
     "invalidAssignmentTarget",

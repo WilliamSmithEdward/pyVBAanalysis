@@ -88,6 +88,13 @@ def evaluate_integer_constant_expression(raw: str, constants: IntegerConstantLoo
     return _IntegerConstantExpressionParser(raw, constants).parse()
 
 
+# Recursion-depth ceiling for the descent parser. User-authored Const text is
+# untrusted, so a pathologically deep expression (e.g. thousands of nested
+# parens) must not overflow the interpreter stack. Past this depth we bail to
+# None, honoring the file's "return None so callers never guess" contract.
+_MAX_RECURSION_DEPTH = 300
+
+
 class _IntegerConstantExpressionParser:
     def __init__(self, raw: str, constants: IntegerConstantLookup) -> None:
         self._constants = constants
@@ -97,14 +104,31 @@ class _IntegerConstantExpressionParser:
             if t.kind is not TokenKind.COMMENT and t.kind is not TokenKind.NEWLINE
         ]
         self._index = 0
+        self._depth = 0
 
     def parse(self) -> int | None:
         if not self._tokens:
             return None
-        value = self._expression()
+        try:
+            value = self._expression()
+        except RecursionError:
+            # The depth guard bounds well below the interpreter limit, but the
+            # "return None so callers never guess" contract must hold regardless.
+            return None
         return value if value is not None and self._current() is None else None
 
     def _expression(self) -> int | None:
+        # Depth guard: untrusted Const text can nest arbitrarily deep; bail to
+        # None rather than overflowing the stack.
+        self._depth += 1
+        try:
+            if self._depth > _MAX_RECURSION_DEPTH:
+                return None
+            return self._expression_inner()
+        finally:
+            self._depth -= 1
+
+    def _expression_inner(self) -> int | None:
         value = self._term()
         while value is not None:
             if self._accept("+"):
@@ -128,6 +152,17 @@ class _IntegerConstantExpressionParser:
         return value
 
     def _factor(self) -> int | None:
+        # Depth guard: unary +/- chains and nested parens recurse through factor;
+        # bail to None once the ceiling is hit (see _expression()).
+        self._depth += 1
+        try:
+            if self._depth > _MAX_RECURSION_DEPTH:
+                return None
+            return self._factor_inner()
+        finally:
+            self._depth -= 1
+
+    def _factor_inner(self) -> int | None:
         if self._accept("+"):
             return self._factor()
         if self._accept("-"):

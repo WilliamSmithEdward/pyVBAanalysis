@@ -28,8 +28,7 @@ from ...host import (
 )
 from ...lexer.keyword_table import is_reserved_identifier
 from ...lexer.token_helpers import match_paren_from
-from ...lexer.token_kinds import TokenKind, VbaToken
-from ...lexer.tokenize import tokenize
+from ...lexer.token_kinds import VbaToken
 from ...parser.nodes import (
     DeclareNode,
     EnumNode,
@@ -332,11 +331,7 @@ def check_non_callable_call_statement(
 
 
 def _call_target_feeds_member_access(source: str, span: Span, call: CallArguments) -> bool:
-    toks = [
-        t
-        for t in tokenize(source[span.start : span.end])
-        if t.kind is not TokenKind.COMMENT and t.kind is not TokenKind.NEWLINE
-    ]
+    toks = statement_tokens(source, span)
     rel_callee_start = call.name_span.start - span.start
     callee_idx = next((i for i, t in enumerate(toks) if t.start == rel_callee_start), -1)
     after = toks[callee_idx + 1] if 0 <= callee_idx and callee_idx + 1 < len(toks) else None

@@ -110,6 +110,42 @@ def test_procedure_expressions_form_visits_each_expression(monkeypatch: pytest.M
     assert seen.count("IdentifierExpr") >= 3
 
 
+def test_throwing_rule_does_not_blank_the_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One rule throwing during its eager run() must degrade only that rule;
+    # the other rules' diagnostics survive (upstream adversarial-review fix).
+    def bad_run(ctx, push):  # type: ignore[no-untyped-def]
+        raise RuntimeError("rule blew up")
+
+    def good_run(ctx, push):  # type: ignore[no-untyped-def]
+        push(_ERROR_RULE, "survives", Span(0, 1))
+
+    registry = (
+        DiagnosticRuleEntry(name=_ERROR_RULE, run=bad_run),
+        DiagnosticRuleEntry(name=_ERROR_RULE, run=good_run),
+    )
+    monkeypatch.setattr(am_mod, "DIAGNOSTIC_RULE_REGISTRY", registry)
+    assert [d.message for d in analyze_module("Sub S\nEnd Sub")] == ["survives"]
+
+
+def test_throwing_statement_visitor_keeps_run_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    def good_run(ctx, push):  # type: ignore[no-untyped-def]
+        push(_ERROR_RULE, "from run", Span(0, 1))
+
+    def bad_factory(ctx, push):  # type: ignore[no-untyped-def]
+        def visitor(proc):  # type: ignore[no-untyped-def]
+            def on_stmt(stmt):  # type: ignore[no-untyped-def]
+                raise RuntimeError("visitor blew up")
+            return on_stmt
+        return visitor
+
+    registry = (
+        DiagnosticRuleEntry(name=_ERROR_RULE, run=good_run),
+        DiagnosticRuleEntry(name=_ERROR_RULE, procedure_statements=bad_factory),
+    )
+    monkeypatch.setattr(am_mod, "DIAGNOSTIC_RULE_REGISTRY", registry)
+    assert [d.message for d in analyze_module("Sub S\n    x = 1\nEnd Sub")] == ["from run"]
+
+
 def test_buffers_flush_in_registry_order(monkeypatch: pytest.MonkeyPatch) -> None:
     def make_run(message: str):  # type: ignore[no-untyped-def]
         def run(ctx, push):  # type: ignore[no-untyped-def]

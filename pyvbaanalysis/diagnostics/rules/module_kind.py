@@ -265,31 +265,51 @@ def check_implements_statement_placement(source: str, mod: ModuleNode, module_ki
 # -- checkRaiseEventTargets ------------------------------------------------
 
 
-def _raise_event_statement_start_index(toks: Sequence[VbaToken]) -> int:
-    start = 0
+def _statement_segment_starts(toks: Sequence[VbaToken]) -> list[int]:
+    """Indices where each ``:``-separated statement segment begins on a logical line.
+
+    The first segment skips a leading line-number or ``Label:`` prefix; subsequent
+    segments begin right after each top-level statement-separator colon. A colon
+    inside parentheses/brackets is not a separator."""
+    if not toks:
+        return []
+    starts: list[int] = []
+    depth = 0
+    segment_start = 0
+    # Skip a leading line-number or `Label:` on the first segment.
     if len(toks) > 1 and _DECIMAL_RE.match(toks[0].raw_text):
-        start = 1
+        segment_start = 1
     elif (
         len(toks) > 2
         and (toks[0].kind is TokenKind.IDENTIFIER or toks[0].kind is TokenKind.KEYWORD)
         and toks[1].raw_text == ":"
     ):
-        start = 2
-    return start if (start < len(toks) and token_text(toks[start]) == "raiseevent") else -1
+        segment_start = 2
+    starts.append(segment_start)
+    for i in range(segment_start, len(toks)):
+        raw = toks[i].raw_text
+        if raw in ("(", "["):
+            depth += 1
+        elif raw in (")", "]"):
+            depth -= 1
+        elif raw == ":" and depth == 0 and i + 1 < len(toks):
+            starts.append(i + 1)
+    return starts
 
 
-def _raise_event_target_hit(source: str, span: Span) -> tuple[str, Span] | None:
+def _raise_event_target_hits(source: str, span: Span) -> list[tuple[str, Span]]:
     toks = statement_tokens(source, span)
-    start = _raise_event_statement_start_index(toks)
-    if start < 0:
-        return None
-    name_tok = toks[start + 1] if start + 1 < len(toks) else None
-    if name_tok is None:
-        return None
-    name = token_name(name_tok)
-    if not name:
-        return None
-    return (name, Span(span.start + name_tok.start, span.start + name_tok.end))
+    hits: list[tuple[str, Span]] = []
+    # Each `:`-separated statement segment on the line may be its own RaiseEvent.
+    for segment_start in _statement_segment_starts(toks):
+        if segment_start >= len(toks) or token_text(toks[segment_start]) != "raiseevent":
+            continue
+        name_tok = toks[segment_start + 1] if segment_start + 1 < len(toks) else None
+        name = token_name(name_tok) if name_tok is not None else None
+        if not name or name_tok is None:
+            continue
+        hits.append((name, Span(span.start + name_tok.start, span.start + name_tok.end)))
+    return hits
 
 
 def check_raise_event_targets(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
@@ -301,14 +321,16 @@ def check_raise_event_targets(source: str, mod: ModuleNode, activity: Conditiona
     def on_line(line_span: Span) -> None:
         if activity is not None and activity.is_inactive(line_span):
             return
-        hit = _raise_event_target_hit(source, line_span)
-        if hit is None or hit[0].lower() in events:
-            return
-        push(
-            "raiseEventUndeclaredEvent",
-            f"Event '{hit[0]}' is not declared in this module, so it cannot be raised with RaiseEvent.",
-            hit[1],
-        )
+        # A single physical line can carry several `:`-separated statements
+        # (e.g. `RaiseEvent A: RaiseEvent B`), so check every RaiseEvent on it.
+        for name, hit_span in _raise_event_target_hits(source, line_span):
+            if name.lower() in events:
+                continue
+            push(
+                "raiseEventUndeclaredEvent",
+                f"Event '{name}' is not declared in this module, so it cannot be raised with RaiseEvent.",
+                hit_span,
+            )
 
     for member in active_module_members(mod, activity):
         if isinstance(member, ProcedureNode):
