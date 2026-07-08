@@ -145,6 +145,33 @@ def test_invalid_operator_sequence() -> None:
     assert "invalid-expression-syntax" in _codes("Sub S()\n    Dim x As Long\n    x = 1 * / 2\nEnd Sub")
 
 
+def test_case_is_comparison_clause_not_flagged() -> None:
+    # MS-VBAL 5.4.2.10: `Case Is > 5` uses Is as grammar, not the object operator.
+    src = (
+        "Sub S(x As Long)\n"
+        "    Select Case x\n"
+        "        Case Is > 5\n"
+        "            y = 1\n"
+        "        Case 1, 3 To 4, Is >= 9\n"
+        "            y = 2\n"
+        "    End Select\n"
+        "End Sub\n"
+    )
+    assert "invalid-expression-syntax" not in _codes(src)
+
+
+def test_operator_run_inside_select_body_still_flagged() -> None:
+    src = (
+        "Sub S(x As Long)\n"
+        "    Select Case x\n"
+        "        Case 1\n"
+        "            y = 1 * / 2\n"
+        "    End Select\n"
+        "End Sub\n"
+    )
+    assert "invalid-expression-syntax" in _codes(src)
+
+
 def _flags_juxtaposition(body: str) -> bool:
     src = f"Sub T()\n    Dim n As Long\n    Dim arr As Variant\n    {body}\nEnd Sub\n"
     return any("expected end of statement" in d.message.lower() for d in analyze_module(src))

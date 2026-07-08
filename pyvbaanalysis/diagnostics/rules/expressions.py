@@ -67,6 +67,7 @@ from ..context import PushFn, statement_tokens
 from ..walker import (
     ProcedureStatementVisitor,
     absolute_span,
+    first_executable_token_index,
     token_name,
     token_text,
     top_level_operator_index,
@@ -804,6 +805,14 @@ def _juxtaposed_rhs_values(source: str, span: Span) -> tuple[str, Span] | None:
 
 def _invalid_operator_sequence(source: str, span: Span) -> tuple[str, Span] | None:
     toks = statement_tokens(source, span)
+    # A Case statement's Is-comparison clause (MS-VBAL 5.4.2.10, `Case Is > 5`)
+    # uses `Is` as grammar, not as the object-identity operator, so the
+    # word-operator scan would mis-read `Is >` as an impossible operator run.
+    # Case clauses are grammar, not value expressions; skip the whole statement
+    # (the Select/Case rules own its structure).
+    head = first_executable_token_index(toks)
+    if head < len(toks) and token_text(toks[head]) == "case":
+        return None
     for i in range(len(toks)):
         if not _is_non_unary_binary_operator(toks[i]):
             continue

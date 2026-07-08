@@ -81,6 +81,12 @@ And the XLIDE v2.5.8 adversarial-review analyzer fixes:
 * Document/UserForm code names resolve as project globals in definition
   resolution, and host-global lookup is O(1).
 
+Also mirrors the post-v2.5.11 XLIDE fix for a regression the v2.5.8
+word-operator widening introduced: a `Case Is > 5` comparison clause
+(MS-VBAL 5.4.2.10) is grammar, not an operator run, so it is no longer
+reported as `invalid-expression-syntax` (operator runs inside a Case body
+still are).
+
 One deliberate deviation from upstream, backed by the oracle corpus: a
 `&`-suffixed integer literal followed by a value (`s = 3000000000&"x"`) is not
 reported as juxtaposed, because the VBE reads that `&` as concatenation
