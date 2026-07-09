@@ -7,9 +7,9 @@ per milestone.
 
 ## 1.2.0 - 2026-07-08
 
-Brings the port up to date with upstream XLIDE v2.5.11 (the previous release
+Brings the port up to date with upstream XLIDE v2.5.12 (the previous release
 mirrored v2.5.4). The vendored data package is re-pinned from XLIDE v2.5.0 to
-v2.5.11: 412 oracle cases (was 397), 120 audited codes (was 117), and a
+v2.5.12: 412 oracle cases (was 397), 120 audited codes (was 117), and a
 117-rule catalogue (was 115).
 
 ### Added
@@ -81,16 +81,21 @@ And the XLIDE v2.5.8 adversarial-review analyzer fixes:
 * Document/UserForm code names resolve as project globals in definition
   resolution, and host-global lookup is O(1).
 
-Also mirrors the post-v2.5.11 XLIDE fix for a regression the v2.5.8
-word-operator widening introduced: a `Case Is > 5` comparison clause
-(MS-VBAL 5.4.2.10) is grammar, not an operator run, so it is no longer
-reported as `invalid-expression-syntax` (operator runs inside a Case body
-still are).
+Also mirrors the XLIDE v2.5.12 fix for a regression the v2.5.8 word-operator
+widening introduced: a `Case Is > 5` comparison clause (MS-VBAL 5.4.2.10) is
+grammar, not an operator run, so it is no longer reported as
+`invalid-expression-syntax` (operator runs inside a Case body still are).
 
-Also mirrors the post-v2.5.11 XLIDE juxtaposition fix: a `&`-suffixed integer
+Also mirrors the XLIDE v2.5.12 juxtaposition fix: a `&`-suffixed integer
 literal followed by a value (`s = 3000000000&"x"`) is not reported as
 juxtaposed, because the VBE can read that `&` as concatenation (oracle case
 `suffix_long_amp_glued_concat_accepted`).
+
+### Development
+
+A new drift gate (`tests/test_registry_parity.py`) statically proves every
+catalogue rule has a Python emitter, so re-vendoring the data package after a
+future upstream release turns CI red on exactly the rules still to be ported.
 
 ## 1.1.1 - 2026-06-20
 
