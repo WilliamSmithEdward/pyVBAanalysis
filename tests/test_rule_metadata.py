@@ -70,17 +70,17 @@ def test_manifest_records_rule_metadata() -> None:
     assert sorted(manifest["ruleNames"]) == sorted(DIAGNOSTIC_RULES.keys())
 
 
-def test_vendored_json_is_utf8_and_lf() -> None:
-    # All three manifest-checksummed evidence files must be LF-only: the
-    # manifest hashes their working-tree bytes, and git normalizes to LF in the
-    # repository, so a CRLF copy (e.g. vendored from an autocrlf=true checkout)
-    # passes locally but fails checksum verification on a Linux CI checkout.
-    # The files are vendored verbatim, so upstream's UTF-8 prose (em dashes in
-    # audit notes) is accepted as-is; only the encoding must be valid UTF-8.
+def test_vendored_json_is_ascii_and_lf() -> None:
+    # All three manifest-checksummed evidence files must be plain ASCII and
+    # LF-only. LF matters because the manifest hashes the working-tree bytes and
+    # git stores them LF-normalized, so a CRLF copy (vendored from an
+    # autocrlf=true checkout) passes locally but fails checksum verification on
+    # a Linux CI checkout. ASCII is the shared house style, guarded upstream by
+    # xlide's corpusProvenance test since v3.1.4; vendor from the release blob
+    # (git show), not a smudged working tree.
     for name in ("rule_metadata.json", "diagnostic_influence_audit.json", "vbe_oracle_cases.json"):
         raw = (DATA_DIR / name).read_bytes()
-        raw.decode("utf-8")  # valid UTF-8, no BOM surprises
-        assert not raw.startswith(b"\xef\xbb\xbf"), f"{name}: no BOM"
+        assert raw.isascii(), name
         assert b"\r\n" not in raw, f"{name}: LF only (clone-safe checksums)"
         json.loads(raw)  # well-formed
 

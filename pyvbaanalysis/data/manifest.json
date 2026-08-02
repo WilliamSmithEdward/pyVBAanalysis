@@ -1,14 +1,14 @@
 {
   "sourceRepo": "WilliamSmithEdward/xlide_vscode",
-  "xlideVersion": "3.1.3",
+  "xlideVersion": "3.1.4",
   "files": {
     "vbe_oracle_cases.json": {
       "sha256": "5ef858884e93a28c2985c01c8628a7d809272c4d427cb50a6d3758302744847b",
       "bytes": 228962
     },
     "diagnostic_influence_audit.json": {
-      "sha256": "373ee9c1b4542b6e67fe55d5363bb11cd5274566ad7fa7c5b1d008dbef9a734a",
-      "bytes": 132544
+      "sha256": "649fed7768e027369cd4b242aad8b28e4e4ef32d3ac3bff991f8a755c790adaf",
+      "bytes": 132554
     },
     "rule_metadata.json": {
       "sha256": "2770a4961ea81301fd222e926459d74ec56c1d0bddf6a87bcda47380a83e594d",

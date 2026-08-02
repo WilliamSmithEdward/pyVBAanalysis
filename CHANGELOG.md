@@ -32,7 +32,7 @@ or a VBA runtime object, the receiver is strongly typed, or the name is
 unknown everywhere (the VBE oracle records unknown members on late-bound
 receivers as compile-valid).
 
-The vendored data package is re-pinned to XLIDE v3.1.3: 415 oracle cases,
+The vendored data package is re-pinned to XLIDE v3.1.4: 415 oracle cases,
 121 audited codes, a 118-rule catalogue. The evidence files are the only
 analyzer-relevant upstream change since v2.5.12.
 
