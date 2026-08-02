@@ -70,11 +70,19 @@ def test_manifest_records_rule_metadata() -> None:
     assert sorted(manifest["ruleNames"]) == sorted(DIAGNOSTIC_RULES.keys())
 
 
-def test_vendored_json_is_ascii_and_lf() -> None:
-    raw = (DATA_DIR / "rule_metadata.json").read_bytes()
-    assert raw.isascii()
-    assert b"\r\n" not in raw  # LF only (clone-safe checksums)
-    json.loads(raw)  # well-formed
+def test_vendored_json_is_utf8_and_lf() -> None:
+    # All three manifest-checksummed evidence files must be LF-only: the
+    # manifest hashes their working-tree bytes, and git normalizes to LF in the
+    # repository, so a CRLF copy (e.g. vendored from an autocrlf=true checkout)
+    # passes locally but fails checksum verification on a Linux CI checkout.
+    # The files are vendored verbatim, so upstream's UTF-8 prose (em dashes in
+    # audit notes) is accepted as-is; only the encoding must be valid UTF-8.
+    for name in ("rule_metadata.json", "diagnostic_influence_audit.json", "vbe_oracle_cases.json"):
+        raw = (DATA_DIR / name).read_bytes()
+        raw.decode("utf-8")  # valid UTF-8, no BOM surprises
+        assert not raw.startswith(b"\xef\xbb\xbf"), f"{name}: no BOM"
+        assert b"\r\n" not in raw, f"{name}: LF only (clone-safe checksums)"
+        json.loads(raw)  # well-formed
 
 
 def test_default_suppression_scopes() -> None:
