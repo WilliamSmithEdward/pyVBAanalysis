@@ -10,7 +10,7 @@ from pyvbaanalysis.evidence import DATA_DIR, load_audit, load_manifest, load_ora
 def test_oracle_cases_load() -> None:
     cases = load_oracle_cases()
     manifest = load_manifest()
-    assert len(cases) == manifest["oracleCaseCount"] == 412
+    assert len(cases) == manifest["oracleCaseCount"] == 415
     assert all(c.modules for c in cases)
     assert all(m.source for c in cases for m in c.modules)
     assert all(c.expected in ("rejected", "accepted", "observe") for c in cases)
@@ -20,7 +20,7 @@ def test_oracle_cases_load() -> None:
 def test_audit_loads_and_matches_manifest() -> None:
     audit = load_audit()
     manifest = load_manifest()
-    assert len(audit) == manifest["diagnosticCodeCount"] == 120
+    assert len(audit) == manifest["diagnosticCodeCount"] == 121
     assert {a.code for a in audit} == set(manifest["diagnosticCodes"])
     assert all(a.status in ("vbe-oracle-verified", "spec-derived") for a in audit)
 

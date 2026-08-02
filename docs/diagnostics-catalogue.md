@@ -1,6 +1,6 @@
 # Diagnostic catalogue
 
-The diagnostic codes pyVBAanalysis can emit, generated from the rule metadata (`tools/generate_diagnostics_catalogue.py`). This table lists the 117 rule-metadata codes across 6 categories. A further 3 structural block-balance codes (`mismatched-end-keyword`, `missing-block-closer`, `unmatched-block-closer`) are emitted by the parser pass and are not in the metadata table, for a full set of 120 codes.
+The diagnostic codes pyVBAanalysis can emit, generated from the rule metadata (`tools/generate_diagnostics_catalogue.py`). This table lists the 118 rule-metadata codes across 6 categories. A further 3 structural block-balance codes (`mismatched-end-keyword`, `missing-block-closer`, `unmatched-block-closer`) are emitted by the parser pass and are not in the metadata table, for a full set of 121 codes.
 
 Each code is reported only when it is provably correct; anything unknown or ambiguous stays quiet (the no-false-positive discipline). The **kind** column says what a code means: a *compile error* is rejected by the VBE compiler, a *runtime error* is a deterministic Run-time error, a *runtime risk* is a likely fault, and *style* is advisory.
 
@@ -69,7 +69,7 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `undeclared-variable` | Variable not defined | error | compile error | MS-VBAL 5.2.4.1.1 |
 | `unknown-call` | Sub or Function not defined | error | compile error | MS-VBAL 5.4.2.1 |
 
-## Semantic (49)
+## Semantic (50)
 
 | Code | Title | Default | Kind | Spec reference |
 | --- | --- | --- | --- | --- |
@@ -99,6 +99,7 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `for-each-source-type` | For Each source must be collection or array | error | compile error | MS-VBAL 5.4.2.5 / VBE compiler: For Each may only iterate over a collection object or an array |
 | `invalid-assignment-target` | Cannot assign to a literal value | error | compile error | MS-VBAL 5.4.3 (assignment) / VBE compiler |
 | `is-operator-non-object` | 'Is' operator requires object operands | error | compile error | MS-VBAL 5.6 (Is operator) |
+| `late-bound-friend-member` | Friend member reached through a late-bound receiver | error | runtime error | VBE runtime error 438: Object does not support this property or method |
 | `me-outside-object-module` | 'Me' is only valid in an object module | error | compile error | MS-VBAL 5.6.2.2 (Me) / VBE compiler |
 | `member-access-outside-with` | Leading member access outside With block | error | compile error | MS-VBAL 5.4.2.6 |
 | `member-not-found` | Object member not found | error | compile error | VBE compiler: Method or data member not found |

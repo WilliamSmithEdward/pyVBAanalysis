@@ -5,6 +5,37 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 1.3.0 - 2026-08-01
+
+### Added
+
+A new oracle-backed rule, ported from XLIDE (issue #5): `late-bound-friend-member`.
+
+Friend members are not on a class's IDispatch interface, so reaching one
+through a receiver whose static type is Variant or Object raises runtime error
+438 - and the compiler says nothing, because it cannot know the runtime type
+either. The code compiles clean and dies on the first execution that reaches
+the call. Three VBE oracle cases back the rule, including the non-obvious one:
+a class reading its OWN Friend member through an `Object` local fails
+identically.
+
+Two receiver shapes are recognized: a bare identifier declared `As Variant` /
+`As Object` / with no type at all, and a `Collection` element (`coll(i)` or
+`coll.Item(i)`), since `Collection.Item` returns Variant and so loses the
+element type however strongly typed the collection's contents are - the shape
+that hides the bug in practice.
+
+Scoped for no false positives: it fires only when the member name resolves
+exclusively to Friend members of exhaustive project class modules, and stays
+silent when the name is also Public anywhere, exists in the host object model
+or a VBA runtime object, the receiver is strongly typed, or the name is
+unknown everywhere (the VBE oracle records unknown members on late-bound
+receivers as compile-valid).
+
+The vendored data package is re-pinned to XLIDE v3.1.3: 415 oracle cases,
+121 audited codes, a 118-rule catalogue. The evidence files are the only
+analyzer-relevant upstream change since v2.5.12.
+
 ## 1.2.0 - 2026-07-08
 
 Brings the port up to date with upstream XLIDE v2.5.12 (the previous release

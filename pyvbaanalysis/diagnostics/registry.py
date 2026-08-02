@@ -109,6 +109,7 @@ from .rules.type_of_is import (
     check_typeof_is_compatibility,
     check_typeof_missing_operand,
 )
+from .rules.late_binding import check_late_bound_friend_member
 from .rules.undeclared import (
     check_member_not_found,
     check_non_callable_call_statement,
@@ -127,6 +128,17 @@ class DiagnosticRuleEntry:
     run: Callable[[RulePassContext, PushFn], None] | None = None
     procedure_statements: Callable[[RulePassContext, PushFn], ProcedureStatementVisitor] | None = None
     procedure_expressions: Callable[[RulePassContext, PushFn], ProcedureExpressionVisitor] | None = None
+
+
+def _late_bound_friend_member(ctx: RulePassContext, push: PushFn) -> ProcedureStatementVisitor:
+    """Cross-module rule: needs the project's class-member surfaces to know which
+    member names are Friend-only (mirrors registry.ts)."""
+    project_class_members = ctx.opts.project_class_members
+    if project_class_members is None:
+        return lambda member: None
+    return check_late_bound_friend_member(
+        ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, project_class_members, push
+    )
 
 
 def _unknown_call_statement(ctx: RulePassContext, push: PushFn) -> ProcedureStatementVisitor:
@@ -260,4 +272,5 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="suffixedLiteralOverflow", run=lambda ctx, push: check_suffixed_literal_overflow(ctx.source, ctx.activity, push)),
     DiagnosticRuleEntry(name="missingReturnAssignments", run=lambda ctx, push: check_missing_return_assignments(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.activity, push)),
     DiagnosticRuleEntry(name="unknownCallStatement", procedure_statements=_unknown_call_statement),
+    DiagnosticRuleEntry(name="lateBoundFriendMember", procedure_statements=_late_bound_friend_member),
 )

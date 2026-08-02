@@ -1,22 +1,22 @@
 {
   "sourceRepo": "WilliamSmithEdward/xlide_vscode",
-  "xlideVersion": "2.5.12",
+  "xlideVersion": "3.1.3",
   "files": {
     "vbe_oracle_cases.json": {
-      "sha256": "4acc3ab50cb23b03a65b0564d2ea46fb28f6ec72d108f1432b24aa21ccb0a032",
-      "bytes": 225136
+      "sha256": "c3ba7b8f0d7e4ec425716a1a40c4260c0e0bca457c70f480ad7e98ae483bf3cf",
+      "bytes": 233785
     },
     "diagnostic_influence_audit.json": {
-      "sha256": "cf7f9dcbea5a3a275dbd9e8084835de9d31535ca15eb8d99ffd755057dc32f97",
-      "bytes": 130738
+      "sha256": "cb205f8aaa075e3bc909d7eb50a4e8085e70bda70f221f8637a7617993b590d7",
+      "bytes": 134400
     },
     "rule_metadata.json": {
-      "sha256": "992327af0c61b11b7313011876c185e087558ffa9b4dbb29dd14faae29e4d2b9",
-      "bytes": 44054
+      "sha256": "2770a4961ea81301fd222e926459d74ec56c1d0bddf6a87bcda47380a83e594d",
+      "bytes": 44557
     }
   },
-  "oracleCaseCount": 412,
-  "diagnosticCodeCount": 120,
+  "oracleCaseCount": 415,
+  "diagnosticCodeCount": 121,
   "diagnosticCodes": [
     "ambiguous-enum-member",
     "analysis-suppression-directive",
@@ -80,6 +80,7 @@
     "invalid-new-type-name",
     "invalid-proc-header",
     "is-operator-non-object",
+    "late-bound-friend-member",
     "me-outside-object-module",
     "member-access-outside-with",
     "member-not-found",
@@ -139,7 +140,7 @@
     "vba-test-directive",
     "withevents-declaration"
   ],
-  "ruleCount": 117,
+  "ruleCount": 118,
   "ruleNames": [
     "ambiguousEnumMember",
     "analysisSuppressionDirective",
@@ -203,6 +204,7 @@
     "invalidNewTypeName",
     "invalidProcedureHeader",
     "isOperatorNonObject",
+    "lateBoundFriendMember",
     "meOutsideObjectModule",
     "memberAccessOutsideWith",
     "memberNotFound",

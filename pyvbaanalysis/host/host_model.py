@@ -141,6 +141,27 @@ def get_host_members(qualified: str, model: HostObjectModel | None = None) -> li
     return type_index.members if type_index is not None else []
 
 
+_HOST_MEMBER_NAMES_CACHE: dict[int, set[str]] = {}
+
+
+def is_host_member_name(name: str, model: HostObjectModel | None = None) -> bool:
+    """True when ``name`` is a member of ANY type in the host object model.
+
+    Callers reasoning about a late-bound receiver cannot know its runtime type,
+    so they need the weaker question "could this name legally dispatch somewhere
+    in the host model at all?". Answering yes keeps them quiet; the set is
+    deliberately broad for that reason. Case-insensitive."""
+    resolved = _default(model)
+    names = _HOST_MEMBER_NAMES_CACHE.get(id(resolved))
+    if names is None:
+        names = set()
+        for type_index in _host_model_index(resolved).members_by_type.values():
+            names.update(type_index.by_lower_name)
+            names.update(type_index.raw_by_lower_name)
+        _HOST_MEMBER_NAMES_CACHE[id(resolved)] = names
+    return name.lower() in names
+
+
 def resolve_host_global(name: str, model: HostObjectModel | None = None) -> str | None:
     """A host-injected global identifier (ThisWorkbook, Application, ...) -> qualified type.
 
