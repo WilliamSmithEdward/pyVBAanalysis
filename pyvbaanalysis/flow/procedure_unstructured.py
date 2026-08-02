@@ -10,7 +10,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from ..conditional import ConditionalActivityTracker
-from ..lexer.token_helpers import statement_tokens, token_word, tokens_without_leading_line_number
+from ..lexer.token_helpers import (
+    cached_statement_tokens,
+    token_word,
+    tokens_without_leading_line_number,
+)
 from ..parser.nodes import BodyNode, ProcedureNode, Span, is_leaf_statement
 from .procedure_labels import (
     collect_procedure_label_declarations,
@@ -56,7 +60,7 @@ def _has_on_error_or_resume_statement(
 
 
 def _is_on_error_or_resume(source: str, span: Span) -> bool:
-    toks = tokens_without_leading_line_number(statement_tokens(source, span.start, span.end))
+    toks = tokens_without_leading_line_number(cached_statement_tokens(source, span.start, span.end))
     if not toks:
         return False
     first = token_word(toks[0])

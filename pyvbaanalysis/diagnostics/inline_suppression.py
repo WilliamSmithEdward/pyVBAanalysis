@@ -35,7 +35,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..lexer.token_kinds import TokenKind
-from ..lexer.tokenize import tokenize
+from ..lexer.tokenize import tokenize_cached
 from ..parser.nodes import Span
 from .model import VbaDiagnostic, line_col
 from .rule_metadata import diagnostic_metadata_for_code
@@ -82,7 +82,7 @@ def scan_inline_suppressions(source: str) -> InlineSuppressionScan:
     """Parse the ``'@pyvba-ignore`` directives in ``source`` into suppression state."""
     scan = InlineSuppressionScan()
     first_source_line = _first_source_line(source)
-    for token in tokenize(source):
+    for token in tokenize_cached(source):
         if token.kind is not TokenKind.COMMENT:
             continue
         raw = token.raw_text

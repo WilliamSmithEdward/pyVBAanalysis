@@ -5,6 +5,35 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 1.3.1 - 2026-08-02
+
+### Performance
+
+A profiling pass driven by a real-world 26,721-line class module. Identical
+diagnostics before and after (the full suite, the oracle corpus sweeps, and a
+new statement-token equivalence sweep all gate the change); the module's
+analysis time drops from 27.2s to 3.4s (8x), and the whole containing
+workbook through the CLI from 35s to 6s.
+
+* Procedure-invariant derivations are no longer rebuilt per rule x procedure:
+  the source-name shadow scope, the module non-callable index, the visible
+  identifier-name base, the type and declaration-shape environments (module
+  portion cached, cloned per procedure), and the procedure-symbol lookup
+  (indexed by span start) are all memoized by object identity through a small
+  bounded IdentityLru (mirroring upstream's WeakMap caches).
+* One lex per module: every statement's token view is now derived from the
+  module's shared memoized tokenization (binary search + offset rebase, with a
+  fallback to slice-lexing when a span does not align), and the parser, the
+  member-completion context, the inline-suppression scan, the call-shape
+  helpers, and the unstructured-flow scan all ride the same cached stream
+  instead of re-lexing per statement or per pass.
+* Bare identifier references resolve through a per-module name index instead
+  of scanning every module-level declaration per reference; bare type names
+  resolve through a per-(project types, host model) candidate index; member
+  receiver prefixes slice from the previous newline token instead of copying
+  the whole module prefix; and the enclosing-procedure lookup binary-searches
+  an indexed span table.
+
 ## 1.3.0 - 2026-08-01
 
 ### Added

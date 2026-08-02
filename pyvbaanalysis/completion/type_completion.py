@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from ..host.host_model import HostObjectModel, get_excel_object_model
+from ..identity_cache import IdentityLru
 from ..symbols.symbol_model import VbaProjectTypeName
 
 # Where a candidate type name comes from. The project subset reuses the
@@ -221,8 +222,27 @@ def resolve_type_name(
             (c for c in candidates if c.name.lower() == member_lower),
             None,
         )
-    lower = name.lower()
-    return next(
-        (c for c in type_completion_candidates(project_types, model) if c.name.lower() == lower),
-        None,
-    )
+    return _bare_type_candidate_index(project_types, model).get(name.lower())
+
+
+# Bare type names are resolved once per As-clause / New-expression check, and
+# the candidate list is already de-duplicated first-wins by lowercased name, so
+# it collapses losslessly into a dict - built once per (project types, model)
+# identity instead of rebuilt and scanned linearly per lookup.
+_BARE_TYPE_INDEX_CACHE = IdentityLru()
+_NO_PROJECT_TYPES: tuple[VbaProjectTypeName, ...] = ()
+
+
+def _bare_type_candidate_index(
+    project_types: Sequence[VbaProjectTypeName] | None,
+    model: HostObjectModel | None,
+) -> dict[str, TypeCompletion]:
+    types_key = project_types if project_types is not None else _NO_PROJECT_TYPES
+    resolved_model = model if model is not None else get_excel_object_model()
+    cached = _BARE_TYPE_INDEX_CACHE.get(types_key, resolved_model)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    # The candidate list is already unique per lowercased name (first-wins dedup
+    # inside type_completion_candidates), so insertion order cannot matter here.
+    index = {c.name.lower(): c for c in type_completion_candidates(project_types, model)}
+    return _BARE_TYPE_INDEX_CACHE.put(index, types_key, resolved_model)  # type: ignore[no-any-return]

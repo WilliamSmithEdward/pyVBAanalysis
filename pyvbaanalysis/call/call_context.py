@@ -14,14 +14,14 @@ from dataclasses import dataclass
 
 from ..lexer.keyword_table import STATEMENT_KEYWORDS as _STATEMENT_KEYWORD_LIST
 from ..lexer.token_helpers import (
+    cached_raw_statement_tokens,
+    cached_statement_tokens,
     match_paren_from,
-    statement_tokens,
     token_name,
     token_word,
     tokens_without_leading_line_number,
 )
 from ..lexer.token_kinds import TokenKind, VbaToken
-from ..lexer.tokenize import tokenize
 from ..parser.nodes import Span
 
 # Statement-like words that are not in MS-VBAL's statement-keyword list but still
@@ -77,7 +77,10 @@ class MultiArgParenthesizedCallStatementTarget:
 
 
 def _statement_tokens_after_leading_line_number(source: str, span: Span) -> list[VbaToken]:
-    return tokens_without_leading_line_number(statement_tokens(source, span.start, span.end))
+    # The cached lookup shares the per-pass statement-token store with the
+    # diagnostics rules, so one statement is lexed (or derived from the shared
+    # module stream) at most once however many call-shape helpers inspect it.
+    return tokens_without_leading_line_number(cached_statement_tokens(source, span.start, span.end))
 
 
 def _leading_line_number_token_count(tokens: list[VbaToken]) -> int:
@@ -177,7 +180,11 @@ def explicit_call_statement_argument_without_parens(source: str, span: Span) -> 
 def _explicit_call_statement_argument_list_without_parens(
     source: str, span: Span
 ) -> ExplicitCallStatementArgumentList | None:
-    raw_toks = [t for t in tokenize(source[span.start : span.end]) if t.kind is not TokenKind.NEWLINE]
+    raw_toks = [
+        t
+        for t in cached_raw_statement_tokens(source, span.start, span.end)
+        if t.kind is not TokenKind.NEWLINE
+    ]
     toks = [t for t in raw_toks if t.kind is not TokenKind.COMMENT]
     start = _leading_line_number_token_count(toks)
     if len(toks) == start or token_word(toks[start]) != "call":

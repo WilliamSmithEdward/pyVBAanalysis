@@ -16,6 +16,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from ..constants.integer_constant_expression import IntegerConstantLookup
+from ..identity_cache import IdentityLru
 from ..lexer.token_helpers import match_paren_from
 from ..lexer.token_kinds import VbaToken
 from ..parser.nodes import ProcedureNode, Span
@@ -149,7 +150,20 @@ def is_non_callable_symbol(sym: VbaSymbol) -> bool:
     )
 
 
+# The module-level portion of the scopes below is procedure-independent, and
+# every statement/expression rule asks for the scope of the same procedures, so
+# both layers are memoized by identity: rebuilding them per rule x procedure
+# was the dominant cost of a full pass on large modules (the scans below are
+# O(module declarations) each).
+_MODULE_NON_CALLABLE_CACHE = IdentityLru()
+_SOURCE_NAME_SCOPE_CACHE = IdentityLru(capacity=64)
+_NO_PROJECT_SYMBOLS: tuple[VbaSymbol, ...] = ()
+
+
 def module_non_callable_symbols(symbols: ModuleSymbols) -> dict[str, VbaSymbol]:
+    cached = _MODULE_NON_CALLABLE_CACHE.get(symbols)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
     out: dict[str, VbaSymbol] = {}
     callable_names = {
         sym.name.lower()
@@ -163,7 +177,7 @@ def module_non_callable_symbols(symbols: ModuleSymbols) -> dict[str, VbaSymbol]:
             for child in sym.children or []:
                 if child.name.lower() not in callable_names:
                     out[child.name.lower()] = child
-    return out
+    return _MODULE_NON_CALLABLE_CACHE.put(out, symbols)  # type: ignore[no-any-return]
 
 
 def source_name_scope_for(
@@ -171,17 +185,20 @@ def source_name_scope_for(
     proc: ProcedureNode,
     project_visible_symbols: Sequence[VbaSymbol] | None = None,
 ) -> SourceNameScope:
+    project = project_visible_symbols if project_visible_symbols is not None else _NO_PROJECT_SYMBOLS
+    cached = _SOURCE_NAME_SCOPE_CACHE.get(symbols, proc, project)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
     callable_shadows = set(module_non_callable_symbols(symbols))
     proc_sym = procedure_symbol_for(symbols, proc)
-    runtime_shadows = source_identifier_names(
-        symbols, proc_sym, project_visible_symbols if project_visible_symbols is not None else ()
-    )
+    runtime_shadows = source_identifier_names(symbols, proc_sym, project)
     for child in (proc_sym.children if proc_sym is not None else None) or []:
         if is_non_callable_symbol(child):
             callable_shadows.add(child.name.lower())
-    return SourceNameScope(
+    scope = SourceNameScope(
         callable_shadows=frozenset(callable_shadows), runtime_shadows=frozenset(runtime_shadows)
     )
+    return _SOURCE_NAME_SCOPE_CACHE.put(scope, symbols, proc, project)  # type: ignore[no-any-return]
 
 
 def runtime_callable_source_shadowed(name: str, source_names: SourceNameScope | None) -> bool:

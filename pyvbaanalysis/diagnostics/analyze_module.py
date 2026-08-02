@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from ..completion import MemberCompletionContext
 from ..conditional import create_conditional_activity_tracker
 from ..lexer.token_kinds import TokenKind
-from ..lexer.tokenize import tokenize
+from ..lexer.tokenize import tokenize_cached
 from ..parser.nodes import ModuleNode, Span
 from ..parser.parse_module import parse_module
 from ..symbols.build_module_symbols import BuildModuleSymbolsOptions, build_module_symbols
@@ -208,7 +208,7 @@ def diagnostic_member_completion_context(
         allow_set_assignment_refinement=False,
         model=opts.host_model,
         parsed_module=mod,
-        source_tokens=[t for t in tokenize(source) if t.kind is not TokenKind.COMMENT],
+        source_tokens=[t for t in tokenize_cached(source) if t.kind is not TokenKind.COMMENT],
     )
     me_project_type = _me_project_type_for(opts.module_name, opts.module_kind)
     if me_project_type:

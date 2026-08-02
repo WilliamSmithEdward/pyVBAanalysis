@@ -27,7 +27,7 @@ from ..lexer.token_helpers import (
     tokens_without_leading_line_number,
 )
 from ..lexer.token_kinds import TokenKind, VbaToken
-from ..lexer.tokenize import tokenize
+from ..lexer.tokenize import tokenize_cached
 from .fixed_length_string import parse_fixed_length_string_type
 from .nodes import (
     AssignmentNode,
@@ -162,7 +162,9 @@ def parse_module(source: str) -> ModuleNode:
             if i > 0:
                 _parse_cache.insert(0, _parse_cache.pop(i))
             return _parse_cache[0][1]
-    module = _Parser(source, tokenize(source)).parse()
+    # The shared memoized lex: the diagnostics pass derives every statement's
+    # token view from this same stream, so the module is lexed once end to end.
+    module = _Parser(source, tokenize_cached(source)).parse()
     _parse_cache.insert(0, (source, module))
     if len(_parse_cache) > _PARSE_CACHE_MAX:
         _parse_cache.pop()

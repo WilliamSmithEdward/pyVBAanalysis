@@ -16,7 +16,7 @@ from typing import Any, Protocol
 
 from ..completion import MemberCompletionContext
 from ..conditional import ConditionalActivityTracker, ConditionalCompilationEnvironment
-from ..lexer.token_helpers import statement_tokens as _compute_statement_tokens
+from ..lexer.token_helpers import cached_statement_tokens
 from ..lexer.token_kinds import VbaToken
 from ..parser.nodes import ModuleNode, Span
 from ..symbols.symbol_model import (
@@ -110,31 +110,9 @@ def is_object_module_kind(module_kind: ModuleSymbolKind | None) -> bool:
     )
 
 
-# Statement-token cache (audit #5): independent rules re-tokenize the same
-# statement many times per pass. Tokens are cached per source string (LRU of 2)
-# and per statement span, so one pass lexes each statement once. Callers must not
-# mutate the returned lists.
-_STATEMENT_TOKEN_CACHE_MAX = 2
-_statement_token_cache: list[tuple[str, dict[tuple[int, int], list[VbaToken]]]] = []
-
-
+# The statement-token cache lives in the lexer layer (cached_statement_tokens)
+# so the call-context helpers can share it without an import cycle; this seam
+# keeps the (source, Span) signature the diagnostics rules use.
 def statement_tokens(source: str, span: Span) -> list[VbaToken]:
     """Significant tokens of a statement span (no comments/newlines), memoized per pass."""
-    entry: dict[tuple[int, int], list[VbaToken]] | None = None
-    for i, (cached_source, by_span) in enumerate(_statement_token_cache):
-        if cached_source == source:
-            entry = by_span
-            if i > 0:
-                _statement_token_cache.insert(0, _statement_token_cache.pop(i))
-            break
-    if entry is None:
-        entry = {}
-        _statement_token_cache.insert(0, (source, entry))
-        if len(_statement_token_cache) > _STATEMENT_TOKEN_CACHE_MAX:
-            _statement_token_cache.pop()
-    key = (span.start, span.end)
-    toks = entry.get(key)
-    if toks is None:
-        toks = _compute_statement_tokens(source, span.start, span.end)
-        entry[key] = toks
-    return toks
+    return cached_statement_tokens(source, span.start, span.end)

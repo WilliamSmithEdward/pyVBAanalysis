@@ -33,6 +33,7 @@ from ..host import (
     resolve_host_global,
 )
 from ..host.host_model import HostMember
+from ..identity_cache import IdentityLru
 from ..lexer.token_helpers import IDENT_RE, is_ident_like
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..lexer.tokenize import tokenize
@@ -243,7 +244,18 @@ def _prefix_significant_tokens(
             else:
                 hi = mid - 1
         if found >= 0 and shared[found].end == offset:
-            return list(shared[: found + 1])
+            # Receiver chains never cross a logical statement boundary and every
+            # consumer walks backward stopping at one, so the prefix starts at
+            # the previous newline token instead of copying the whole module
+            # prefix per lookup (O(offset) copies dominated big-module passes).
+            # Line continuations are trivia, not newline tokens, so a continued
+            # statement stays intact.
+            first = found
+            while first > 0 and shared[first - 1].kind is not TokenKind.NEWLINE:
+                first -= 1
+            if first > 0:
+                first -= 1  # keep the newline itself as the explicit boundary
+            return list(shared[first : found + 1])
     return completion_significant_tokens(source, offset)
 
 
@@ -1104,14 +1116,43 @@ def _match_group(group: VariableGroupNode, lower: str) -> _DeclaredBinding | Non
 # -- AST helpers -----------------------------------------------------------
 
 
+# Procedure spans are disjoint and ordered, so per-module the lookup is a
+# binary search over (start, end, node) rows instead of an O(members) scan per
+# dotted reference (which multiplied out on big modules).
+_ENCLOSING_PROCEDURE_INDEX_CACHE = IdentityLru()
+
+
+def _procedure_span_index(module: ModuleNode) -> list[tuple[int, int, ProcedureNode]]:
+    cached = _ENCLOSING_PROCEDURE_INDEX_CACHE.get(module)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    rows = [
+        (mem.span.start, mem.span.end, mem)
+        for mem in module.members
+        if isinstance(mem, ProcedureNode)
+    ]
+    return _ENCLOSING_PROCEDURE_INDEX_CACHE.put(rows, module)  # type: ignore[no-any-return]
+
+
 def _enclosing_procedure(module: ModuleNode, offset: int) -> ProcedureNode | None:
-    for mem in module.members:
-        if (
-            isinstance(mem, ProcedureNode)
-            and offset >= mem.span.start
-            and offset <= mem.span.end
-        ):
-            return mem
+    # Ends are increasing (source order), so the earliest row with end >= offset
+    # is exactly the first member the linear scan would have matched; any earlier
+    # row has end < offset and could never contain it.
+    rows = _procedure_span_index(module)
+    lo = 0
+    hi = len(rows) - 1
+    first = len(rows)
+    while lo <= hi:
+        mid = (lo + hi) >> 1
+        if rows[mid][1] >= offset:
+            first = mid
+            hi = mid - 1
+        else:
+            lo = mid + 1
+    if first < len(rows):
+        start, end, node = rows[first]
+        if start <= offset <= end:
+            return node
     return None
 
 

@@ -12,6 +12,7 @@ import enum
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from ..identity_cache import IdentityLru
 from .symbol_model import ModuleSymbols, VbaSymbol, VbaSymbolKind
 
 
@@ -113,18 +114,57 @@ def local_identifier_matches(
     return out
 
 
+# Every identifier reference resolves against the module-level declarations, so
+# scanning (and re-lowercasing) all of them per reference is O(references x
+# declarations) on large modules. The index preserves declaration order; the
+# cheap per-context filter runs on the (tiny) per-name candidate list.
+_MODULE_IDENTIFIER_INDEX_CACHE = IdentityLru()
+
+
+def _module_identifier_index(mod: ModuleSymbols) -> dict[str, list[VbaSymbol]]:
+    cached = _MODULE_IDENTIFIER_INDEX_CACHE.get(mod)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    index: dict[str, list[VbaSymbol]] = {}
+    for symbol in mod.root.children or []:
+        index.setdefault(symbol.name.lower(), []).append(symbol)
+        if symbol.kind is VbaSymbolKind.ENUM:
+            for member in symbol.children or []:
+                index.setdefault(member.name.lower(), []).append(member)
+    return _MODULE_IDENTIFIER_INDEX_CACHE.put(index, mod)  # type: ignore[no-any-return]
+
+
 def module_level_identifier_matches(
     mod: ModuleSymbols, lower_name: str, context: BareIdentifierContext
 ) -> list[VbaSymbol]:
-    out: list[VbaSymbol] = []
-    for symbol in mod.root.children or []:
-        if symbol.name.lower() == lower_name and _symbol_allowed_in_context(symbol, context):
-            out.append(symbol)
+    candidates = _module_identifier_index(mod).get(lower_name)
+    if not candidates:
+        return []
+    return [symbol for symbol in candidates if _symbol_allowed_in_context(symbol, context)]
+
+
+# The module + project portion of the visible-name set is procedure-independent
+# and O(declarations + project symbols) to build, so it is memoized by identity
+# and cloned per procedure (set copies are cheap; the per-procedure additions
+# are just the locals and the return variable).
+_SOURCE_IDENTIFIER_BASE_CACHE = IdentityLru()
+
+
+def _source_identifier_base(
+    current_module: ModuleSymbols, project_visible_symbols: Sequence[VbaSymbol]
+) -> set[str]:
+    cached = _SOURCE_IDENTIFIER_BASE_CACHE.get(current_module, project_visible_symbols)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    base: set[str] = set()
+    for symbol in current_module.root.children or []:
+        base.add(symbol.name.lower())
         if symbol.kind is VbaSymbolKind.ENUM:
             for member in symbol.children or []:
-                if member.name.lower() == lower_name and _symbol_allowed_in_context(member, context):
-                    out.append(member)
-    return out
+                base.add(member.name.lower())
+    for symbol in project_visible_symbols:
+        base.add(symbol.name.lower())
+    return _SOURCE_IDENTIFIER_BASE_CACHE.put(base, current_module, project_visible_symbols)  # type: ignore[no-any-return]
 
 
 def source_identifier_names(
@@ -133,20 +173,13 @@ def source_identifier_names(
     project_visible_symbols: Sequence[VbaSymbol] = (),
 ) -> set[str]:
     """Collect the lowercased names of every source-backed identifier visible from a context: locals, module members (and enum members), and project-visible symbols."""
-    out: set[str] = set()
+    out = set(_source_identifier_base(current_module, project_visible_symbols))
     return_variable = _procedure_return_variable(enclosing_procedure, BareIdentifierContext.EXPRESSION)
     if return_variable is not None:
         out.add(return_variable.name.lower())
     for symbol in (enclosing_procedure.children if enclosing_procedure is not None else None) or []:
         if _is_local_identifier_symbol(symbol):
             out.add(symbol.name.lower())
-    for symbol in current_module.root.children or []:
-        out.add(symbol.name.lower())
-        if symbol.kind is VbaSymbolKind.ENUM:
-            for member in symbol.children or []:
-                out.add(member.name.lower())
-    for symbol in project_visible_symbols:
-        out.add(symbol.name.lower())
     return out
 
 

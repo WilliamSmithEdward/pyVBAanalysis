@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from ..identity_cache import IdentityLru
 from ..parser.nodes import ProcedureNode, ProcKind
 from ..symbols.name_resolution import (
     BareIdentifierContext,
@@ -62,6 +63,28 @@ _VALUE_DECLARATION_KINDS = frozenset(
 )
 
 
+# Environments are requested once per rule per procedure, so both the finished
+# per-procedure environments and their procedure-independent module-level bases
+# are memoized by identity: rebuilding them per request was O(rules x
+# procedures x declarations) on large modules. Consumers treat the returned
+# dicts as read-only.
+_SHAPE_ENV_CACHE = IdentityLru(capacity=64)
+_SHAPE_ENV_MODULE_BASE_CACHE = IdentityLru()
+_TYPE_ENV_CACHE = IdentityLru(capacity=64)
+_TYPE_ENV_MODULE_BASE_CACHE = IdentityLru()
+
+
+def _shape_env_module_base(symbols: ModuleSymbols) -> dict[str, DeclaredValueShape]:
+    cached = _SHAPE_ENV_MODULE_BASE_CACHE.get(symbols)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    base: dict[str, DeclaredValueShape] = {}
+    for sym in symbols.root.children or []:
+        if sym.kind in _VALUE_DECLARATION_KINDS:
+            base[sym.name.lower()] = _shape_of(sym)
+    return _SHAPE_ENV_MODULE_BASE_CACHE.put(base, symbols)  # type: ignore[no-any-return]
+
+
 def declaration_shape_environment_for(
     symbols: ModuleSymbols, proc: ProcedureNode
 ) -> dict[str, DeclaredValueShape]:
@@ -70,15 +93,15 @@ def declaration_shape_environment_for(
     The function-return-variable shape (an Erase/assignment target named after the
     procedure) is omitted; that is a precision-only gap, never a false positive.
     """
-    out: dict[str, DeclaredValueShape] = {}
-    for sym in symbols.root.children or []:
-        if sym.kind in _VALUE_DECLARATION_KINDS:
-            out[sym.name.lower()] = _shape_of(sym)
+    cached = _SHAPE_ENV_CACHE.get(symbols, proc)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    out = dict(_shape_env_module_base(symbols))
     proc_sym = procedure_symbol_for(symbols, proc)
     for child in (proc_sym.children if proc_sym is not None else None) or []:
         if child.kind in _VALUE_DECLARATION_KINDS:
             out[child.name.lower()] = _shape_of(child)
-    return out
+    return _SHAPE_ENV_CACHE.put(out, symbols, proc)  # type: ignore[no-any-return]
 
 
 def _shape_of(sym: VbaSymbol) -> DeclaredValueShape:
@@ -104,6 +127,17 @@ def _return_assignment_type_for(proc: ProcedureNode) -> str | None:
     return None
 
 
+def _type_env_module_base(symbols: ModuleSymbols) -> dict[str, str]:
+    cached = _TYPE_ENV_MODULE_BASE_CACHE.get(symbols)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    base: dict[str, str] = {}
+    for sym in symbols.root.children or []:
+        if sym.as_type and sym.kind not in _PROCEDURE_KINDS:
+            base[sym.name.lower()] = sym.as_type
+    return _TYPE_ENV_MODULE_BASE_CACHE.put(base, symbols)  # type: ignore[no-any-return]
+
+
 def type_environment_for(symbols: ModuleSymbols, proc: ProcedureNode) -> dict[str, str]:
     """Per-procedure {lowercased name -> raw declared as-type} type environment.
 
@@ -111,10 +145,10 @@ def type_environment_for(symbols: ModuleSymbols, proc: ProcedureNode) -> dict[st
     return binding, then params/locals last (so a local shadowing a module name
     wins). Values are the raw as-type string (callers normalize at comparison).
     """
-    out: dict[str, str] = {}
-    for sym in symbols.root.children or []:
-        if sym.as_type and sym.kind not in _PROCEDURE_KINDS:
-            out[sym.name.lower()] = sym.as_type
+    cached = _TYPE_ENV_CACHE.get(symbols, proc)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    out = dict(_type_env_module_base(symbols))
     proc_sym = procedure_symbol_for(symbols, proc)
     return_type = _return_assignment_type_for(proc)
     if return_type:
@@ -122,15 +156,28 @@ def type_environment_for(symbols: ModuleSymbols, proc: ProcedureNode) -> dict[st
     for child in (proc_sym.children if proc_sym is not None else None) or []:
         if child.as_type:
             out[child.name.lower()] = child.as_type
-    return out
+    return _TYPE_ENV_CACHE.put(out, symbols, proc)  # type: ignore[no-any-return]
+
+
+# Procedure symbols are looked up per procedure per rule; the by-start-offset
+# index turns each lookup from an O(module members) scan into a dict hit.
+_PROCEDURE_SYMBOL_INDEX_CACHE = IdentityLru()
+
+
+def _procedure_symbol_index(symbols: ModuleSymbols) -> dict[int, VbaSymbol]:
+    cached = _PROCEDURE_SYMBOL_INDEX_CACHE.get(symbols)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    index: dict[int, VbaSymbol] = {}
+    for sym in symbols.root.children or []:
+        if sym.kind in _PROCEDURE_KINDS and sym.full_span.start not in index:
+            index[sym.full_span.start] = sym
+    return _PROCEDURE_SYMBOL_INDEX_CACHE.put(index, symbols)  # type: ignore[no-any-return]
 
 
 def procedure_symbol_for(symbols: ModuleSymbols, proc: ProcedureNode) -> VbaSymbol | None:
     """The module symbol for a procedure node, matched by declaration start offset."""
-    for sym in symbols.root.children or []:
-        if sym.kind in _PROCEDURE_KINDS and sym.full_span.start == proc.span.start:
-            return sym
-    return None
+    return _procedure_symbol_index(symbols).get(proc.span.start)
 
 
 def declared_shape_for_source_binding(
