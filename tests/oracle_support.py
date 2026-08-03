@@ -85,7 +85,7 @@ def accepted_case_constrains(code: str, case: OracleCase) -> bool:
 
     Compile-error diagnostics are constrained by every accepted (compile-valid)
     case. Runtime-error diagnostics are only constrained by runtime-verified
-    accepted cases — a runtime diagnostic on compile-only-verified code flags a
+    accepted cases - a runtime diagnostic on compile-only-verified code flags a
     real runtime fault and is not a false positive.
     """
     if _is_runtime_diagnostic(code):

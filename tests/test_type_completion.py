@@ -2,7 +2,7 @@
 
 Covers the five classification outcomes the diagnostics rules depend on:
 primitive, host, project (single match), ambiguous (project-type collision), and
-unknown (None — the no-false-positive gate).
+unknown (None - the no-false-positive gate).
 """
 
 from __future__ import annotations

@@ -117,7 +117,7 @@ def test_cross_module_exported_enum_members_fire() -> None:
 
 def test_same_module_member_shadows_other_module_export() -> None:
     # A same-module enum member binds at MODULE tier and shadows another module's
-    # export of the same name (scope != AMBIGUOUS) — no false positive.
+    # export of the same name (scope != AMBIGUOUS) - no false positive.
     mod_a = "Public Enum EA\n    DupVal = 1\nEnd Enum\n"
     mod_b = (
         "Public Enum EB\n    DupVal = 2\nEnd Enum\n\n"

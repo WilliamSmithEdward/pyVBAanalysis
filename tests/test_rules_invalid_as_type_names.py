@@ -138,7 +138,7 @@ def test_project_class_type_is_silent() -> None:
 
 def test_qualified_reference_unresolved_is_silent() -> None:
     # `Foo.Bar` resolves to nothing (no project module Foo) and the member `Bar` is
-    # not reserved / runtime / a known non-type, so it stays silent — matching XLIDE.
+    # not reserved / runtime / a known non-type, so it stays silent - matching XLIDE.
     assert _CODE not in _codes("Public Sub S()\n    Dim x As Foo.Bar\nEnd Sub", _STD)
 
 

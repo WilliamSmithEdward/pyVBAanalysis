@@ -5,6 +5,23 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 1.3.2 - 2026-08-03
+
+### Internal
+
+House style (agent.md UM-07) is plain ASCII, but em dashes had crept into four
+test docstrings and into the prose of the AI-smells field guide - a document
+whose own first rule is "Default to ASCII". Both are now consistent with the
+rule they document.
+
+The field guide keeps every character it is actually about: the rule that names
+em dashes, en dashes, the ellipsis character and decorative emoji; the labeled
+"Smells:" examples; the quoted bad patterns; and the quick-reference rows
+listing them. Accented characters in cited researchers' names are also
+preserved, since stripping them would misspell real people.
+
+No analyzer behavior changes; the wheel is unaffected.
+
 ## 1.3.1 - 2026-08-02
 
 ### Performance
