@@ -30,7 +30,7 @@ from ...completion.member_access import MemberCompletionContext
 from ...conditional import ConditionalActivityTracker
 from ...host import resolve_host_alias
 from ...lexer.token_kinds import TokenKind
-from ...lexer.tokenize import tokenize
+from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import (
     BinaryExpr,
     ExprNode,
@@ -58,7 +58,7 @@ def check_typeof_missing_operand(
     """`TypeOf` requires an object expression before `Is`; `TypeOf Is Y` is a syntax error."""
     toks = [
         tok
-        for tok in tokenize(source)
+        for tok in tokenize_cached(source)
         if tok.kind is not TokenKind.COMMENT and tok.kind is not TokenKind.NEWLINE
     ]
     for i in range(len(toks) - 1):

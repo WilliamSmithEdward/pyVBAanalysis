@@ -6,9 +6,14 @@ v20250520, section 3.2.2 (WSC, line-continuation).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
-from .token_kinds import Trivia, TriviaKind, is_line_terminator, is_wsc
+from .token_kinds import _WSC, Trivia, TriviaKind, is_line_terminator, is_wsc
+
+# The WSC class as a run matcher, built from the same frozenset the predicate
+# uses so the two can never disagree. Always matches (possibly empty).
+_WSC_RUN_RE = re.compile("[" + re.escape("".join(sorted(_WSC))) + "]*")
 
 
 @dataclass(slots=True)
@@ -30,15 +35,23 @@ def scan_leading_trivia(src: str, pos: int, line: int, character: int) -> Trivia
     into a single lineContinuation trivia so the logical line is preserved while
     the raw text round-trips.
     """
-    trivia: list[Trivia] = []
     length = len(src)
+    # Fast path: most tokens have no leading trivia at all, so answer that
+    # without allocating a list. The regex below always matches (possibly
+    # empty), so end == pos means "no whitespace here".
+    run_end = _WSC_RUN_RE.match(src, pos).end()  # type: ignore[union-attr]
+    if run_end == pos:
+        return TriviaScan(trivia=[], pos=pos, line=line, character=character)
+
+    trivia: list[Trivia] = []
     while pos < length:
         if not is_wsc(src[pos]):
             break
         start = pos
-        while pos < length and is_wsc(src[pos]):
-            pos += 1
-            character += 1
+        # WSC never contains a line terminator, so a whole run advances the
+        # column by its length; matching runs beats one predicate call per space.
+        pos = _WSC_RUN_RE.match(src, pos).end()  # type: ignore[union-attr]
+        character += pos - start
         # A line-continuation is whitespace + '_' + line terminator.
         if (
             pos < length

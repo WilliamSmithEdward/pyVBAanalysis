@@ -820,11 +820,9 @@ def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: Conditio
 
 
 def _top_level_assign_offset(source: str, span: Span) -> int | None:
-    toks = [
-        t
-        for t in tokenize(source[span.start : span.end])
-        if t.kind is not TokenKind.COMMENT and t.kind is not TokenKind.NEWLINE
-    ]
+    # Same token view the rest of the pass uses, so the statement is not
+    # re-lexed here (cached_statement_tokens already drops comments/newlines).
+    toks = statement_tokens(source, span)
     depth = 0
     for t in toks:
         r = t.raw_text

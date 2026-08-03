@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from ..conditional import ConditionalActivityTracker
 from ..lexer.token_helpers import (
     split_top_level_token_groups,
-    statement_tokens,
+    cached_statement_tokens,
     token_name,
     token_word,
     tokens_without_leading_line_number,
@@ -91,7 +91,7 @@ def collect_procedure_label_references(
 
 def statement_label_references(source: str, span: Span) -> list[VbaProcedureLabelReference]:
     """Label references targeted by a single statement (GoTo/GoSub/Resume/On...)."""
-    toks = tokens_without_leading_line_number(statement_tokens(source, span.start, span.end))
+    toks = tokens_without_leading_line_number(cached_statement_tokens(source, span.start, span.end))
     if not toks:
         return []
     if token_word(toks[0]) == "on":
@@ -217,7 +217,7 @@ def _label_from_token(tok: VbaToken, base: Span) -> VbaProcedureLabel | None:
 
 
 def _statement_label_declaration(source: str, span: Span) -> VbaProcedureLabel | None:
-    toks = statement_tokens(source, span.start, span.end)
+    toks = cached_statement_tokens(source, span.start, span.end)
     first = _at(toks, 0)
     if first is None:
         return None

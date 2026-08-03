@@ -25,7 +25,13 @@ classifiers = [
 # Excel workbooks (pyvbaanalysis.reader.workbook). It is pure Python with no
 # transitive dependencies, so the runtime tree stays pure Python. Everything else is
 # the standard library.
-dependencies = ["pyOpenVBA>=3.0.1"]
+#
+# The 3.4.0 floor is a correctness requirement, not just currency: earlier
+# versions resolve a VBA project's code page incorrectly, so module text in a
+# non-Latin project (Cyrillic, Greek, the double-byte CJK pages) decodes as
+# mojibake - which the analyzer would then see as identifiers and could report
+# diagnostics on. Reads of Latin-1 projects are byte-identical either way.
+dependencies = ["pyOpenVBA>=3.4.0"]
 
 [project.optional-dependencies]
 # Exact pins: CI is a regression gate, so the toolchain must not drift

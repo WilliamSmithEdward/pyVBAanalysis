@@ -11,6 +11,7 @@ reproduces the source exactly.
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 
 from .keyword_table import canonical_keyword
@@ -49,6 +50,11 @@ def _is_ident_part(ch: str) -> bool:
     if ch == "_" or _is_digit(ch):
         return True
     return _is_ident_start(ch)
+
+
+# The ASCII subset of _is_ident_part, as a run matcher. Always matches (possibly
+# empty), so `.end()` is the scan position after the run.
+_ASCII_IDENT_RUN_RE = re.compile(r"[A-Za-z0-9_]*")
 
 
 def tokenize(src: str) -> list[VbaToken]:
@@ -97,9 +103,13 @@ def tokenize(src: str) -> list[VbaToken]:
                 pos += 1
             kind = TokenKind.COMMENT
         elif _is_ident_start(ch):
-            pos += 1
+            # Scan the identifier in ASCII runs (one regex step each) instead of
+            # one predicate call per character; a non-ASCII continuation char is
+            # still checked with the exact predicate and then the run resumes, so
+            # the stopping point matches the per-character walk exactly.
+            pos = _ASCII_IDENT_RUN_RE.match(src, pos + 1).end()  # type: ignore[union-attr]
             while pos < length and _is_ident_part(src[pos]):
-                pos += 1
+                pos = _ASCII_IDENT_RUN_RE.match(src, pos + 1).end()  # type: ignore[union-attr]
             word = src[start_pos:pos]
             if word.lower() == "rem" and at_statement_start:
                 # Rem comment (MS-VBAL 3.3.5.2): rest of line is comment.
