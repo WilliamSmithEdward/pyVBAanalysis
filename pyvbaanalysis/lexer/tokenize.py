@@ -12,6 +12,7 @@ reproduces the source exactly.
 from __future__ import annotations
 
 import re
+import unicodedata
 from functools import lru_cache
 
 from .keyword_table import canonical_keyword
@@ -49,7 +50,19 @@ def _is_ident_start(ch: str) -> bool:
 def _is_ident_part(ch: str) -> bool:
     if ch == "_" or _is_digit(ch):
         return True
-    return _is_ident_start(ch)
+    if _is_ident_start(ch):
+        return True
+    # A combining mark continues the identifier it is attached to. Scripts like
+    # Thai write a single letter as a base plus a tone mark and/or vowel sign,
+    # and str.isalpha() is False for those marks (categories Mn and Mc), so
+    # without this the identifier splits mid-grapheme and the tail is reported
+    # as an undeclared variable.
+    #
+    # VBE-oracle verified 2026-08-03: a cp874 project declaring
+    # `Dim <kho + mai ek + sara aa> As String` compiles and runs clean in real
+    # Excel (no compile-error dialog), alongside a mark-free Thai control that
+    # also runs. The identifier is legal, so splitting it was a false positive.
+    return ord(ch) >= 0x80 and unicodedata.category(ch) in ("Mn", "Mc")
 
 
 # The ASCII subset of _is_ident_part, as a run matcher. Always matches (possibly

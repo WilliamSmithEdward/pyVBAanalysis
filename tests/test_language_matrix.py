@@ -44,7 +44,7 @@ from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind
 # decoded text, so the code page itself is not a parameter here - the point is
 # that every one of these scripts is exercised as an identifier and as data.
 LANGUAGE_MATRIX: list[tuple[str, str, str, str]] = [
-    ("Thai (cp874)", "ทดสอบ", "ผล", "ทดสอบภาษาไทย"),
+    ("Thai (cp874)", "ทดสอบ", "ค่า", "ทดสอบภาษาไทย"),
     ("Japanese (cp932)", "テスト", "値", "テスト用モジュール"),
     ("Chinese Simplified (cp936)", "测试", "值", "中文测试模块"),
     ("Korean (cp949)", "테스트", "값", "한국어 테스트"),
@@ -134,32 +134,23 @@ def test_matrix_covers_the_supported_pages() -> None:
     assert len({row[1] for row in LANGUAGE_MATRIX}) == len(LANGUAGE_MATRIX)
 
 
-def test_matrix_identifiers_avoid_combining_marks() -> None:
-    # Keeps the matrix honest about its own scope: the identifier columns use
-    # scripts whose letters stand alone, because a combining mark in an
-    # identifier is a known gap (see the xfail below). Sample TEXT is not
-    # restricted - several rows carry marks there, which is the point.
+def test_matrix_exercises_combining_marks_in_identifiers() -> None:
+    # The Thai row deliberately carries a combining mark in its identifier: that
+    # is the shape the lexer used to split. Keep at least one such row so the
+    # regression cannot come back unnoticed.
     import unicodedata
 
-    for label, proc, local, _text in LANGUAGE_MATRIX:
-        for name in (proc, local):
-            marks = [c for c in name if unicodedata.category(c).startswith("M")]
-            assert not marks, f"{label}: identifier {name!r} carries a combining mark"
+    marked = [
+        label
+        for label, proc, local, _text in LANGUAGE_MATRIX
+        if any(unicodedata.category(c).startswith("M") for c in proc + local)
+    ]
+    assert marked, "no matrix identifier exercises a combining mark any more"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known gap: the lexer treats an identifier character as a letter via "
-        "str.isalpha(), which is False for combining marks (category Mn/Mc). A "
-        "Thai identifier like 'kha + mai ek + sara aa' therefore splits and the "
-        "fragment is reported undeclared. Whether the VBE accepts such an "
-        "identifier at all needs Excel/VBE oracle evidence before the lexer "
-        "changes - inventing the rule would violate the no-false-positive "
-        "discipline in either direction. Flip this test when that evidence lands."
-    ),
-)
 def test_combining_mark_identifier_is_not_split() -> None:
+    """VBE-oracle verified: a cp874 project using this identifier compiles and
+    runs clean in real Excel, so splitting it was a false positive."""
     source = _module_source("ทดสอบ", "ค่า", "ทดสอบภาษาไทย")
     results = analyze_project([ModuleInput("LangModule", ModuleSymbolKind.STANDARD, source)])
     assert [f"{d.code}: {d.message}" for d in results["LangModule"]] == []

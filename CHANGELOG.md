@@ -5,6 +5,27 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 1.4.1 - 2026-08-03
+
+### Fixed
+
+* An identifier containing a Unicode combining mark is no longer split by the
+  lexer. Scripts like Thai write one letter as a base plus a tone mark and/or
+  vowel sign, and `str.isalpha()` is False for those marks (categories Mn and
+  Mc), so `Dim <kho + mai ek + sara aa>` was lexed as three tokens and the tail
+  reported as `undeclared-variable`: a false positive on valid VBA.
+
+  This is now VBE-oracle verified rather than assumed. A cp874 project
+  declaring that identifier compiles and runs clean in real Excel, with a
+  mark-free Thai control alongside it, both reporting no compile dialog.
+  `tools/oracle/build_combining_mark_probe.py` rebuilds the probes so the
+  finding is reproducible; the corpus entry belongs upstream in XLIDE, which
+  owns the evidence pipeline.
+
+  The 1.4.0 language matrix recorded this as a strict xfail pending exactly
+  this evidence. It is now an ordinary passing test, and the Thai row uses the
+  combining-mark identifier again so the regression cannot return unnoticed.
+
 ## 1.4.0 - 2026-08-03
 
 ### Changed
