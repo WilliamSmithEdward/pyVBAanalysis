@@ -5,6 +5,56 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 1.4.0 - 2026-08-03
+
+### Changed
+
+* The pyOpenVBA floor is now 3.4.0 (was 3.0.1). That release fixes code-page
+  resolution, so module text in a non-Latin project (Cyrillic, Greek, the
+  double-byte CJK pages) no longer decodes as mojibake the analyzer would read
+  as identifiers. Reads of Latin-1 projects are byte-identical either way, and
+  the whole test suite passes unchanged on the new version.
+
+### Performance
+
+A second profiling pass on the same 26,721-line class module, again with
+identical diagnostics. `analyze_module` drops from 3.4s to 2.5s and the
+containing workbook through the CLI from 6.0s to 4.25s; cumulatively since
+1.3.0 that module went from 27.2s to 2.5s. Full-module lexes per pass fell
+from 38,526 to about 4,100, and the profile is now flat, with no entry above
+roughly 5 percent.
+
+* Three paths still re-lexed text the shared token stream already covers: the
+  procedure-label scan (33k slice lexes per pass), the TypeOf-operand check
+  (which re-lexed the entire module in one call), and the declaration
+  assignment-offset helper. All three now ride the per-pass cache.
+* Two lexer hot loops scan runs instead of calling a predicate per character:
+  identifiers advance by an ASCII-run regex, with any non-ASCII continuation
+  still checked by the exact predicate so the stopping point is unchanged, and
+  whitespace trivia matches a run built from the same character set the
+  predicate uses, with a fast path for the common no-trivia case.
+
+### Added
+
+* A CI language matrix, mirroring the one XLIDE added after its issue #6. One
+  native-language sample per supported code page - Thai, Japanese, Simplified
+  and Traditional Chinese, Korean, Central European, Cyrillic, Western
+  European, Greek, Turkish, Hebrew, Arabic, Baltic, Vietnamese, KOI8-R/U,
+  ISO-8859-2 and UTF-8 - drives the analyzer with native identifiers, string
+  literals and comments, asserting the token stream round-trips exactly, the
+  procedure parses under its native name, and both the module and whole-project
+  passes stay silent. It runs on Linux and Windows, since the failure mode it
+  guards is encoding-shaped. A cross-module case covers a natively-named Sub
+  called from another module.
+
+  The matrix also pins a known gap it uncovered: an identifier containing a
+  combining mark (Thai, for instance) is split by the lexer, because character
+  membership is decided with `str.isalpha()`, which is false for marks. That
+  currently yields a false `undeclared-variable` on the fragment. Whether the
+  VBE accepts such an identifier at all needs oracle evidence before the lexer
+  changes, so the case is recorded as a strict xfail that will fail loudly if
+  the behavior ever changes.
+
 ## 1.3.2 - 2026-08-03
 
 ### Internal

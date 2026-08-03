@@ -33,6 +33,27 @@ jobs:
       - name: Mypy
         run: python -m mypy pyvbaanalysis
 
+  languages:
+    name: Language matrix (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install -e ".[dev]"
+      # Runs on both platforms because the failure mode this guards is
+      # encoding-shaped: a default locale or console code page that differs
+      # between Linux and Windows must not change what the analyzer sees.
+      - name: Language matrix
+        run: python -m pytest tests/test_language_matrix.py -q
+
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
