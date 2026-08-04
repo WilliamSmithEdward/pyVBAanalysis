@@ -5,6 +5,23 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 1.4.2 - 2026-08-03
+
+### Fixed
+
+* Identifier continuation now accepts every Unicode mark category, matching
+  XLIDE. The 1.4.1 fix listed only `Mn` and `Mc`, while XLIDE's equivalent fix
+  (its issue #8) widened its patterns to `\p{M}`, which also covers enclosing
+  marks (`Me`). An identifier carrying one still split here. agent.md makes the
+  XLIDE TypeScript the executable spec for this port, and widening what
+  continues a name can only remove false positives, so the predicate now
+  accepts any category beginning with `M`.
+
+  Enclosing marks in VBA identifiers are vanishingly rare, which is why nothing
+  caught it earlier: the oracle probe covered `Mn`, and the language matrix
+  covers `Mn` and `Mc`. It surfaced from verifying XLIDE's fix against this
+  one, side by side.
+
 ## 1.4.1 - 2026-08-03
 
 ### Fixed
