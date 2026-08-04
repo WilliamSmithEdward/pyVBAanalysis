@@ -62,7 +62,10 @@ def _is_ident_part(ch: str) -> bool:
     # `Dim <kho + mai ek + sara aa> As String` compiles and runs clean in real
     # Excel (no compile-error dialog), alongside a mark-free Thai control that
     # also runs. The identifier is legal, so splitting it was a false positive.
-    return ord(ch) >= 0x80 and unicodedata.category(ch) in ("Mn", "Mc")
+    # Every mark category (Mn, Mc, Me), matching XLIDE's \p{M}: the port follows
+    # upstream as the executable spec, and widening what continues a name can
+    # only remove false positives, never add one.
+    return ord(ch) >= 0x80 and unicodedata.category(ch).startswith("M")
 
 
 # The ASCII subset of _is_ident_part, as a run matcher. Always matches (possibly
