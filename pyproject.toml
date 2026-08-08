@@ -38,7 +38,7 @@ dependencies = ["pyOpenVBA>=3.4.0"]
 # underneath main (ruff 0.16 broke a green tree with zero repo commits).
 # Dependabot's weekly pip updates turn each tool upgrade into its own gated
 # PR, where a red CI run blocks the bump instead of breaking main.
-dev = ["pytest==9.1.1", "ruff==0.16.0", "mypy==2.3.0"]
+dev = ["pytest==9.1.1", "ruff==0.16.1", "mypy==2.3.0"]
 build = ["build>=1.2", "twine>=5"]
 
 [project.scripts]
