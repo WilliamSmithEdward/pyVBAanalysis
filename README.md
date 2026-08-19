@@ -1,10 +1,12 @@
 # pyVBAanalysis
 
-Static analysis for Excel VBA. It reads your macros and reports likely bugs and the
-errors the VBA compiler would catch, without opening Excel or running any code.
+Static analysis for Office VBA. It reads your macros and reports likely bugs and the
+errors the VBA compiler would catch, without opening Office or running any code.
 
-Point it at a workbook or a set of exported module files, and it returns the
-problems it finds, each with the exact line and a plain explanation.
+Point it at an Excel workbook, a Word document, a PowerPoint deck, an Access
+database, or a set of exported module files, and it returns the problems it finds,
+each with the exact line and a plain explanation. Each file is measured against its
+own host's object model, so Word code is never judged by Excel's surface.
 
 ## What it checks
 
@@ -34,9 +36,9 @@ Python 3.10 or later. Nothing else to set up.
 Analyze a workbook:
 
 ```python
-from pyvbaanalysis import analyze_workbook
+from pyvbaanalysis import analyze_office_file
 
-for module, problems in analyze_workbook("Budget.xlsm").items():
+for module, problems in analyze_office_file("Budget.xlsm").items():
     for p in problems:
         print(module, p.severity.value, p.code, p.message)
 ```
@@ -76,8 +78,14 @@ clean, so it drops into a CI check.
 
 ## Scope
 
-This analyzes Excel VBA. It does not run macros and does not need Excel installed.
-Word and PowerPoint are not supported.
+This analyzes the VBA inside Office files. It does not run macros and does not need
+Office installed.
+
+Each file is measured against its own host's object model, so a Word document is
+never judged by Excel's surface. Readable containers: Excel (.xlsm, .xlsb, .xlam,
+.xls), Word (.docm, .dotm, .doc), PowerPoint (.pptm, .potm) and Access (.accdb,
+.mdb, read-only). Legacy .ppt is not readable yet, because its VBA project sits in
+a compressed record the reader does not open.
 
 ## Documentation
 

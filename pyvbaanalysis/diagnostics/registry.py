@@ -137,7 +137,12 @@ def _late_bound_friend_member(ctx: RulePassContext, push: PushFn) -> ProcedureSt
     if project_class_members is None:
         return lambda member: None
     return check_late_bound_friend_member(
-        ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, project_class_members, push
+        ctx.source,
+        ctx.symbols,
+        ctx.opts.project_visible_symbols,
+        project_class_members,
+        ctx.opts.host_model,
+        push,
     )
 
 
@@ -148,7 +153,12 @@ def _unknown_call_statement(ctx: RulePassContext, push: PushFn) -> ProcedureStat
     if known_procedures is None:
         return lambda member: None
     return check_unknown_call_statement(
-        ctx.source, ctx.symbols, known_procedures, ctx.opts.project_visible_symbols, push
+        ctx.source,
+        ctx.symbols,
+        known_procedures,
+        ctx.opts.project_visible_symbols,
+        ctx.opts.host_model,
+        push,
     )
 
 
@@ -189,10 +199,10 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="tooManyParameters", run=lambda ctx, push: check_too_many_parameters(ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="identifierTooLong", run=lambda ctx, push: check_identifier_too_long(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="udtParameterConstraints", run=lambda ctx, push: check_udt_parameter_constraints(ctx.mod, ctx.activity, push)),
-    DiagnosticRuleEntry(name="ambiguousEnumMemberReferences", run=lambda ctx, push: check_ambiguous_enum_member_references(ctx.source, ctx.mod, ctx.symbols, ctx.activity, ctx.module_name, ctx.opts.known_procedures, ctx.opts.project_procedures, ctx.opts.project_class_members, ctx.opts.project_visible_symbols, push)),
+    DiagnosticRuleEntry(name="ambiguousEnumMemberReferences", run=lambda ctx, push: check_ambiguous_enum_member_references(ctx.source, ctx.mod, ctx.symbols, ctx.activity, ctx.module_name, ctx.opts.known_procedures, ctx.opts.project_procedures, ctx.opts.project_class_members, ctx.opts.project_visible_symbols, ctx.opts.host_model, push)),
     DiagnosticRuleEntry(name="constAssignment", procedure_statements=lambda ctx, push: check_const_assignment(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="optionExplicit", run=lambda ctx, push: check_option_explicit(ctx.source, ctx.mod, ctx.activity, push)),
-    DiagnosticRuleEntry(name="undeclaredVariables", run=lambda ctx, push: check_undeclared_variables(ctx.source, ctx.mod, ctx.symbols, ctx.activity, ctx.opts.known_identifiers, ctx.opts.project_procedures, ctx.opts.project_class_members, ctx.opts.project_visible_symbols, push)),
+    DiagnosticRuleEntry(name="undeclaredVariables", run=lambda ctx, push: check_undeclared_variables(ctx.source, ctx.mod, ctx.symbols, ctx.activity, ctx.opts.known_identifiers, ctx.opts.project_procedures, ctx.opts.project_class_members, ctx.opts.project_visible_symbols, ctx.opts.host_model, push)),
     DiagnosticRuleEntry(name="optionPlacement", run=lambda ctx, push: check_option_placement(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="duplicateOption", run=lambda ctx, push: check_duplicate_options(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="procedureHeader", run=lambda ctx, push: check_procedure_header(ctx.source, ctx.mod, ctx.activity, push)),

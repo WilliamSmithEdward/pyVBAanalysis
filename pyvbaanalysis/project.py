@@ -36,6 +36,7 @@ def analyze_module_options_for(
     conditional_compilation: ConditionalCompilationEnvironment | None = None,
     whole_project: bool = True,
     inline_suppression: bool = True,
+    host: str | None = None,
 ) -> AnalyzeModuleOptions:
     """Build the AnalyzeModuleOptions for one module from a populated ProjectIndex.
 
@@ -48,8 +49,11 @@ def analyze_module_options_for(
     ``whole_project`` declares whether the index holds the complete project; pass
     False when it does not (a single file in isolation) to suppress the rules that
     require the whole project rather than report them as false positives.
+    ``host`` names the Office host the modules belong to ("word", "powerpoint",
+    "access"); absent means Excel, exactly as before.
     """
     return AnalyzeModuleOptions(
+        host=host,
         module_name=module_name,
         module_kind=module_kind,
         whole_project=whole_project,
@@ -112,6 +116,7 @@ def analyze_project(
     conditional_compilation: ConditionalCompilationEnvironment | None = None,
     whole_project: bool = True,
     inline_suppression: bool = True,
+    host: str | None = None,
 ) -> dict[str, list[VbaDiagnostic]]:
     """Analyze a whole VBA project with full cross-module context.
 
@@ -132,6 +137,10 @@ def analyze_project(
     references): the rules that need the whole project (undeclared-variable,
     unknown-call, member-not-found) are then suppressed rather than reported, because a
     symbol declared in an omitted module is indistinguishable from an undefined one.
+
+    ``host`` names the Office host the project belongs to ("word", "powerpoint",
+    "access"); absent means Excel, so every existing caller is unchanged. A named
+    host with no object model asserts no host knowledge rather than Excel's.
 
     Returns a dict mapping module name to that module's diagnostics, preserving the
     input order of the analyzed modules. Module names must be unique within the
@@ -159,6 +168,7 @@ def analyze_project(
             conditional_compilation=module.conditional_compilation or conditional_compilation,
             whole_project=whole_project,
             inline_suppression=inline_suppression,
+            host=host,
         )
         results[module.module_name] = analyze_module(module.source, opts)
     return results

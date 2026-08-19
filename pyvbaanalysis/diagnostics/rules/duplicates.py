@@ -13,6 +13,7 @@ from collections.abc import Set as AbstractSet
 
 from ...conditional import ConditionalActivity, ConditionalActivityTracker
 from ...host import application_member_names, resolve_host_global
+from ...host.host_model import HostObjectModel
 from ...parser.nodes import EnumNode, ModuleNode, ProcedureNode, Span, TypeNode
 from ...runtime import resolve_runtime_function, resolve_runtime_object
 from ...symbols.name_resolution import (
@@ -179,6 +180,7 @@ def check_ambiguous_enum_member_references(
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None,
     project_members: Sequence[VbaProjectClassMembers] | None,
     project_visible_symbols: Sequence[VbaSymbol] | None,
+    host_model: HostObjectModel | None,
     push: PushFn,
 ) -> None:
     """An unqualified read of a member name shared by more than one visible Enum is
@@ -203,7 +205,7 @@ def check_ambiguous_enum_member_references(
         return
 
     module_signatures = callable_type_signatures_for(symbols, project_procedures)
-    app_members = application_member_names()
+    app_members = application_member_names(host_model)
     known = {name.lower() for name in (known_procedures or ())}
 
     def is_known_for_skip(name: str, proc_sym: VbaSymbol | None) -> bool:
@@ -214,7 +216,7 @@ def check_ambiguous_enum_member_references(
             )
             or lower in known
             or lower in app_members
-            or resolve_host_global(name) is not None
+            or resolve_host_global(name, host_model) is not None
             or resolve_runtime_object(name) is not None
             or resolve_runtime_function(name) is not None
         )

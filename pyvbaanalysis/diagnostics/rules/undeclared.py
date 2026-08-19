@@ -26,6 +26,7 @@ from ...host import (
     resolve_host_constant,
     resolve_host_global,
 )
+from ...host.host_model import HostObjectModel
 from ...lexer.keyword_table import is_reserved_identifier
 from ...lexer.token_helpers import match_paren_from
 from ...lexer.token_kinds import VbaToken
@@ -168,13 +169,14 @@ def check_unknown_call_statement(
     symbols: ModuleSymbols,
     known_procedures: AbstractSet[str],
     project_visible_symbols: Sequence[VbaSymbol] | None,
+    host_model: HostObjectModel | None,
     push: PushFn,
 ) -> ProcedureStatementVisitor:
     """A bare call statement whose callee resolves to nothing: "Sub or Function not
     defined". Resolution covers project procedures, source bindings, Application
     members, host globals, and the VBA runtime, so only truly-unknown names fire."""
     known = {name.lower() for name in known_procedures}
-    app_members = application_member_names()
+    app_members = application_member_names(host_model)
 
     def is_known(name: str, proc_sym: VbaSymbol | None) -> bool:
         lower = name.lower()
@@ -184,7 +186,7 @@ def check_unknown_call_statement(
                 symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.CALL
             )
             or lower in app_members
-            or resolve_host_global(name) is not None
+            or resolve_host_global(name, host_model) is not None
             or resolve_runtime_object(name) is not None
             or resolve_runtime_function(name) is not None
         )
@@ -406,6 +408,7 @@ def check_undeclared_variables(
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None,
     project_members: Sequence[VbaProjectClassMembers] | None,
     project_visible_symbols: Sequence[VbaSymbol] | None,
+    host_model: HostObjectModel | None,
     push: PushFn,
 ) -> None:
     """With Option Explicit, a variable must be declared before it is assigned or
@@ -416,7 +419,7 @@ def check_undeclared_variables(
 
     known = {name.lower() for name in known_identifiers}
     module_signatures = callable_type_signatures_for(symbols, project_procedures)
-    app_members = application_member_names()
+    app_members = application_member_names(host_model)
 
     def is_known(
         name: str, proc_sym: VbaSymbol | None, context: BareIdentifierContext
@@ -427,8 +430,8 @@ def check_undeclared_variables(
             or source_identifier_bound(symbols, proc_sym, project_visible_symbols, name, context)
             or lower in known
             or lower in app_members
-            or resolve_host_global(name) is not None
-            or resolve_host_constant(name) is not None
+            or resolve_host_global(name, host_model) is not None
+            or resolve_host_constant(name, host_model) is not None
             or resolve_runtime_constant(name) is not None
             or resolve_runtime_object(name) is not None
             or resolve_runtime_function(name) is not None

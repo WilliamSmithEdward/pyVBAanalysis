@@ -15,9 +15,11 @@ out of scope.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 
 from ..completion import MemberCompletionContext
 from ..conditional import create_conditional_activity_tracker
+from ..host.host_registry import host_knowledge_is_absent, host_object_model_for_token
 from ..lexer.token_kinds import TokenKind
 from ..lexer.tokenize import tokenize_cached
 from ..parser.nodes import ModuleNode, Span
@@ -47,14 +49,20 @@ from .walker import ProcedureStatementVisitor, walk_procedure_statements
 
 
 def _severity_of(
-    rule_name: str, overrides: Mapping[str, str] | None, whole_project: bool = True
+    rule_name: str,
+    overrides: Mapping[str, str] | None,
+    whole_project: bool = True,
+    host_known: bool = True,
 ) -> DiagnosticSeverity | None:
     """Effective severity of a rule, or None when switched off."""
     meta = DIAGNOSTIC_RULES[rule_name]
     # A rule that needs every module to be correct (undeclared-variable, unknown-call,
-    # member-not-found) stays silent on a partial project view: a symbol declared in an
-    # unseen module is indistinguishable from an undefined one, so it would false-positive.
-    if meta.requires_whole_project and not whole_project:
+    # member-not-found, late-bound-friend-member) stays silent on a partial project view:
+    # a symbol declared in an unseen module is indistinguishable from an undefined one,
+    # so it would false-positive. An unmodelled host is the same situation one level up:
+    # with no object model, a name the host injects is indistinguishable from an
+    # undefined one, so the same rules stay silent rather than report every host global.
+    if meta.requires_whole_project and not (whole_project and host_known):
         return None
     override_value = overrides.get(meta.code) if overrides is not None else None
     override = normalize_diagnostic_severity_override(meta.code, override_value)
@@ -67,11 +75,23 @@ def _severity_of(
 
 def analyze_module(source: str, opts: AnalyzeModuleOptions | None = None) -> list[VbaDiagnostic]:
     """Analyze one VBA module source and return its active diagnostics. Never throws."""
-    options = opts if opts is not None else AnalyzeModuleOptions()
+    options = with_resolved_host_model(opts if opts is not None else AnalyzeModuleOptions())
     try:
         return _run_rules(source, options)
     except Exception:
         return []
+
+
+def with_resolved_host_model(opts: AnalyzeModuleOptions) -> AnalyzeModuleOptions:
+    """Resolve the `host` token into a host_model once, up front, so every
+    host_model consumer inherits the caller's choice. An explicit host_model
+    wins; absent both, the Excel defaults ride as they always have."""
+    if opts.host_model is not None or opts.host is None:
+        return opts
+    resolved = host_object_model_for_token(opts.host)
+    if resolved is None:
+        return opts
+    return replace(opts, host_model=resolved)
 
 
 def _run_rules(source: str, opts: AnalyzeModuleOptions) -> list[VbaDiagnostic]:
@@ -86,12 +106,13 @@ def _run_rules(source: str, opts: AnalyzeModuleOptions) -> list[VbaDiagnostic]:
         else None
     )
     whole_project = opts.whole_project
+    host_known = not host_knowledge_is_absent(opts.host_model)
 
     def push_into(sink: list[VbaDiagnostic]) -> PushFn:
         def push(
             rule: str, message: str, span: Span, data: VbaDiagnosticData | None = None
         ) -> None:
-            severity = _severity_of(rule, overrides, whole_project)
+            severity = _severity_of(rule, overrides, whole_project, host_known)
             if severity is None:
                 return
             meta = DIAGNOSTIC_RULES[rule]
@@ -174,7 +195,7 @@ def _run_rules(source: str, opts: AnalyzeModuleOptions) -> list[VbaDiagnostic]:
     if scan.issues:
         directive_meta = diagnostic_metadata_for_code(DIRECTIVE_DIAGNOSTIC_CODE)
         severity = (
-            _severity_of(directive_meta.rule_name, overrides, whole_project)
+            _severity_of(directive_meta.rule_name, overrides, whole_project, host_known)
             if directive_meta is not None
             else None
         )
@@ -213,7 +234,7 @@ def diagnostic_member_completion_context(
     me_project_type = _me_project_type_for(opts.module_name, opts.module_kind)
     if me_project_type:
         ctx.me_project_type = me_project_type
-    me_type = _me_host_type_for(opts.module_name, opts.module_kind)
+    me_type = _me_host_type_for(opts.module_name, opts.module_kind, opts.host)
     if me_type:
         ctx.me_type = me_type
     return ctx
@@ -226,8 +247,16 @@ def _me_project_type_for(
 
 
 def _me_host_type_for(
-    module_name: str | None, module_kind: ModuleSymbolKind | None
+    module_name: str | None, module_kind: ModuleSymbolKind | None, host: str | None = None
 ) -> str | None:
     if not module_name or module_kind is not ModuleSymbolKind.DOCUMENT:
         return None
-    return "Excel.Workbook" if module_name.lower() == "thisworkbook" else None
+    lower = module_name.lower()
+    token = (host or "excel").lower()
+    if token == "excel":
+        return "Excel.Workbook" if lower == "thisworkbook" else None
+    if token == "word":
+        return "Word.Document" if lower == "thisdocument" else None
+    # PowerPoint has no document modules; other hosts' document surfaces are
+    # unmodelled, and silence beats a wrong type.
+    return None

@@ -51,9 +51,10 @@ Out of scope:
   Risk 7), not the editor wrapping.
 
 Dependencies: the only runtime dependency is pyOpenVBA
-(https://pypi.org/project/pyOpenVBA/, version 3.0.1, requires Python >=3.10),
-used to read VBA modules directly out of Excel workbooks (the analyzer targets
-Excel VBA; the shipped reader is Excel-only).
+(https://pypi.org/project/pyOpenVBA/, version 3.4.0 or later, requires Python >=3.10),
+used to read VBA modules directly out of Office macro containers (Excel, Word,
+PowerPoint, and read-only Access; the file's extension selects both the container
+reader and the host object model the rules resolve against).
 pyOpenVBA is itself pure Python with no transitive dependencies, so the whole
 runtime tree stays pure Python; everything else is the standard library. The
 analysis core operates on source text and never imports pyOpenVBA. Only the
@@ -123,7 +124,7 @@ via lowercased keys (VBA is case-insensitive).
 pyvbaanalysis/
   __init__.py                  # public API: analyze_module, parse_module, tokenize, ProjectIndex, analyze_workbook
   reader/
-    workbook.py                # read VBA modules from Excel .xlsm/.xlsb/.xlam/.xls via pyOpenVBA -> source; the ONLY pyOpenVBA import
+    workbook.py                # read VBA modules from any Office macro container via pyOpenVBA -> source; the ONLY pyOpenVBA import
   lexer/
     token_kinds.py             # TokenKind, TriviaKind (Enum); VbaToken, Trivia (dataclass)
     tokenize.py                # tokenize(), tokenize_cached(), date-literal validator
@@ -181,17 +182,16 @@ let any file become a monolith (UM-03): the 8900-line `excelReferenceMembers.ts`
 must land as JSON data plus a thin resolver, never as a giant `.py`.
 
 The reader layer (`reader/workbook.py`) is the only place pyOpenVBA is imported.
-It turns an Excel workbook (.xlsm/.xlsb/.xlam/.xls) into module source text and
-feeds the pure analyzer; `analyze_module(source)` and everything below it stays
+It turns an Office macro container into module source text plus the host token that
+container implies, and feeds the pure analyzer; `analyze_module(source)` and everything below it stays
 stdlib-only (UM-01), so the core is testable from plain strings without any file. The
-import name is most likely `pyopenvba` (per the wheel `pyopenvba-3.0.1`); confirm
-at first use.
+import name is `pyopenvba`.
 
 ---
 
 ## 4. Parity inventory (what to port)
 
-Tags: CORE = analysis-core, must port. HOST = Excel-specific, port as data.
+Tags: CORE = analysis-core, must port. HOST = host-specific, port as data.
 EDITOR = out of scope. Size to port: S/M/L.
 
 - Lexer (`src/analyzer/lexer/**`, `constants/integerConstantExpression.ts`):

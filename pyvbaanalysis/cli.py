@@ -30,13 +30,14 @@ from .diagnostics import (
     validate_severity_overrides,
 )
 from .project import analyze_project
+from .host import host_token_for_file_name
 from .reader import (
-    EXCEL_EXTENSIONS,
     LOOSE_EXTENSIONS,
+    OFFICE_EXTENSIONS,
     LooseFileReadError,
     WorkbookReadError,
     load_loose_module,
-    read_workbook_modules,
+    read_office_modules,
 )
 from .symbols import ModuleInput
 
@@ -151,7 +152,7 @@ def _analyze_workbook_group(
     errors: list[str] = []
     for path in paths:
         try:
-            modules = read_workbook_modules(path)
+            modules = read_office_modules(path)
         except WorkbookReadError as exc:
             errors.append(f"{path}: {exc}")
             continue
@@ -163,6 +164,7 @@ def _analyze_workbook_group(
             only=only or None,
             severity_overrides=severity_overrides or None,
             inline_suppression=inline_suppression,
+            host=host_token_for_file_name(path.name),
         )
         sources = {m.name: m.source for m in modules}
         results.append(_ProjectResult(str(path), diagnostics, sources))
@@ -332,7 +334,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("error: unknown diagnostic code(s): " + ", ".join(unknown_codes), file=sys.stderr)
         return 2
 
-    workbook_paths = [p for p in paths if p.is_file() and p.suffix.lower() in EXCEL_EXTENSIONS]
+    workbook_paths = [p for p in paths if p.is_file() and p.suffix.lower() in OFFICE_EXTENSIONS]
     other_paths = [p for p in paths if p not in workbook_paths]
     loose_paths = _gather_loose_paths(other_paths)
     unknown = [p for p in loose_paths if p.suffix.lower() not in LOOSE_EXTENSIONS]

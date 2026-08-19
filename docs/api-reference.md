@@ -11,11 +11,14 @@ These are re-exported at the package root for convenience:
 | Symbol | Role |
 | --- | --- |
 | `analyze_module(source, opts=None)` | Analyze one module's source; returns `list[VbaDiagnostic]`. Never raises. |
-| `analyze_project(modules, *, only=None, severity_overrides=None, conditional_compilation=None, whole_project=True, inline_suppression=True)` | Analyze a set of `ModuleInput`s with cross-module context; returns `dict[str, list[VbaDiagnostic]]`. `whole_project=False` for a partial set. |
+| `analyze_project(modules, *, only=None, severity_overrides=None, conditional_compilation=None, whole_project=True, inline_suppression=True, host=None)` | Analyze a set of `ModuleInput`s with cross-module context; returns `dict[str, list[VbaDiagnostic]]`. `whole_project=False` for a partial set. `host` names the Office host (absent means Excel). |
 | `analyze_loose_file(path, *, severity_overrides=None, conditional_compilation=None, whole_project=False, inline_suppression=True)` | Analyze one `.bas`/`.cls`/`.frm` file (partial by default; the whole-project checks are skipped). |
 | `analyze_loose_files(paths, *, only=None, severity_overrides=None, conditional_compilation=None, whole_project=True, inline_suppression=True)` | Analyze several loose files as one project. |
 | `analyze_workbook(path, *, only=None, severity_overrides=None, conditional_compilation=None, inline_suppression=True)` | Analyze the VBA in an Excel workbook (via pyOpenVBA). |
-| `analyze_module_options_for(index, name, kind, *, severity_overrides=None, conditional_compilation=None, whole_project=True, inline_suppression=True)` | Build per-module `AnalyzeModuleOptions` from a populated `ProjectIndex`. |
+| `analyze_office_file(path, *, only=None, severity_overrides=None, conditional_compilation=None, inline_suppression=True)` | The same for any readable Office container (Excel, Word, PowerPoint, Access); the extension selects the host model. |
+| `host_token_for_file_name(name)` | The host a container implies (`excel`, `word`, `powerpoint`, `access`), or `None`. |
+| `host_object_model_for_token(host)` | The model a host token selects: `None` for Excel (the default), the host's own model, or the empty model when a named host has none. |
+| `analyze_module_options_for(index, name, kind, *, severity_overrides=None, conditional_compilation=None, whole_project=True, inline_suppression=True, host=None)` | Build per-module `AnalyzeModuleOptions` from a populated `ProjectIndex`. |
 | `build_project_index(modules)` | A `ProjectIndex` with every module registered. |
 | `AnalyzeModuleOptions` | Inputs for `analyze_module` (name, kind, project context, overrides). |
 | `VbaDiagnostic` | A single diagnostic (`code`, `message`, `severity`, `span`, `spec_reference`). |
@@ -69,7 +72,7 @@ them directly, but they are public and stable.
 | `pyvbaanalysis.conditional` | Conditional-compilation indexing and activity (`index_conditional_compilation`, `evaluate_conditional_expression`, ...). |
 | `pyvbaanalysis.types` | Type-name helpers: `normalize_type`, `is_known_scalar_type`, `is_numeric_type`, `numeric_literal_bounds`. |
 | `pyvbaanalysis.completion` | Member-completion surface and project-type resolution (`resolve_member_surface_at`, `resolve_type_name`, ...). |
-| `pyvbaanalysis.host` | The Excel host object model (`get_excel_object_model`, `resolve_host_alias`, ...). |
+| `pyvbaanalysis.host` | The Excel, Word, PowerPoint and Access host object models and the host registry (`get_excel_object_model`, `host_object_model_for_token`, `resolve_host_alias`, ...). |
 | `pyvbaanalysis.runtime` | VBA runtime functions, constants, and objects (`resolve_runtime_function`, ...). |
 | `pyvbaanalysis.call` | Call-statement shape helpers. |
 | `pyvbaanalysis.flow` | Procedure labels and unstructured-flow detection. |

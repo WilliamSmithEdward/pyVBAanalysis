@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from ...host.host_model import is_host_member_name
+from ...host.host_model import HostObjectModel, is_host_member_name
 from ...lexer.token_kinds import VbaToken
 from ...parser.nodes import LeafStatementNode, ProcedureNode, Span
 from ...runtime import resolve_runtime_object, resolve_runtime_object_type
@@ -42,6 +42,7 @@ def check_late_bound_friend_member(
     symbols: ModuleSymbols,
     project_visible_symbols: Sequence[VbaSymbol] | None,
     project_class_members: Sequence[VbaProjectClassMembers],
+    host_model: HostObjectModel | None,
     push: PushFn,
 ) -> ProcedureStatementVisitor:
     """Per-statement rule: member access on a late-bound receiver where the member
@@ -55,7 +56,7 @@ def check_late_bound_friend_member(
     Firing only on names that resolve EXCLUSIVELY to Friend members keeps the
     rule on the one case where there is provably no legal late-bound target
     anywhere in scope."""
-    friend_only = _friend_only_member_names(project_class_members)
+    friend_only = _friend_only_member_names(project_class_members, host_model)
     if not friend_only:
         return lambda member: None
 
@@ -214,6 +215,7 @@ def _matching_open_paren(toks: Sequence[VbaToken], close_index: int) -> int | No
 
 def _friend_only_member_names(
     project_class_members: Sequence[VbaProjectClassMembers],
+    host_model: HostObjectModel | None,
 ) -> dict[str, list[str]]:
     """Member names that appear ONLY as Friend members of project class modules.
 
@@ -237,7 +239,7 @@ def _friend_only_member_names(
     for lower, owners in friend_owners.items():
         if lower in disqualified:
             continue
-        if is_host_member_name(lower):
+        if is_host_member_name(lower, host_model):
             continue
         if _is_runtime_object_member_name(lower):
             continue

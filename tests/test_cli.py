@@ -263,7 +263,7 @@ def test_cli_unreadable_workbook_solo_exits_one(
     def _boom(_path: object) -> object:
         raise WorkbookReadError("cannot read broken.xlsm")
 
-    monkeypatch.setattr(cli_mod, "read_workbook_modules", _boom)
+    monkeypatch.setattr(cli_mod, "read_office_modules", _boom)
     code = main([str(bad)])
     assert code == 1
     assert "cannot read broken.xlsm" in capsys.readouterr().err

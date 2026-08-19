@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import TypedDict
+
+from ..identity_cache import IdentityLru
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -41,12 +44,15 @@ class HostType(TypedDict, total=False):
 
 
 class HostObjectModel(TypedDict):
+    # Mapping rather than dict: a model is read-only data shared across every
+    # analysis pass, and the empty model is a frozen singleton, so nothing may
+    # mutate one in place.
     source: str
-    aliases: dict[str, str]
-    globals: dict[str, str]
-    constants: dict[str, HostConstant]
-    types: dict[str, HostType]
-    memberSignatures: dict[str, dict[str, str]]
+    aliases: Mapping[str, str]
+    globals: Mapping[str, str]
+    constants: Mapping[str, HostConstant]
+    types: Mapping[str, HostType]
+    memberSignatures: Mapping[str, Mapping[str, str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,11 +61,31 @@ class HostGlobal:
     type: str
 
 
-@lru_cache(maxsize=1)
-def get_excel_object_model() -> HostObjectModel:
-    """Load and cache the vendored Excel host object model from data/excel_host_model.json."""
-    raw = json.loads((_DATA_DIR / "excel_host_model.json").read_text(encoding="utf-8"))
+@lru_cache(maxsize=None)
+def _load_host_model(file_name: str) -> HostObjectModel:
+    """Load and cache one vendored host object model from the data directory."""
+    raw = json.loads((_DATA_DIR / file_name).read_text(encoding="utf-8"))
     return raw  # type: ignore[no-any-return]
+
+
+def get_excel_object_model() -> HostObjectModel:
+    """The vendored Excel host object model (data/excel_host_model.json)."""
+    return _load_host_model("excel_host_model.json")
+
+
+def get_word_object_model() -> HostObjectModel:
+    """The vendored Word host object model (data/word_host_model.json)."""
+    return _load_host_model("word_host_model.json")
+
+
+def get_powerpoint_object_model() -> HostObjectModel:
+    """The vendored PowerPoint host object model (data/powerpoint_host_model.json)."""
+    return _load_host_model("powerpoint_host_model.json")
+
+
+def get_access_object_model() -> HostObjectModel:
+    """The vendored Access host object model (data/access_host_model.json)."""
+    return _load_host_model("access_host_model.json")
 
 
 def _default(model: HostObjectModel | None) -> HostObjectModel:
@@ -84,14 +110,21 @@ class _HostModelIndex:
     globals_by_lower: dict[str, str]
 
 
-_MODEL_INDEX_CACHE: dict[int, _HostModelIndex] = {}
-_CONSTANT_INDEX_CACHE: dict[int, dict[str, HostConstant]] = {}
+# Identity-keyed, and deliberately IdentityLru rather than a bare dict[int, ...]:
+# these memos are keyed by the identity of a model the caller owns, so the cache
+# must hold that model alive (a plain id() key is recyclable once the model is
+# collected, which would serve one model's index for another) and must stay
+# bounded (a caller that builds a model per call would otherwise grow it without
+# limit). Capacity covers the four vendored hosts plus the empty model with room
+# to spare.
+_MODEL_INDEX_CACHE = IdentityLru(capacity=8)
+_CONSTANT_INDEX_CACHE = IdentityLru(capacity=8)
 
 
 def _host_model_index(model: HostObjectModel) -> _HostModelIndex:
-    cached = _MODEL_INDEX_CACHE.get(id(model))
+    cached = _MODEL_INDEX_CACHE.get(model)
     if cached is not None:
-        return cached
+        return cached  # type: ignore[no-any-return]
     members_by_type: dict[str, _HostTypeIndex] = {}
     type_keys_by_lower: dict[str, str] = {}
     for key, type_ in model["types"].items():
@@ -117,17 +150,15 @@ def _host_model_index(model: HostObjectModel) -> _HostModelIndex:
         if key_lower not in globals_by_lower:
             globals_by_lower[key_lower] = global_type
     index = _HostModelIndex(members_by_type, type_keys_by_lower, globals_by_lower)
-    _MODEL_INDEX_CACHE[id(model)] = index
-    return index
+    return _MODEL_INDEX_CACHE.put(index, model)  # type: ignore[no-any-return]
 
 
 def _host_constant_index(model: HostObjectModel) -> dict[str, HostConstant]:
-    cached = _CONSTANT_INDEX_CACHE.get(id(model))
+    cached = _CONSTANT_INDEX_CACHE.get(model)
     if cached is not None:
-        return cached
+        return cached  # type: ignore[no-any-return]
     index = {key.lower(): constant for key, constant in (model.get("constants") or {}).items()}
-    _CONSTANT_INDEX_CACHE[id(model)] = index
-    return index
+    return _CONSTANT_INDEX_CACHE.put(index, model)  # type: ignore[no-any-return]
 
 
 def get_host_type(qualified: str, model: HostObjectModel | None = None) -> HostType | None:
@@ -141,7 +172,7 @@ def get_host_members(qualified: str, model: HostObjectModel | None = None) -> li
     return type_index.members if type_index is not None else []
 
 
-_HOST_MEMBER_NAMES_CACHE: dict[int, set[str]] = {}
+_HOST_MEMBER_NAMES_CACHE = IdentityLru(capacity=8)
 
 
 def is_host_member_name(name: str, model: HostObjectModel | None = None) -> bool:
@@ -152,13 +183,13 @@ def is_host_member_name(name: str, model: HostObjectModel | None = None) -> bool
     in the host model at all?". Answering yes keeps them quiet; the set is
     deliberately broad for that reason. Case-insensitive."""
     resolved = _default(model)
-    names = _HOST_MEMBER_NAMES_CACHE.get(id(resolved))
+    names = _HOST_MEMBER_NAMES_CACHE.get(resolved)
     if names is None:
         names = set()
         for type_index in _host_model_index(resolved).members_by_type.values():
             names.update(type_index.by_lower_name)
             names.update(type_index.raw_by_lower_name)
-        _HOST_MEMBER_NAMES_CACHE[id(resolved)] = names
+        _HOST_MEMBER_NAMES_CACHE.put(names, resolved)
     return name.lower() in names
 
 
@@ -226,11 +257,23 @@ def resolve_member_return_type(
     return member.get("returns") if member is not None else None
 
 
-@lru_cache(maxsize=1)
-def application_member_names() -> frozenset[str]:
+_APPLICATION_MEMBER_NAMES = IdentityLru(capacity=8)
+
+
+def application_member_names(model: HostObjectModel | None = None) -> frozenset[str]:
     """Lowercased member names of the host Application global (for the implicit-member
-    negative lookup: `Calculate`, `Range`, ... are unqualified Application members)."""
-    model = get_excel_object_model()
-    app_type = resolve_host_global("Application", model)
-    members = get_host_members(app_type, model) if app_type is not None else []
-    return frozenset(member["name"].lower() for member in members)
+    negative lookup: `Calculate`, `Range`, ... are unqualified Application members).
+
+    Keyed per model, so a Word caller gets Word's set and a host with no model
+    injects nothing at all. Each vendored model is a cached singleton, so
+    identity keying is stable across calls.
+    """
+    resolved = _default(model)
+    cached = _APPLICATION_MEMBER_NAMES.get(resolved)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    app_type = resolve_host_global("Application", resolved)
+    members = get_host_members(app_type, resolved) if app_type is not None else []
+    return _APPLICATION_MEMBER_NAMES.put(  # type: ignore[no-any-return]
+        frozenset(member["name"].lower() for member in members), resolved
+    )

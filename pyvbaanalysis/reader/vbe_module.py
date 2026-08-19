@@ -32,7 +32,7 @@ _VB_BASE_GUID_RE = re.compile(
     r"([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})",
     re.IGNORECASE | re.MULTILINE,
 )
-# The Excel host document-module coclass CLSIDs. A document module's VB_Base is one
+# The host document-module coclass CLSIDs. A document module's VB_Base is one
 # of these; a class module's is the generic VBA class base
 # ({FCFB3D2A-A0FA-1068-A738-08002B3371B5}), which is deliberately not listed.
 _DOCUMENT_BASE_GUIDS = frozenset(
@@ -40,7 +40,19 @@ _DOCUMENT_BASE_GUIDS = frozenset(
         "00020819-0000-0000-C000-000000000046",  # Excel.Workbook (ThisWorkbook)
         "00020820-0000-0000-C000-000000000046",  # Excel.Worksheet (sheet modules)
         "00020821-0000-0000-C000-000000000046",  # Excel.Chart (chart sheet modules)
+        "00020906-0000-0000-C000-000000000046",  # Word.Document (ThisDocument)
     }
+)
+# Host code-behind that names no CLSID: Word's ThisDocument declares
+# VB_Base = "1Normal.ThisDocument". Office marks every document module
+# PredeclaredId + Exposed and nothing else it authors gets both, so the pair is
+# the host-generic document signature (UserForms are Exposed = False and are
+# caught by the designer block before this runs).
+_VB_PREDECLARED_TRUE_RE = re.compile(
+    r'^\s*Attribute\s+VB_PredeclaredId\s*=\s*True\s*$', re.IGNORECASE | re.MULTILINE
+)
+_VB_EXPOSED_TRUE_RE = re.compile(
+    r'^\s*Attribute\s+VB_Exposed\s*=\s*True\s*$', re.IGNORECASE | re.MULTILINE
 )
 # A UserForm designer block opens with ``Begin {GUID} Name`` (a 38-char braced GUID).
 _DESIGNER_BEGIN_RE = re.compile(r"^\s*Begin\s*\{[0-9A-Fa-f-]{36}\}", re.MULTILINE)
@@ -106,9 +118,13 @@ def classify_module_kind(
 
     Signals, strongest first: a UserForm designer block or ``.frm`` extension; an
     ``Attribute VB_Base`` line whose GUID is a host document coclass (ThisWorkbook,
-    sheet, or chart modules); then the file extension or the pyOpenVBA standard/other
-    flag; falling back to the ``VERSION ... CLASS`` header. ``pyopenvba_standard`` is
-    True for a pyOpenVBA standard module, False for its "other" bucket
+    sheet, chart, or Word ThisDocument modules); a ``.bas`` extension or a
+    pyOpenVBA standard flag, each of which states outright that the module is
+    standard; the host-generic PredeclaredId + Exposed pair, which identifies
+    document code-behind that names no CLSID (Word's ThisDocument declares
+    ``VB_Base = "1Normal.ThisDocument"``); then ``.cls`` or the pyOpenVBA "other"
+    bucket; falling back to the ``VERSION ... CLASS`` header. ``pyopenvba_standard``
+    is True for a pyOpenVBA standard module, False for its "other" bucket
     (class/document/designer), or None when no workbook reader supplied it.
     """
     ext = (extension or "").lower().lstrip(".")
@@ -118,12 +134,16 @@ def classify_module_kind(
     base = _VB_BASE_GUID_RE.search(head)
     if base is not None and base.group(1).upper() in _DOCUMENT_BASE_GUIDS:
         return ModuleSymbolKind.DOCUMENT
-    if ext == "bas":
+    # A standard module is never a document, and both a .bas extension and the
+    # container's own module-type flag say so directly, so each outranks the
+    # attribute signature below; upstream only ever applies that signature where
+    # neither statement is available (a workbook read, or a .cls file).
+    if ext == "bas" or pyopenvba_standard is True:
         return ModuleSymbolKind.STANDARD
+    if _VB_PREDECLARED_TRUE_RE.search(head) and _VB_EXPOSED_TRUE_RE.search(head):
+        return ModuleSymbolKind.DOCUMENT
     if ext == "cls":
         return ModuleSymbolKind.CLASS
-    if pyopenvba_standard is True:
-        return ModuleSymbolKind.STANDARD
     if pyopenvba_standard is False:
         return ModuleSymbolKind.CLASS
     return ModuleSymbolKind.CLASS if _VERSION_CLASS_RE.match(head) else ModuleSymbolKind.STANDARD

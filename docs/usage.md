@@ -136,21 +136,53 @@ analyze_loose_files(["Module1.bas", "Widget.cls"])     # several, as one project
 skipped for it (see "Whole project vs a single file" below). Use `analyze_loose_files`
 to analyze several files together with shared cross-module context.
 
-### Excel workbooks (.xlsm / .xlsb / .xlam / .xls)
+### Office macro containers
 
-The workbook reader reads VBA directly out of an Excel file via pyOpenVBA (the one
+The container reader reads VBA directly out of an Office file via pyOpenVBA (the one
 runtime dependency). pyOpenVBA is imported lazily, so `import pyvbaanalysis` stays
-light. The analyzer targets Excel VBA; Word and PowerPoint are out of scope.
+light.
+
+| Host | Extensions |
+| --- | --- |
+| Excel | `.xlsm`, `.xlsb`, `.xlam`, `.xls` |
+| Word | `.docm`, `.dotm`, `.doc` |
+| PowerPoint | `.pptm`, `.potm` |
+| Access | `.accdb`, `.mdb` (read-only) |
 
 ```python
-from pyvbaanalysis import analyze_workbook
+from pyvbaanalysis import analyze_office_file
 
-analyze_workbook("Book.xlsm")                  # dict: module name -> diagnostics
-analyze_workbook("Book.xlsm", only=["Sheet1"]) # one module by name, full context
+analyze_office_file("Book.xlsm")                  # dict: module name -> diagnostics
+analyze_office_file("Report.docm")                # resolved against Word's model
+analyze_office_file("Book.xlsm", only=["Sheet1"]) # one module by name, full context
 ```
 
-A path that is not an Excel workbook, or a container with no readable VBA, raises
-`WorkbookReadError`.
+The extension selects the host, so Word code is measured against Word's object model
+and never against Excel's. Analyzing a Word module under Excel's model reports
+members and constants that are perfectly legal in Word (`Selection.TypeText`,
+`ActiveDocument`, `wdOrientPortrait`), which is the false positive this avoids.
+
+`analyze_workbook` remains the Excel-only entry point and is unchanged.
+
+A path that is not a readable container, or a container with no readable VBA, raises
+`WorkbookReadError`. Legacy `.ppt` is not readable: pyOpenVBA reads it as a plain
+CFB, but its VBA project sits inside a compressed record, so the extension is
+rejected rather than failing later with a parse error
+([pyOpenVBA #17](https://github.com/WilliamSmithEdward/pyOpenVBA/issues/17)).
+
+### Choosing the host yourself
+
+When you already have the module text, name the host directly. Absent means Excel,
+so existing calls are unchanged; a named host with no model asserts no host
+knowledge at all rather than falling back to Excel's.
+
+```python
+from pyvbaanalysis import analyze_project
+
+analyze_project(modules, host="word")      # Word's object model
+analyze_project(modules, host="outlook")   # no model yet: stays quiet, never Excel's
+analyze_project(modules)                   # Excel, exactly as before
+```
 
 The reader loads the workbook and its VBA into memory and does not bound the input
 size, so impose your own limit (for example a maximum file size) before pointing it
@@ -227,8 +259,9 @@ pyvbaanalysis Book.xlsm --format json
 ```
 
 A path may be a loose file, a folder of loose files (analyzed together as one
-project), or an Excel workbook. `pyvbaanalysis --version` prints the version, and
-`python -m pyvbaanalysis` is equivalent to the `pyvbaanalysis` command.
+project), or an Office macro container, whose extension selects the host model.
+`pyvbaanalysis --version` prints the version, and `python -m pyvbaanalysis` is
+equivalent to the `pyvbaanalysis` command.
 
 Flags:
 

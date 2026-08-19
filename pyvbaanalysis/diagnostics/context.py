@@ -70,6 +70,11 @@ class AnalyzeModuleOptions:
     known_non_type_names: AbstractSet[str] | None = None
     project_integer_constants: Mapping[str, str | None] | None = None
     host_model: Any = None  # HostObjectModel (from the host package)
+    # Which Office host the module belongs to, as a token ("excel", "word",
+    # "powerpoint", "access", ...). Resolved through the host registry when
+    # host_model is not supplied directly: absent means Excel, and a named host
+    # with no model means no host knowledge at all rather than Excel's.
+    host: str | None = None
     conditional_compilation: ConditionalCompilationEnvironment | None = None
     parsed_module: ModuleNode | None = None
 
