@@ -9,6 +9,8 @@ The headline entry points are re-exported here for convenience:
 * analyze_project(modules): analyze a set of modules with cross-module context.
 * analyze_workbook(path): analyze the VBA in an Excel workbook (read via pyOpenVBA,
   the one external runtime dependency).
+* analyze_office_file(path): the same for any Office macro container (Excel, Word,
+  PowerPoint, or read-only Access), resolving against that host's object model.
 * analyze_loose_file(path) / analyze_loose_files(paths): analyze loose
   .bas / .cls / .frm export files.
 
@@ -30,10 +32,16 @@ from .diagnostics import (
     validate_severity_overrides,
 )
 from .project import analyze_module_options_for, analyze_project, build_project_index
-from .reader import analyze_loose_file, analyze_loose_files, analyze_workbook
+from .host import host_object_model_for_token, host_token_for_file_name
+from .reader import (
+    analyze_loose_file,
+    analyze_loose_files,
+    analyze_office_file,
+    analyze_workbook,
+)
 from .symbols import ModuleInput, ModuleSymbolKind, ProjectIndex, ProjectIndexOptions
 
-__version__ = "1.4.2"
+__version__ = "2.0.0"
 
 __all__ = [
     "AnalyzeModuleOptions",
@@ -50,9 +58,12 @@ __all__ = [
     "analyze_loose_files",
     "analyze_module",
     "analyze_module_options_for",
+    "analyze_office_file",
     "analyze_project",
     "analyze_workbook",
     "build_project_index",
+    "host_object_model_for_token",
+    "host_token_for_file_name",
     "line_col",
     "rule_metadata_by_code",
     "validate_severity_overrides",

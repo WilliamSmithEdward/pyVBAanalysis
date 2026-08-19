@@ -5,6 +5,92 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 2.0.0 - 2026-08-19
+
+Multi-host analysis: VBA is now measured against the object model of the Office
+host it actually belongs to. Ports the XLIDE host-model seam and the Word,
+PowerPoint and Access models (xlide_vscode 790e6ea and e56098b, its issues #24
+and #25).
+
+### Added
+
+* A host seam on the analysis entry points. `analyze_project` and
+  `analyze_module_options_for` take a `host` token (`"excel"`, `"word"`,
+  `"powerpoint"`, `"access"`, ...), and `AnalyzeModuleOptions` carries `host`
+  alongside the existing `host_model`. The semantics are deliberately
+  asymmetric: absent means Excel, so every existing caller is unchanged, while a
+  NAMED host with no model asserts no host knowledge rather than falling back to
+  Excel's. An explicit `host_model` still outranks the token.
+* Word, PowerPoint and Access object models, vendored as
+  `data/{word,powerpoint,access}_host_model.json` and extracted mechanically by
+  `tools/extract_host_model.mjs` from the generated XLIDE host modules, the same
+  pipeline that has always produced the Excel model. 364, 201 and 188
+  member-bearing types; 3,742, 1,480 and 1,116 enum constants. Every type is
+  non-exhaustive by construction, so absence never becomes a finding.
+* `analyze_office_file(path)` and `read_office_modules(path)` read any container
+  pyOpenVBA opens: Excel (`.xlsm`, `.xlsb`, `.xlam`, `.xls`), Word (`.docm`,
+  `.dotm`, `.doc`), PowerPoint (`.pptm`, `.potm`) and Access (`.accdb`, `.mdb`,
+  read-only). The extension selects the host, so a Word document is analyzed
+  against Word's model without the caller saying anything. The CLI accepts them
+  all on the same footing.
+* `host_token_for_file_name` and `host_object_model_for_token` on the public API.
+
+### Fixed
+
+* Word VBA no longer false-positives against Excel's object model. Analyzing a
+  Word module as a project previously reported four findings on legal code:
+  `ActiveDocument` twice and `wdOrientPortrait` as undeclared variables, and
+  `Selection.TypeText` as `member-not-found` against `Excel.Range`. Under the
+  Word host it reports none.
+* Host metadata is per-model throughout, closing the Excel defaults that
+  remained under the seam. Application-member injection is keyed by model
+  (`Volatile` is a known bare call under Excel and unknown under Word), and the
+  four rules that consulted host metadata with a bare Excel default now take the
+  caller's model: undeclared variables, unknown call, ambiguous enum references,
+  and late-bound Friend members. `Me` types host-correctly in a document module:
+  `ThisWorkbook` is `Excel.Workbook` under Excel, `ThisDocument` is
+  `Word.Document` under Word, and nothing is asserted anywhere else.
+* Word's `ThisDocument` classifies as a document module. It declares
+  `VB_Base = "1Normal.ThisDocument"`, naming no CLSID, so GUID matching missed
+  it; the host-generic signature is the `VB_PredeclaredId` + `VB_Exposed` pair
+  that Office gives every document module. A `.bas` extension or the container's
+  own standard-module flag still outranks that signature, since either states
+  outright that the module is standard. Differentialled across 116 modules in 16
+  real workbooks: nothing reclassified.
+* A named host with no object model no longer reports what it cannot know. An
+  empty model is not uniformly quieter than Excel's: member lookups go silent
+  because no type resolves, but the rules that ask whether a bare name is legal
+  would answer no for every global the host injects, turning an Outlook
+  project's own surface into a wall of `undeclared-variable` findings. The four
+  rules that need host knowledge now stay silent under an unmodelled host, for
+  the same reason they already do on a partial project view.
+* The host-model memos no longer key on a bare `id(model)`. Three caches
+  (`_host_model_index`, `_host_constant_index`, and the host-member name set)
+  used a plain `dict[int, ...]` that kept no reference to the model, so entries
+  accumulated one per model object ever seen and a collected model's id could be
+  recycled by a later one, serving one model's index for another. They now use
+  the repo's `IdentityLru`, which holds its keys alive and stays bounded. Latent
+  before this release, since only the permanently-live Excel singleton was ever
+  passed; reachable now that callers choose models.
+
+### Changed
+
+* `analyze_workbook` and `read_workbook_modules` keep their Excel-only contract
+  unchanged. Handed a container the generic reader could open, they now name
+  `analyze_office_file` in the error rather than only rejecting the extension.
+* README, the usage guide, the API reference and agent.md describe the four
+  hosts; agent.md's pyOpenVBA floor was stale at 3.0.1 and now reads 3.4.0.
+
+### Known limits
+
+* Legacy `.ppt` is not readable. pyOpenVBA 3.4.0 lists it but reads it as a
+  plain CFB, while the VBA project lives in a zlib-compressed CFB inside an
+  `ExOleObjStg` record, so every open fails on the missing `dir` stream. The
+  extension is rejected up front rather than failing later with a parse error
+  that reads like file corruption. Reported as pyOpenVBA issue #17.
+* Access is read-only, following pyOpenVBA: Access executes compiled p-code, so
+  a source write would silently change nothing.
+
 ## 1.4.2 - 2026-08-03
 
 ### Fixed
