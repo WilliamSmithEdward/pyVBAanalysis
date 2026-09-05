@@ -1,12 +1,12 @@
-"""Behaviour added by the sync to XLIDE 6.1.2.
-
-Two changes with teeth:
+"""Behaviour added by the sync to XLIDE 6.1.2 and 6.2.0.
 
 * ``ambiguousProjectProcedure`` (new rule): VBA refuses to compile an unqualified
   call to a name two modules export.
 * ``missingReturnAssignment`` widened from untyped functions only to every
   Function and Property Get, which required three detector fixes so the widening
   did not manufacture false positives.
+* A module's own procedures shadow the host's globals as receivers (6.2.0,
+  XLIDE issue #68).
 """
 
 from __future__ import annotations
@@ -167,3 +167,53 @@ def test_a_property_get_is_covered_too() -> None:
 
 def test_a_sub_is_not_covered() -> None:
     assert _codes("Public Sub S()\nEnd Sub\n") == []
+
+
+# -- a module's own members shadow the host's globals (XLIDE issue #68) ----
+
+
+@pytest.mark.parametrize(
+    ("declaration", "name", "expected_type"),
+    [
+        ("Public Property Get rows() As Widget\nEnd Property\n", "rows", "Widget"),
+        ("Public Function rows() As Widget\nEnd Function\n", "rows", "Widget"),
+        ("Public Function speak() As String\nEnd Function\n", "speak", "String"),
+        # A Sub yields nothing readable, but it still shadows the global rather
+        # than letting the host answer for the name.
+        ("Public Sub rows()\nEnd Sub\n", "rows", None),
+    ],
+)
+def test_a_module_procedure_binds_as_a_receiver(
+    declaration: str, name: str, expected_type: str | None
+) -> None:
+    from pyvbaanalysis.completion.member_access import (
+        MemberCompletionContext,
+        _find_declared_binding,
+    )
+
+    source = f"Option Explicit\n\n{declaration}\nPublic Sub Use()\n    {name}.Anything\nEnd Sub\n"
+    binding = _find_declared_binding(source, len(source) - 12, name, MemberCompletionContext())
+    assert binding is not None
+    assert binding.as_type == expected_type
+
+
+def test_an_undeclared_name_still_binds_to_nothing() -> None:
+    from pyvbaanalysis.completion.member_access import (
+        MemberCompletionContext,
+        _find_declared_binding,
+    )
+
+    source = "Option Explicit\n\nPublic Sub Use()\n    missing.Anything\nEnd Sub\n"
+    assert _find_declared_binding(source, len(source) - 12, "missing", MemberCompletionContext()) is None
+
+
+def test_a_member_named_after_an_excel_global_is_not_measured_against_it() -> None:
+    """`rows` is this module's own Property Get, so `rows.Where(p)` is legal.
+    Letting Excel's `Rows` win the bare name reported `Excel.Range.Where`."""
+    source = (
+        "Option Explicit\n\nPublic Property Get rows() As Widget\n    Set rows = Nothing\n"
+        "End Property\n\nPublic Function Where(ByVal p As Variant) As Widget\n"
+        "    Set Where = Nothing\nEnd Function\n\n"
+        "Public Function Use(ByVal p As Variant) As Widget\n    Set Use = rows.Where(p)\nEnd Function\n"
+    )
+    assert _codes(source, module_kind=ModuleSymbolKind.CLASS) == []

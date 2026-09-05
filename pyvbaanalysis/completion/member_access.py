@@ -42,6 +42,7 @@ from ..parser.nodes import (
     LeafStatementNode,
     ModuleNode,
     ProcedureNode,
+    ProcKind,
     VariableGroupNode,
     is_leaf_statement,
 )
@@ -1088,7 +1089,31 @@ def _find_declared_binding(
             hit = _match_group(mem, lower)
             if hit is not None:
                 return hit
-    return None
+    return _module_procedure_binding(module, lower)
+
+
+def _module_procedure_binding(module: ModuleNode, lower: str) -> _DeclaredBinding | None:
+    """A module-level procedure of this name, as a receiver.
+
+    The module's own members shadow the host's globals, and this is where the two
+    used to disagree: a module VARIABLE named `rows` resolved from the declaration
+    above, while `Public Property Get rows() As Widget` fell through to Excel's
+    global `Rows`, so `rows.Where(p)` was measured against `Excel.Range`
+    (XLIDE issue #68). The names that collide are the ones every workbook uses:
+    rows, columns, cells, selection, names, sheets, application.
+
+    A Function or Property Get yields its return type. A Sub, or a Property with
+    only Let/Set, yields nothing readable, but it still shadows the global, so it
+    binds with no type rather than letting the host answer for it.
+    """
+    shadow: _DeclaredBinding | None = None
+    for mem in module.members:
+        if not isinstance(mem, ProcedureNode) or mem.name.lower() != lower:
+            continue
+        if mem.proc_kind in (ProcKind.FUNCTION, ProcKind.PROPERTY_GET):
+            return _DeclaredBinding(as_type=mem.return_type or None)
+        shadow = _DeclaredBinding(as_type=None)
+    return shadow
 
 
 def _find_in_body(body: Sequence[BodyNode], lower: str) -> _DeclaredBinding | None:
