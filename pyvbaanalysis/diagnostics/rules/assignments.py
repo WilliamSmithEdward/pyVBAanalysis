@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from ...completion.member_access import (
@@ -72,6 +73,7 @@ from ..walker import (
     first_executable_token_index,
     for_each_statement,
     set_assignment_target,
+    statement_and_branch_spans,
     statement_tokens,
     statement_tokens_after_leading_label,
     strip_header_brackets,
@@ -470,24 +472,68 @@ def check_set_assignments(
     return factory
 
 
+_DECLARATION_ONLY_RE = re.compile(r"^(Dim|Const|Static|ReDim)\b", re.IGNORECASE)
+_ERR_RAISE_RE = re.compile(r"\bErr\s*\.\s*Raise\b", re.IGNORECASE)
+_ERROR_STATEMENT_RE = re.compile(r"^Error\s", re.IGNORECASE)
+
+
+def _return_is_not_expected(
+    source: str,
+    proc: ProcedureNode,
+    activity: ConditionalActivityTracker | None,
+    is_interface: bool,
+) -> bool:
+    """Whether a missing return assignment is deliberate rather than unfinished.
+
+    An empty body is a stub where the module is a contract: a class that another
+    module declares with `Implements` states its members for the implementer to
+    fill in, so every one of them is empty on purpose. An empty Function anywhere
+    else is unfinished code and still reports. A body that raises never returns
+    normally, so it owes no value either.
+    """
+    executable = 0
+    raises = False
+
+    def visit(stmt: LeafStatementNode) -> None:
+        nonlocal executable, raises
+        text = source[stmt.span.start : stmt.span.end].strip()
+        if not text or text.startswith("'") or _DECLARATION_ONLY_RE.match(text):
+            return
+        executable += 1
+        if _ERR_RAISE_RE.search(text) or _ERROR_STATEMENT_RE.match(text):
+            raises = True
+
+    for_each_statement(proc.body, visit, activity)
+    return (executable == 0 and is_interface) or raises
+
+
 def check_missing_return_assignments(
     source: str,
     mod: ModuleNode,
     symbols: ModuleSymbols,
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None,
     activity: ConditionalActivityTracker | None,
+    module_name: str | None,
+    implemented_interfaces: AbstractSet[str] | None,
     push: PushFn,
 ) -> None:
-    """An untyped Function/Property Get with no return assignment silently returns Empty."""
+    """A Function/Property Get with no return assignment silently returns the default."""
     module_signatures = callable_type_signatures_for(symbols, project_procedures)
+    is_interface = (
+        module_name is not None
+        and implemented_interfaces is not None
+        and module_name.lower() in implemented_interfaces
+    )
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
         if member.proc_kind not in (ProcKind.FUNCTION, ProcKind.PROPERTY_GET):
             continue
-        if not member.closed or member.return_type:
+        if not member.closed:
             continue
         if _procedure_has_return_assignment(source, member, activity, module_signatures):
+            continue
+        if _return_is_not_expected(source, member, activity, is_interface):
             continue
         proc_label = "Property Get" if member.proc_kind is ProcKind.PROPERTY_GET else "Function"
         push(
@@ -507,26 +553,56 @@ def _procedure_has_return_assignment(
     lower = proc.name.lower()
     found = False
 
+    def assigns_in(span: Span) -> bool:
+        bare = bare_assignment_target(source, span)
+        if bare is not None and bare[0].lower() == lower:
+            return True
+        set_target = set_assignment_target(source, span)
+        if set_target is not None and set_target[0].lower() == lower:
+            return True
+        call = extract_call(source, span)
+        qualified = None if call else extract_qualified_call(source, span, module_signatures)
+        effective = call or qualified
+        return effective is not None and _call_passes_name_to_by_ref_param(
+            effective, lower, module_signatures
+        )
+
     def visit(stmt: LeafStatementNode) -> None:
         nonlocal found
         if found:
             return
-        bare = bare_assignment_target(source, stmt.span)
-        if bare is not None and bare[0].lower() == lower:
-            found = True
-            return
-        set_target = set_assignment_target(source, stmt.span)
-        if set_target is not None and set_target[0].lower() == lower:
-            found = True
-            return
-        call = extract_call(source, stmt.span)
-        qualified = None if call else extract_qualified_call(source, stmt.span, module_signatures)
-        effective = call or qualified
-        if effective is not None and _call_passes_name_to_by_ref_param(effective, lower, module_signatures):
-            found = True
+        # The branch spans cover a single-line If, whose statements the walk
+        # itself does not reach (XLIDE issue #46).
+        for span in statement_and_branch_spans(stmt):
+            if assigns_in(span) or _assigns_own_field(source, span, lower):
+                found = True
+                return
 
     for_each_statement(proc.body, visit, activity)
     return found
+
+
+def _assigns_own_field(source: str, span: Span, lower: str) -> bool:
+    """True for `Name.Field = value`, which fills in a UDT or object return field by
+    field.
+
+    `MsToSystemTime.wYear = ...` IS the return assignment. Reading only a bare
+    `Name =` counts every such function as never assigning anything, which is nine
+    false positives in one real workbook alone.
+    """
+    toks = statement_tokens(source, span)
+    i = first_executable_token_index(toks)
+    if i < len(toks) and toks[i].raw_text.lower() == "let":
+        i += 1
+    name = toks[i] if i < len(toks) else None
+    nxt = toks[i + 1] if i + 1 < len(toks) else None
+    if name is None or name.raw_text.lower() != lower:
+        return False
+    if nxt is None or nxt.raw_text != ".":
+        return False
+    return any(
+        tok.kind is TokenKind.OPERATOR and tok.raw_text == "=" for tok in toks[i + 2 :]
+    )
 
 
 def _call_passes_name_to_by_ref_param(

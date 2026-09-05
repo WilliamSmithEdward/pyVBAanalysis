@@ -81,6 +81,7 @@ from .rules.expressions import (
     check_unbalanced_parens,
 )
 from .rules.duplicates import (
+    check_ambiguous_bare_procedure_calls,
     check_ambiguous_enum_member_references,
     check_duplicate_declarations,
     check_duplicate_enum_members,
@@ -176,15 +177,15 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     ),
     DiagnosticRuleEntry(
         name="duplicateProcedures",
-        run=lambda ctx, push: check_duplicate_procedures(ctx.symbols.root.children or [], push),
+        run=lambda ctx, push: check_duplicate_procedures(ctx.symbols.root.children or [], ctx.activity, push),
     ),
     DiagnosticRuleEntry(
         name="duplicateDeclarations",
-        run=lambda ctx, push: check_duplicate_declarations(ctx.symbols.root.children or [], push),
+        run=lambda ctx, push: check_duplicate_declarations(ctx.symbols.root.children or [], ctx.activity, push),
     ),
     DiagnosticRuleEntry(
         name="duplicateModuleMembers",
-        run=lambda ctx, push: check_duplicate_module_members(ctx.symbols.root.children or [], push),
+        run=lambda ctx, push: check_duplicate_module_members(ctx.symbols.root.children or [], ctx.activity, push),
     ),
     DiagnosticRuleEntry(
         name="duplicateEnumMembers",
@@ -199,6 +200,17 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="tooManyParameters", run=lambda ctx, push: check_too_many_parameters(ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="identifierTooLong", run=lambda ctx, push: check_identifier_too_long(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="udtParameterConstraints", run=lambda ctx, push: check_udt_parameter_constraints(ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(
+        name="ambiguousBareProcedureCalls",
+        procedure_statements=lambda ctx, push: check_ambiguous_bare_procedure_calls(
+            ctx.source,
+            ctx.symbols,
+            ctx.module_name,
+            ctx.opts.project_procedures,
+            ctx.opts.project_visible_symbols,
+            push,
+        ),
+    ),
     DiagnosticRuleEntry(name="ambiguousEnumMemberReferences", run=lambda ctx, push: check_ambiguous_enum_member_references(ctx.source, ctx.mod, ctx.symbols, ctx.activity, ctx.module_name, ctx.opts.known_procedures, ctx.opts.project_procedures, ctx.opts.project_class_members, ctx.opts.project_visible_symbols, ctx.opts.host_model, push)),
     DiagnosticRuleEntry(name="constAssignment", procedure_statements=lambda ctx, push: check_const_assignment(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="optionExplicit", run=lambda ctx, push: check_option_explicit(ctx.source, ctx.mod, ctx.activity, push)),
@@ -280,7 +292,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="nonScalarBinaryOperand", procedure_expressions=lambda ctx, push: check_binary_operand_scalar(ctx.symbols, push)),
     DiagnosticRuleEntry(name="argumentShapeMismatch", procedure_statements=lambda ctx, push: check_argument_shape(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="suffixedLiteralOverflow", run=lambda ctx, push: check_suffixed_literal_overflow(ctx.source, ctx.activity, push)),
-    DiagnosticRuleEntry(name="missingReturnAssignments", run=lambda ctx, push: check_missing_return_assignments(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.activity, push)),
+    DiagnosticRuleEntry(name="missingReturnAssignments", run=lambda ctx, push: check_missing_return_assignments(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.activity, ctx.opts.module_name, ctx.opts.implemented_interfaces, push)),
     DiagnosticRuleEntry(name="unknownCallStatement", procedure_statements=_unknown_call_statement),
     DiagnosticRuleEntry(name="lateBoundFriendMember", procedure_statements=_late_bound_friend_member),
 )

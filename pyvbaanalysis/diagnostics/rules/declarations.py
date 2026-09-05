@@ -1050,19 +1050,33 @@ def _fixed_length_string_length_span(source: str, span: Span) -> Span | None:
 
 
 def check_option_placement(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
-    declaration_seen = False
+    # Declarations that precede the Option under test AND could be compiled beside
+    # it: a declaration in the other arm of a chain closes no window, because only
+    # one arm is ever built (XLIDE issue #58).
+    declarations_above: list[Span] = []
     for member in active_module_members(mod, activity):
         if isinstance(member, AttributeNode):
             continue
+        # A conditional-compilation directive is not a declaration, so it does not
+        # close the window for Option statements. The live VBE compiles
+        # `#Const FLAG = 1` above `Option Explicit` (oracle case
+        # const_directive_before_option_explicit_compile), which the rule used to
+        # report as a misplaced Option (XLIDE issue #41).
+        if isinstance(member, ConditionalDirectiveNode):
+            continue
         if isinstance(member, OptionNode):
-            if declaration_seen:
+            compiled_together = any(
+                activity is None or not activity.mutually_exclusive(prior, member.span)
+                for prior in declarations_above
+            )
+            if compiled_together:
                 push(
                     "optionAfterDeclaration",
                     "Option statements must appear before any declaration or procedure.",
                     first_token_span(source, member.span),
                 )
             continue
-        declaration_seen = True
+        declarations_above.append(member.span)
 
 
 # -- checkEmptyType --------------------------------------------------------
@@ -1604,13 +1618,21 @@ def check_module_declarations_in_procedure_bodies(source: str, mod: ModuleNode, 
 
 
 def check_module_declarations_after_procedures(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
-    procedure_seen = False
+    # Procedures that precede the declaration under test AND could be compiled
+    # beside it. A procedure in one arm of a `#If` chain and a declaration in
+    # another arm never reach the compiler together, so the declaration is not
+    # "after" it in any build (XLIDE issue #58).
+    procedures_above: list[Span] = []
     malformed_conditional_blocks = scan_conditional_compilation_branch_order(mod).malformed_block_spans
     for member in active_module_members(mod, activity):
         if isinstance(member, ProcedureNode):
-            procedure_seen = True
+            procedures_above.append(member.span)
             continue
-        if not procedure_seen:
+        compiled_together = any(
+            activity is None or not activity.mutually_exclusive(prior, member.span)
+            for prior in procedures_above
+        )
+        if not compiled_together:
             continue
         hit = _module_declaration_after_procedure_hit(source, member)
         if hit is None:

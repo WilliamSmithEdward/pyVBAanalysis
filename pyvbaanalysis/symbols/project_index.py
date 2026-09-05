@@ -411,6 +411,17 @@ class ProjectIndex:
 
     # --- queries ----------------------------------------------------------
 
+    def implemented_interface_names(self) -> frozenset[str]:
+        """Lowercased names of every module some module declares with `Implements`.
+
+        A module named here is an interface, so its own members are declarations
+        for an implementer to fill in rather than unfinished code.
+        """
+        names: set[str] = set()
+        for mod in self._modules.values():
+            names.update(name.lower() for name in self._module_implements_for(mod))
+        return frozenset(names)
+
     def module_names(self) -> list[str]:
         return [m.module_name for m in self._modules.values()]
 

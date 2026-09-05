@@ -114,10 +114,42 @@ class _ConditionalFrame:
     seen_unknown: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _ConditionalArm:
+    """One arm of one `#If` chain, as a persistent stack.
+
+    ``parent`` is the enclosing chain's arm. Immutable, so an event can keep the
+    arm that was in effect when it was recorded without copying the stack, and
+    one arm is one object, which makes identity the comparison for
+    ``in_same_branch``.
+    """
+
+    chain: int
+    #: 0 for the `#If`, then one per `#ElseIf` / `#Else`.
+    index: int
+    parent: "_ConditionalArm | None"
+
+
+def _arms_diverge(a: _ConditionalArm | None, b: _ConditionalArm | None) -> bool:
+    """Whether two arm stacks disagree about which arm of a shared chain they are
+    in. The branches then exclude each other whatever the constants are worth.
+    Stacks are as deep as the source nests directives, so the walk is short."""
+    outer = a
+    while outer is not None:
+        inner = b
+        while inner is not None:
+            if outer.chain == inner.chain:
+                return outer.index != inner.index
+            inner = inner.parent
+        outer = outer.parent
+    return False
+
+
 @dataclass(slots=True)
 class _ConditionalActivityEvent:
     start: int
     activity: ConditionalActivity
+    branch: _ConditionalArm | None = None
 
 
 class ConditionalActivityTracker:
@@ -128,7 +160,7 @@ class ConditionalActivityTracker:
     def __init__(self, events: list[_ConditionalActivityEvent]) -> None:
         self._events = events
 
-    def activity_for_span(self, span: Span) -> ConditionalActivity:
+    def _event_for_span(self, span: Span) -> _ConditionalActivityEvent | None:
         # Directives starting at or after the queried offset are not applied.
         lo = -1
         hi = len(self._events) - 1
@@ -138,10 +170,40 @@ class ConditionalActivityTracker:
                 lo = mid
             else:
                 hi = mid - 1
-        return self._events[lo].activity if lo >= 0 else ConditionalActivity.ACTIVE
+        return self._events[lo] if lo >= 0 else None
+
+    def activity_for_span(self, span: Span) -> ConditionalActivity:
+        event = self._event_for_span(span)
+        return event.activity if event is not None else ConditionalActivity.ACTIVE
 
     def is_inactive(self, span: Span) -> bool:
         return self.activity_for_span(span) is ConditionalActivity.INACTIVE
+
+    def mutually_exclusive(self, a: Span, b: Span) -> bool:
+        """Whether the two spans sit in different arms of one `#If` chain, and so
+        are never compiled together however the constants evaluate."""
+        left = self._event_for_span(a)
+        right = self._event_for_span(b)
+        return _arms_diverge(
+            left.branch if left is not None else None,
+            right.branch if right is not None else None,
+        )
+
+    def in_same_branch(self, a: Span, b: Span) -> bool:
+        """Whether the two spans sit under exactly the same arms, so every build
+        either compiles both or neither.
+
+        Stricter than "not mutually exclusive": spans in two SEPARATE chains are
+        neither exclusive nor in the same branch, because a build may take one and
+        not the other. Rules that pair two pieces of one construct need this, since
+        a pairing made across different chains is a guess about a build that may
+        never exist.
+        """
+        left = self._event_for_span(a)
+        right = self._event_for_span(b)
+        return (left.branch if left is not None else None) is (
+            right.branch if right is not None else None
+        )
 
 
 def create_conditional_activity_tracker(
@@ -162,10 +224,25 @@ def _collect_conditional_activity_events(
     project_constants = _lowercased(effective_env.project_constants)
     stack: list[_ConditionalFrame] = []
     current = ConditionalActivity.ACTIVE
+    branch: _ConditionalArm | None = None
+    chains = 0
     events: list[_ConditionalActivityEvent] = []
     for occ in directives:
         current = _apply_conditional_directive(occ.directive, effective_env, project_constants, stack, current)
-        events.append(_ConditionalActivityEvent(start=occ.directive.span.start, activity=current))
+        kind = occ.directive.directive_kind
+        if kind is ConditionalDirectiveKind.IF:
+            branch = _ConditionalArm(chain=chains, index=0, parent=branch)
+            chains += 1
+        elif kind in (ConditionalDirectiveKind.ELSE_IF, ConditionalDirectiveKind.ELSE):
+            # An `#ElseIf` with no open `#If` is a parse-level error; leave the
+            # stack alone rather than inventing an arm for it.
+            if branch is not None:
+                branch = _ConditionalArm(chain=branch.chain, index=branch.index + 1, parent=branch.parent)
+        elif kind is ConditionalDirectiveKind.END_IF:
+            branch = branch.parent if branch is not None else None
+        events.append(
+            _ConditionalActivityEvent(start=occ.directive.span.start, activity=current, branch=branch)
+        )
     return events
 
 

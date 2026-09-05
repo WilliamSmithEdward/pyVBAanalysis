@@ -68,6 +68,10 @@ class AnalyzeModuleOptions:
     project_types: Sequence[VbaProjectTypeName] | None = None
     project_visible_symbols: Sequence[VbaSymbol] | None = None
     known_non_type_names: AbstractSet[str] | None = None
+    # Lowercased names of every module some module in the project declares with
+    # `Implements`. A module named here is an interface, so its own members are
+    # declarations for an implementer to fill in rather than unfinished code.
+    implemented_interfaces: AbstractSet[str] | None = None
     project_integer_constants: Mapping[str, str | None] | None = None
     host_model: Any = None  # HostObjectModel (from the host package)
     # Which Office host the module belongs to, as a token ("excel", "word",

@@ -19,7 +19,6 @@ from ...host.host_model import HostObjectModel
 from ...flow.procedure_labels import (
     collect_procedure_label_declarations,
     collect_procedure_label_references,
-    collect_procedure_labels,
 )
 from ...lexer.token_kinds import TokenKind
 from ...lexer.tokenize import tokenize
@@ -384,6 +383,14 @@ def _check_for_next_control_variable(
         return
     if node.control_variable.lower() == node.next_variable.lower():
         return
+    # The header and its `Next` must sit under the same arms for the pairing to
+    # mean anything. A `For i` guarded by one chain and a `Next j` guarded by
+    # another is a pairing no build necessarily makes: each arm is internally
+    # consistent, and the parser just sees one loop (XLIDE issue #58).
+    if activity is not None and not activity.in_same_branch(
+        node.control_variable_span, node.next_variable_span
+    ):
+        return
     push(
         "nextVariableMismatch",
         f"Next variable '{node.next_variable}' does not match active For control variable "
@@ -482,16 +489,25 @@ def check_duplicate_labels(
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
-        seen: set[str] = set()
+        placed: dict[str, list[Span]] = {}
         for label in collect_procedure_label_declarations(source, member, activity):
-            if label.key not in seen:
-                seen.add(label.key)
+            earlier = placed.get(label.key)
+            if earlier is None:
+                placed[label.key] = [label.span]
                 continue
-            push(
-                "duplicateLabel",
-                f"Label '{label.text}' is already defined in procedure '{member.name}'.",
-                label.span,
+            # Only a label that could be compiled beside this one collides; two
+            # arms of one chain are never built together (XLIDE issue #58).
+            collides = any(
+                activity is None or not activity.mutually_exclusive(prior, label.span)
+                for prior in earlier
             )
+            earlier.append(label.span)
+            if collides:
+                push(
+                    "duplicateLabel",
+                    f"Label '{label.text}' is already defined in procedure '{member.name}'.",
+                    label.span,
+                )
 
 
 def check_undefined_labels(
@@ -500,9 +516,18 @@ def check_undefined_labels(
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
-        labels = collect_procedure_labels(source, member, activity)
+        declarations: dict[str, list[Span]] = {}
+        for label in collect_procedure_label_declarations(source, member, activity):
+            declarations.setdefault(label.key, []).append(label.span)
         for ref in collect_procedure_label_references(source, member, activity):
-            if ref.key not in labels:
+            # A label in a different arm from the reference is not a target: the
+            # build that compiles the `GoTo` does not compile that label
+            # (XLIDE issue #58).
+            reachable = any(
+                activity is None or not activity.mutually_exclusive(span, ref.span)
+                for span in declarations.get(ref.key, ())
+            )
+            if not reachable:
                 push(
                     "undefinedLabel",
                     f"Label '{ref.text}' is not defined in procedure '{member.name}'.",
@@ -559,7 +584,7 @@ def _check_if_block_else_branch_order_in_body(
 def _check_single_if_block_else_branch_order(
     source: str, node: IfBlockNode, activity: ConditionalActivityTracker | None, push: PushFn
 ) -> None:
-    seen_else = False
+    elses_above: list[Span] = []
     for child in node.body:
         if is_inactive_node(activity, child) or not is_leaf_statement(child):
             continue
@@ -567,20 +592,29 @@ def _check_single_if_block_else_branch_order(
         if not toks:
             continue
         word = token_text(toks[0])
-        if word == "elseif" and seen_else:
-            push(
-                "elseBranchOrder",
-                "'ElseIf' cannot appear after 'Else' in the same If block.",
-                absolute_span(child.span, toks[0]),
-            )
-        elif word == "else":
-            if seen_else:
+        if word not in ("elseif", "else"):
+            continue
+        # Only an `Else` that could be compiled beside this branch counts as
+        # preceding it (XLIDE issue #58).
+        after = any(
+            activity is None or not activity.mutually_exclusive(prior, child.span)
+            for prior in elses_above
+        )
+        if word == "elseif":
+            if after:
+                push(
+                    "elseBranchOrder",
+                    "'ElseIf' cannot appear after 'Else' in the same If block.",
+                    absolute_span(child.span, toks[0]),
+                )
+        else:
+            if after:
                 push(
                     "elseBranchOrder",
                     "Only one 'Else' branch is allowed in an If block.",
                     absolute_span(child.span, toks[0]),
                 )
-            seen_else = True
+            elses_above.append(child.span)
 
 
 def _conditional_directive_keyword_span(source: str, directive: ConditionalDirectiveNode) -> Span:

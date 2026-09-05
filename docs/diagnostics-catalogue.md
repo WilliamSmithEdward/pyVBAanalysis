@@ -1,6 +1,6 @@
 # Diagnostic catalogue
 
-The diagnostic codes pyVBAanalysis can emit, generated from the rule metadata (`tools/generate_diagnostics_catalogue.py`). This table lists the 118 rule-metadata codes across 6 categories. A further 3 structural block-balance codes (`mismatched-end-keyword`, `missing-block-closer`, `unmatched-block-closer`) are emitted by the parser pass and are not in the metadata table, for a full set of 121 codes.
+The diagnostic codes pyVBAanalysis can emit, generated from the rule metadata (`tools/generate_diagnostics_catalogue.py`). This table lists the 119 rule-metadata codes across 6 categories. A further 3 structural block-balance codes (`mismatched-end-keyword`, `missing-block-closer`, `unmatched-block-closer`) are emitted by the parser pass and are not in the metadata table, for a full set of 122 codes.
 
 Each code is reported only when it is provably correct; anything unknown or ambiguous stays quiet (the no-false-positive discipline). The **kind** column says what a code means: a *compile error* is rejected by the VBE compiler, a *runtime error* is a deterministic Run-time error, a *runtime risk* is a likely fault, and *style* is advisory.
 
@@ -69,11 +69,12 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `undeclared-variable` | Variable not defined | error | compile error | MS-VBAL 5.2.4.1.1 |
 | `unknown-call` | Sub or Function not defined | error | compile error | MS-VBAL 5.4.2.1 |
 
-## Semantic (50)
+## Semantic (51)
 
 | Code | Title | Default | Kind | Spec reference |
 | --- | --- | --- | --- | --- |
 | `ambiguous-enum-member` | Ambiguous Enum member reference | error | compile error | VBE compiler: Ambiguous name detected |
+| `ambiguous-project-procedure` | Ambiguous unqualified call to a name two modules export | error | compile error | VBE compiler: Ambiguous name detected |
 | `argument-count` | Wrong number of arguments | error | compile error | MS-VBAL 5.4.2.1 |
 | `argument-object-type-mismatch` | Object argument type mismatch | error | compile error | MS-VBAL 5.3.1 |
 | `argument-shape-mismatch` | Argument shape (array/Type vs scalar) mismatch | error | compile error | MS-VBAL 5.3.1 (argument passing) / VBE compiler: ByRef argument type mismatch; array or user-defined type expected |

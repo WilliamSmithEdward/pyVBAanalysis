@@ -1,24 +1,25 @@
 {
   "sourceRepo": "WilliamSmithEdward/xlide_vscode",
-  "xlideVersion": "3.1.4",
+  "xlideVersion": "6.1.2",
   "files": {
     "vbe_oracle_cases.json": {
-      "sha256": "5ef858884e93a28c2985c01c8628a7d809272c4d427cb50a6d3758302744847b",
-      "bytes": 228962
+      "sha256": "9106dcf62f8e9f131e74091bd4ab5e201e3424b3a3a8b4f46d31cc84662d116e",
+      "bytes": 231636
     },
     "diagnostic_influence_audit.json": {
-      "sha256": "649fed7768e027369cd4b242aad8b28e4e4ef32d3ac3bff991f8a755c790adaf",
-      "bytes": 132554
+      "sha256": "cb9c3e423d9b71110a41e5ac0ff95d04739dba2f13601e80d4ba0db399476ec7",
+      "bytes": 133675
     },
     "rule_metadata.json": {
-      "sha256": "2770a4961ea81301fd222e926459d74ec56c1d0bddf6a87bcda47380a83e594d",
-      "bytes": 44557
+      "sha256": "8df33601f4e377d696621ffa7d2adee037e03033c430591ebdcabeb0b3870deb",
+      "bytes": 44951
     }
   },
-  "oracleCaseCount": 415,
-  "diagnosticCodeCount": 121,
+  "oracleCaseCount": 418,
+  "diagnosticCodeCount": 122,
   "diagnosticCodes": [
     "ambiguous-enum-member",
+    "ambiguous-project-procedure",
     "analysis-suppression-directive",
     "argument-count",
     "argument-object-type-mismatch",
@@ -140,9 +141,10 @@
     "vba-test-directive",
     "withevents-declaration"
   ],
-  "ruleCount": 118,
+  "ruleCount": 119,
   "ruleNames": [
     "ambiguousEnumMember",
+    "ambiguousProjectProcedure",
     "analysisSuppressionDirective",
     "argumentCount",
     "argumentObjectTypeMismatch",

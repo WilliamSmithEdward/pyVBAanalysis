@@ -226,7 +226,10 @@ def _implements_statement_hit(source: str, span: Span) -> tuple[str, Span] | Non
 
 
 def check_implements_statement_placement(source: str, mod: ModuleNode, module_kind: ModuleSymbolKind, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
-    procedure_seen = False
+    # Procedures that precede the Implements under test AND could be compiled
+    # beside it; a procedure in another arm of a `#If` chain never reaches the
+    # compiler with it (XLIDE issue #58).
+    procedures_above: list[Span] = []
 
     def report_procedure_placement(name: str, span: Span) -> None:
         push(
@@ -242,7 +245,7 @@ def check_implements_statement_placement(source: str, mod: ModuleNode, module_ki
 
     for member in active_module_members(mod, activity):
         if isinstance(member, ProcedureNode):
-            procedure_seen = True
+            procedures_above.append(member.span)
             for_each_statement(member.body, inspect_body_statement, activity)
             continue
         if not isinstance(member, StatementNode):
@@ -258,7 +261,11 @@ def check_implements_statement_placement(source: str, mod: ModuleNode, module_ki
                 span,
             )
             continue
-        if procedure_seen:
+        compiled_together = any(
+            activity is None or not activity.mutually_exclusive(prior, member.span)
+            for prior in procedures_above
+        )
+        if compiled_together:
             report_procedure_placement(name, span)
 
 

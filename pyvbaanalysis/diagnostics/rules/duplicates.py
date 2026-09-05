@@ -8,13 +8,20 @@ by more than one visible Enum is the VBA "Ambiguous name detected" compile error
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 
 from ...conditional import ConditionalActivity, ConditionalActivityTracker
+from ..call_extraction import extract_call
+from ..walker import ProcedureStatementVisitor
+from ..callable_signatures import (
+    bare_callable_source_shadowed,
+    same_module_callable_signatures,
+    source_name_scope_for,
+)
 from ...host import application_member_names, resolve_host_global
 from ...host.host_model import HostObjectModel
-from ...parser.nodes import EnumNode, ModuleNode, ProcedureNode, Span, TypeNode
+from ...parser.nodes import EnumNode, LeafStatementNode, ModuleNode, ProcedureNode, Span, TypeNode
 from ...runtime import resolve_runtime_function, resolve_runtime_object
 from ...symbols.name_resolution import (
     BareIdentifierContext,
@@ -23,6 +30,7 @@ from ...symbols.name_resolution import (
 )
 from ...symbols.symbol_model import (
     ModuleSymbols,
+    SymbolVisibility,
     VbaProcedureSignature,
     VbaProjectClassMembers,
     VbaSymbol,
@@ -55,70 +63,106 @@ _LOCAL_DECL_KINDS = (
 )
 
 
-def check_duplicate_procedures(members: Sequence[VbaSymbol], push: PushFn) -> None:
+def _ALWAYS_COLLIDE(a: VbaSymbol, b: VbaSymbol) -> bool:
+    """Two declarations of one name always collide; only the scope differs."""
+    return True
+
+
+def _report_repeated_names(
+    symbols: Sequence[VbaSymbol],
+    activity: ConditionalActivityTracker | None,
+    declares: Callable[[VbaSymbol], bool],
+    collides: Callable[[VbaSymbol, VbaSymbol], bool],
+    report: Callable[[VbaSymbol], None],
+) -> None:
+    """Report each symbol whose name an EARLIER symbol already took.
+
+    A repeat only counts when the two could be compiled together: the arms of one
+    `#If` chain are alternatives, not duplicate declarations, since no build ever
+    sees both (XLIDE issue #58). Almost every name is taken once, so this keeps
+    one list per name and only grows it when a second symbol claims it.
+    """
+    taken: dict[str, list[VbaSymbol]] = {}
+    for sym in symbols:
+        if not declares(sym):
+            continue
+        key = sym.name.lower()
+        earlier = taken.get(key)
+        if earlier is None:
+            taken[key] = [sym]
+            continue
+        hit = any(
+            collides(prior, sym)
+            and (activity is None or not activity.mutually_exclusive(prior.name_span, sym.name_span))
+            for prior in earlier
+        )
+        earlier.append(sym)
+        if hit:
+            report(sym)
+
+
+def _procedures_collide(a: VbaSymbol, b: VbaSymbol) -> bool:
+    """Distinct accessors of one property share their name legitimately; every
+    other repeat is the ambiguity error."""
+    return a.kind not in _PROPERTY_KINDS or b.kind not in _PROPERTY_KINDS or a.kind is b.kind
+
+
+def check_duplicate_procedures(
+    members: Sequence[VbaSymbol], activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
     """A name may be one Sub/Function OR a set of distinct Property accessors."""
-    groups: dict[str, list[VbaSymbol]] = {}
-    for sym in members:
-        if not is_procedure_kind(sym.kind):
-            continue
-        groups.setdefault(sym.name.lower(), []).append(sym)
+    def report(sym: VbaSymbol) -> None:
+        push(
+            "duplicateProcedure",
+            f"Ambiguous name detected: '{sym.name}' is already declared in this module.",
+            sym.name_span,
+        )
 
-    for group in groups.values():
-        if len(group) < 2:
-            continue
-        value_proc_seen = False
-        accessor_seen: set[VbaSymbolKind] = set()
-        for sym in group:
-            is_property = sym.kind in _PROPERTY_KINDS
-            if not is_property:
-                conflict = value_proc_seen or len(accessor_seen) > 0
-                value_proc_seen = True
-            else:
-                conflict = value_proc_seen or sym.kind in accessor_seen
-                accessor_seen.add(sym.kind)
-            if conflict:
-                push(
-                    "duplicateProcedure",
-                    f"Ambiguous name detected: '{sym.name}' is already declared in this module.",
-                    sym.name_span,
-                )
+    _report_repeated_names(
+        members, activity, lambda sym: is_procedure_kind(sym.kind), _procedures_collide, report
+    )
 
 
-def check_duplicate_declarations(members: Sequence[VbaSymbol], push: PushFn) -> None:
-    """Within one procedure, a name is declared once across params/locals/consts."""
+def check_duplicate_declarations(
+    members: Sequence[VbaSymbol], activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    """Within one procedure, a name is declared once across params/locals/consts.
+
+    Procedure scope is flat in VBA (no block scope), so locals from different `If`
+    branches still collide, but locals from different `#If` arms do not, because
+    only one of those arms is ever compiled."""
     for proc in members:
         if not is_procedure_kind(proc.kind):
             continue
-        seen: set[str] = set()
-        for child in proc.children or []:
-            if child.kind not in _LOCAL_DECL_KINDS:
-                continue
-            key = child.name.lower()
-            if key in seen:
-                push(
-                    "duplicateDeclaration",
-                    f"Duplicate declaration in current scope: '{child.name}'.",
-                    child.name_span,
-                )
-            else:
-                seen.add(key)
-
-
-def check_duplicate_module_members(members: Sequence[VbaSymbol], push: PushFn) -> None:
-    """A module-level variable or constant declared more than once."""
-    seen: set[str] = set()
-    for sym in members:
-        if sym.kind not in (VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.CONSTANT):
-            continue
-        key = sym.name.lower()
-        if key in seen:
+        def report(sym: VbaSymbol) -> None:
             push(
-                "duplicateModuleMember",
-                f"Duplicate declaration: '{sym.name}' is already declared at module level.",
+                "duplicateDeclaration",
+                f"Duplicate declaration in current scope: '{sym.name}'.",
                 sym.name_span,
             )
-        else:
-            seen.add(key)
+
+        _report_repeated_names(
+            proc.children or [], activity, lambda sym: sym.kind in _LOCAL_DECL_KINDS,
+            _ALWAYS_COLLIDE, report,
+        )
+
+
+def check_duplicate_module_members(
+    members: Sequence[VbaSymbol], activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    """A module-level variable or constant declared more than once."""
+    def report(sym: VbaSymbol) -> None:
+        push(
+            "duplicateModuleMember",
+            f"Duplicate declaration: '{sym.name}' is already declared at module level.",
+            sym.name_span,
+        )
+
+    _report_repeated_names(
+        members, activity,
+        lambda sym: sym.kind in (VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.CONSTANT),
+        _ALWAYS_COLLIDE, report,
+    )
 
 
 def check_duplicate_enum_members(
@@ -311,3 +355,89 @@ def _ambiguous_enum_member_definitions(
         f"{d.module_name.lower()}:{(d.container_name or '').lower()}" for d in binding.definitions
     }
     return list(binding.definitions) if len(owner_keys) > 1 else None
+
+
+# -- checkAmbiguousBareProcedureCalls --------------------------------------
+
+
+def _ambiguous_project_procedure_owners(
+    project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None,
+    module_name: str,
+) -> dict[str, list[str]]:
+    """Names exported by more than one OTHER module, mapped to those module names.
+
+    The calling module is excluded because its own declaration would settle the
+    name before the project is consulted.
+    """
+    out: dict[str, list[str]] = {}
+    if not project_procedures:
+        return out
+    self_name = module_name.lower()
+    for name, signatures in project_procedures.items():
+        owners: list[str] = []
+        for signature in signatures:
+            # A Private procedure is not exported, so it cannot collide.
+            if signature.visibility is SymbolVisibility.PRIVATE:
+                continue
+            if not any(owner.lower() == signature.module_name.lower() for owner in owners):
+                owners.append(signature.module_name)
+        if len(owners) > 1 and not any(owner.lower() == self_name for owner in owners):
+            out[name.lower()] = owners
+    return out
+
+
+def check_ambiguous_bare_procedure_calls(
+    source: str,
+    symbols: ModuleSymbols,
+    module_name: str,
+    project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    push: PushFn,
+) -> ProcedureStatementVisitor:
+    """VBA is content for two modules to export the same public procedure name, but
+    it refuses to compile an UNQUALIFIED call to that name from a module declaring
+    neither: "Ambiguous name detected".
+
+    The finding belongs at the CALL SITE, not the declarations: a project that
+    exports a name twice and always qualifies its calls is legal VBA and common, so
+    flagging the declarations would cry wolf on every one of them.
+
+    Silent, matching VBA, when any of these settle the name: the call is qualified
+    (`Helpers.Recalculate`); the calling module declares the name itself (module-local
+    scope wins); a local, parameter or module-level symbol shadows it; or only one
+    module in the project exports it.
+    """
+    ambiguous_names = _ambiguous_project_procedure_owners(project_procedures, module_name)
+    same_module_signatures = same_module_callable_signatures(symbols)
+
+    def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
+        # No name in this project is exported twice: nothing here can be
+        # ambiguous, so skip the per-statement work entirely.
+        if not ambiguous_names:
+            return None
+        source_names = source_name_scope_for(symbols, member, project_visible_symbols)
+
+        def visitor(stmt: LeafStatementNode) -> None:
+            call = extract_call(source, stmt.span)
+            if call is None or call.qualifier:
+                return
+            lower = call.name.lower()
+            owners = ambiguous_names.get(lower)
+            if owners is None:
+                return
+            # This module declares it, so VBA binds locally and never asks.
+            if lower in same_module_signatures:
+                return
+            if bare_callable_source_shadowed(call.name, source_names):
+                return
+            push(
+                "ambiguousProjectProcedure",
+                f"Ambiguous name detected: '{call.name}' is exported by "
+                f"{' and '.join(owners)}. VBA refuses to compile the project until this "
+                "call is qualified with a module name.",
+                call.name_span,
+            )
+
+        return visitor
+
+    return factory

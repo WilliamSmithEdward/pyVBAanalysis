@@ -555,6 +555,12 @@ class StatementNode(Node):
     span: Span
     # Raw source text of the statement (without separators).
     raw: str
+    # The statements a single-line `If` executes: what follows `Then`, and what
+    # follows `Else`. None for every other statement. Recorded so a rule can reach
+    # them without re-tokenizing, and deliberately NOT walked globally: rules
+    # disagree about whether they read a statement structurally or scan its text,
+    # and a global visit double-reported the text-scanning ones (XLIDE issue #46).
+    single_line_if_branches: list[Span] | None = None
 
 
 @dataclass(slots=True)

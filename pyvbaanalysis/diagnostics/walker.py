@@ -257,6 +257,17 @@ def span_for_tokens(toks: Sequence[VbaToken], slice_start: int) -> Span:
     return Span(slice_start + toks[0].start, slice_start + toks[-1].end)
 
 
+def statement_and_branch_spans(stmt: LeafStatementNode) -> list[Span]:
+    """The statement's own span, plus the branches a single-line `If` executes.
+
+    Rules that scan statement text need the branches explicitly: the walk itself
+    does not descend into a single-line If, whose arms are part of one statement
+    (XLIDE issue #46).
+    """
+    branches = getattr(stmt, "single_line_if_branches", None)
+    return [stmt.span, *branches] if branches else [stmt.span]
+
+
 def bare_assignment_target(
     source: str, span: Span
 ) -> tuple[str, Span, list[VbaToken]] | None:
@@ -273,7 +284,13 @@ def bare_assignment_target(
         if kw == "let":
             i += 1
     name_tok = toks[i] if i < len(toks) else None
-    if name_tok is None or name_tok.kind is not TokenKind.IDENTIFIER:
+    # A name that SPELLS a keyword is still a name. The lexer classifies `Text`,
+    # `Read` and `Type` as keywords, so requiring an identifier here hid every
+    # assignment to a variable or Function named one of them: `Function Read()`
+    # assigning `Read = True` read as never assigning its own return (XLIDE issue
+    # #46). The `=` that follows is what settles it: no VBA statement keyword is
+    # followed by a bare `=` at statement start, and Set/Let are handled above.
+    if name_tok is None or name_tok.kind not in (TokenKind.IDENTIFIER, TokenKind.KEYWORD):
         return None
     nxt = toks[i + 1] if i + 1 < len(toks) else None
     if nxt is None or nxt.kind is not TokenKind.OPERATOR or nxt.raw_text != "=":

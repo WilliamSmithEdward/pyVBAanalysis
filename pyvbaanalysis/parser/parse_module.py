@@ -1436,7 +1436,31 @@ class _Parser:
         return raw
 
     def _make_statement(self, stmt: LogicalStatement) -> StatementNode:
-        return StatementNode(span=Span(stmt.start, stmt.end), raw=self._source[stmt.start : stmt.end])
+        branches = self._single_line_if_branch_spans(stmt)
+        return StatementNode(
+            span=Span(stmt.start, stmt.end),
+            raw=self._source[stmt.start : stmt.end],
+            single_line_if_branches=branches or None,
+        )
+
+    @staticmethod
+    def _single_line_if_branch_spans(stmt: LogicalStatement) -> list[Span]:
+        """The statements a single-line `If` executes: what follows `Then`, and what
+        follows `Else`. A block `If` ends at `Then` and yields none; its body is
+        parsed as ordinary statements."""
+        tokens = _code_tokens_after_line_number(stmt)
+        if not tokens or token_word(tokens[0]) != "if":
+            return []
+        starts: list[int] = []
+        for i in range(1, len(tokens)):
+            if token_word(tokens[i]) not in ("then", "else"):
+                continue
+            if i + 1 < len(tokens):
+                starts.append(tokens[i + 1].start)
+        return [
+            Span(start, starts[index + 1] if index + 1 < len(starts) else stmt.end)
+            for index, start in enumerate(starts)
+        ]
 
     @staticmethod
     def _detect_module_kind(members: Sequence[ModuleMember]) -> ModuleKind:

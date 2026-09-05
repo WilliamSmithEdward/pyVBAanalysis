@@ -68,6 +68,7 @@ def analyze_module_options_for(
         known_procedures=index.visible_procedure_names(module_name),
         known_identifiers=index.visible_identifier_names(module_name),
         known_non_type_names=index.visible_non_type_names(module_name),
+        implemented_interfaces=index.implemented_interface_names(),
     )
 
 

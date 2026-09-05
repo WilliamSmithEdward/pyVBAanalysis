@@ -27,15 +27,15 @@ _STRUCTURAL_ONLY_CODES = {
 }
 
 
-def test_catalogue_loads_118_rules() -> None:
+def test_catalogue_loads_119_rules() -> None:
     rules = load_rule_metadata()
-    assert len(rules) == 118
+    assert len(rules) == 119
     assert rules == DIAGNOSTIC_RULES  # the eager catalogue matches a fresh load
 
 
 def test_codes_are_unique() -> None:
     codes = [meta.code for meta in DIAGNOSTIC_RULES.values()]
-    assert len(codes) == len(set(codes)) == 118
+    assert len(codes) == len(set(codes)) == 119
 
 
 def test_fields_are_typed_enums() -> None:
@@ -51,7 +51,7 @@ def test_fields_are_typed_enums() -> None:
 
 def test_rule_metadata_by_code() -> None:
     by_code = rule_metadata_by_code()
-    assert len(by_code) == 118
+    assert len(by_code) == 119
     assert by_code["unterminated-string"].rule_name == "unterminatedString"
     assert by_code["unterminated-string"].default_severity is DiagnosticSeverity.ERROR
 
@@ -65,7 +65,7 @@ def test_codes_align_with_audit() -> None:
 
 def test_manifest_records_rule_metadata() -> None:
     manifest = load_manifest()
-    assert manifest["ruleCount"] == 118
+    assert manifest["ruleCount"] == 119
     assert "rule_metadata.json" in manifest["files"]
     assert sorted(manifest["ruleNames"]) == sorted(DIAGNOSTIC_RULES.keys())
 
