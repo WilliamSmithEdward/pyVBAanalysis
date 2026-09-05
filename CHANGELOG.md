@@ -5,6 +5,36 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 2.1.1 - 2026-09-05
+
+Follows XLIDE 6.2.0. The vendored data is byte-identical to 6.1.2, so only the
+manifest's version moves; the analyzer change is the one fix below.
+
+### Fixed
+
+* A module's own procedures now shadow the host's globals when used as a
+  receiver. A module VARIABLE named `rows` already resolved from its
+  declaration, but `Public Property Get rows() As Widget` fell through to
+  Excel's global `Rows`, so `rows.Where(p)` was measured against `Excel.Range`.
+  The names that collide are the ones every workbook uses: rows, columns,
+  cells, selection, names, sheets, application. A Function or Property Get now
+  yields its return type; a Sub, or a Property with only Let/Set, yields nothing
+  readable but still shadows the global rather than letting the host answer
+  (XLIDE issue #68, which this port reported upstream and which 6.2.0 fixed).
+
+  This port never emitted the false positive, because it resolved such a
+  receiver to nothing at all rather than to the wrong type. The fix replaces
+  that silence with a correct binding, so a receiver that used to go unchecked
+  is now checked: with project context, a genuinely absent member on one of
+  these names reports `member-not-found` where it previously passed. Analyzed
+  standalone, without project context, behaviour is unchanged.
+
+### Verified
+
+* Differential against the upstream 6.2.0 analyzer: 418 of 418 oracle cases
+  identical in both directions, and identical on a real workbook's modules.
+  16 real workbooks stay silent.
+
 ## 2.1.0 - 2026-09-05
 
 Sync to XLIDE 6.1.2, the analyzer's first re-pin since 3.1.4. Verified by a
