@@ -5,6 +5,69 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 2.1.0 - 2026-09-05
+
+Sync to XLIDE 6.1.2, the analyzer's first re-pin since 3.1.4. Verified by a
+differential against the upstream analyzer over the whole oracle corpus: 418 of
+418 cases identical, in both directions.
+
+### Added
+
+* `ambiguousProjectProcedure`: VBA is content for two modules to export the same
+  public procedure name, but it refuses to compile an UNQUALIFIED call to that
+  name from a module declaring neither. The finding sits at the call site, not
+  the declarations, because a project that exports a name twice and always
+  qualifies its calls is legal VBA and common. Silent when the call is
+  qualified, when the calling module declares the name itself, when a local or
+  parameter shadows it, or when only one module exports it.
+* `ConditionalActivityTracker.mutually_exclusive` and `in_same_branch`, the
+  primitive the arm-aware rules below need, plus
+  `ProjectIndex.implemented_interface_names()` and the
+  `AnalyzeModuleOptions.implemented_interfaces` option it feeds.
+
+### Fixed
+
+* Rules no longer pair declarations from mutually exclusive `#If` arms. Only one
+  arm of a chain is ever built, so two declarations in different arms are
+  alternatives rather than duplicates. With a compiler constant the analyzer
+  cannot evaluate, the ordinary `#If VBA7 / #Else` idiom reported
+  `duplicate-procedure` and `duplicate-module-variable` on legal code. The same
+  reasoning now covers duplicate declarations and labels, undefined labels,
+  `For`/`Next` pairing, `Else` branch order, `Option` placement, and `Implements`
+  placement (XLIDE issue #58).
+* A `#Const` directive may precede `Option Explicit`. A conditional-compilation
+  directive is not a declaration, and the live VBE compiles it there
+  (oracle case `const_directive_before_option_explicit_compile`).
+* Three gaps in return-assignment detection, each of which the widened rule below
+  would otherwise have turned into a false positive:
+  assigning a field of the returned value (`MsToSystemTime.wYear = ...`) is a
+  return assignment; so is an assignment inside a single-line `If`, whose
+  branches the statement walk never entered; and a name that SPELLS a keyword is
+  still an assignment target, so `Function Read()` assigning `Read = True` was
+  read as never assigning its return. Measured on one real workbook these three
+  accounted for nine false findings.
+
+### Changed
+
+* `missingReturnAssignment` now covers every Function and Property Get, not only
+  untyped ones, so a typed Function that never assigns its return reports. An
+  empty member of a module some other module declares with `Implements` stays
+  silent: that is a contract for an implementer to fill in, not unfinished code.
+  A body whose work is to raise stays silent too. **This reports on code that was
+  previously quiet**; the rule is warning severity and can be turned off through
+  `severity_overrides`.
+* The vendored host models grew with upstream's move to the whole documented
+  object model: Excel 229 to 651 types, Word 364 to 627, PowerPoint 201 to 464,
+  Access 188 to 451. The wheel grows from 0.94 MB to 1.84 MB; the models still
+  load lazily, so import cost is unchanged.
+* Data re-pinned to XLIDE 6.1.2: 418 oracle cases (was 415), 122 audited codes
+  (was 121), 119 rules (was 118).
+
+### Known limits
+
+* Upstream's form-control member work is not ported, and the oracle corpus has no
+  UserForm designer cases, so that area is untested here rather than verified.
+
 ## 2.0.0 - 2026-08-19
 
 Multi-host analysis: VBA is now measured against the object model of the Office
