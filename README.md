@@ -93,6 +93,14 @@ a compressed record the reader does not open.
 - [API reference](docs/api-reference.md)
 - [Diagnostic catalogue](docs/diagnostics-catalogue.md)
 
+## Built with this
+
+[xlide-mcp](https://github.com/WilliamSmithEdward/xlide_mcp)
+is an MCP server built on this. The diagnostics here are its build gate:
+an agent that changes a macro runs them afterwards and treats an error
+as a failure rather than a suggestion, which is most of what stops a
+model shipping VBA that does not compile.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
