@@ -1,22 +1,23 @@
 {
   "sourceRepo": "WilliamSmithEdward/xlide_vscode",
-  "xlideVersion": "6.2.0",
+  "xlideVersion": "10.6.0",
+  "xlideCommit": "5682c8fa113d4877ade8c13248c11fc6bd289717",
   "files": {
     "vbe_oracle_cases.json": {
-      "sha256": "9106dcf62f8e9f131e74091bd4ab5e201e3424b3a3a8b4f46d31cc84662d116e",
-      "bytes": 231636
+      "sha256": "1c8d4d9c11a02b3b927b50b3bee613361787faebf0494cf669f11880cabca6fe",
+      "bytes": 244899
     },
     "diagnostic_influence_audit.json": {
-      "sha256": "cb9c3e423d9b71110a41e5ac0ff95d04739dba2f13601e80d4ba0db399476ec7",
-      "bytes": 133675
+      "sha256": "e7e03302cee716361a09a3f4c3cfcf21beaa941acd28ebcbc1ae87a9e1625b99",
+      "bytes": 143061
     },
     "rule_metadata.json": {
-      "sha256": "8df33601f4e377d696621ffa7d2adee037e03033c430591ebdcabeb0b3870deb",
-      "bytes": 44951
+      "sha256": "7d3ac3f84e4061264915fc55a59b6c405e000f4d1b808decc651928703a28bed",
+      "bytes": 49581
     }
   },
-  "oracleCaseCount": 418,
-  "diagnosticCodeCount": 122,
+  "oracleCaseCount": 443,
+  "diagnosticCodeCount": 134,
   "diagnosticCodes": [
     "ambiguous-enum-member",
     "ambiguous-project-procedure",
@@ -42,6 +43,12 @@
     "declare-missing-ptrsafe",
     "dim-initializer",
     "division-by-zero",
+    "doc-param-missing",
+    "doc-param-unknown",
+    "doc-returns-missing",
+    "doc-returns-unexpected",
+    "doc-tag-duplicate",
+    "doc-tag-unclosed",
     "duplicate-case-else",
     "duplicate-declaration",
     "duplicate-enum-member",
@@ -79,6 +86,7 @@
     "invalid-identifier-start",
     "invalid-line-continuation",
     "invalid-new-type-name",
+    "invalid-option-statement",
     "invalid-proc-header",
     "is-operator-non-object",
     "late-bound-friend-member",
@@ -88,6 +96,7 @@
     "mid-statement-literal-target",
     "mismatched-end-keyword",
     "missing-block-closer",
+    "missing-library-reference",
     "missing-return-assignment",
     "module-declaration-after-procedure",
     "module-declaration-in-procedure",
@@ -137,11 +146,15 @@
     "unexpected-declaration-token",
     "unknown-call",
     "unmatched-block-closer",
+    "unreachable-code",
     "unterminated-string",
+    "unused-procedure",
+    "unused-variable",
+    "variable-never-read",
     "vba-test-directive",
     "withevents-declaration"
   ],
-  "ruleCount": 119,
+  "ruleCount": 131,
   "ruleNames": [
     "ambiguousEnumMember",
     "ambiguousProjectProcedure",
@@ -167,6 +180,12 @@
     "declareMissingPtrSafe",
     "dimInitializer",
     "divisionByZero",
+    "docParamMissing",
+    "docParamUnknown",
+    "docReturnsMissing",
+    "docReturnsUnexpected",
+    "docTagDuplicate",
+    "docTagUnclosed",
     "duplicateCaseElse",
     "duplicateDeclaration",
     "duplicateEnumMember",
@@ -204,6 +223,7 @@
     "invalidIdentifierStart",
     "invalidLineContinuation",
     "invalidNewTypeName",
+    "invalidOptionStatement",
     "invalidProcedureHeader",
     "isOperatorNonObject",
     "lateBoundFriendMember",
@@ -211,6 +231,7 @@
     "memberAccessOutsideWith",
     "memberNotFound",
     "midStatementLiteralTarget",
+    "missingLibraryReference",
     "missingReturnAssignment",
     "moduleDeclarationAfterProcedure",
     "moduleDeclarationInProcedure",
@@ -259,7 +280,11 @@
     "undefinedLabel",
     "unexpectedDeclarationToken",
     "unknownCallStatement",
+    "unreachableCode",
     "unterminatedString",
+    "unusedProcedure",
+    "unusedVariable",
+    "variableNeverRead",
     "vbaTestDirective",
     "withEventsDeclaration"
   ]

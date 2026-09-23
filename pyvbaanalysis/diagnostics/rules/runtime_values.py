@@ -19,11 +19,12 @@ from ...constants.integer_constant_expression import (
     parse_vba_integer_literal,
     resolve_raw_integer_constants,
 )
+from ...host.host_model import HostObjectModel
 from ...lexer.token_helpers import match_paren_from
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import LeafStatementNode, ModuleNode, ProcedureNode, Span
 from ...symbols.symbol_model import ModuleSymbols, VbaProcedureSignature, VbaSymbol
-from ...types.type_inference import procedure_symbol_for, type_environment_for
+from ...types.type_inference import type_environment_for
 from ..call_extraction import (
     CallableTypeSignature,
     empty_arg_split,
@@ -35,11 +36,11 @@ from ..call_extraction import (
 from ..callable_signatures import (
     SourceNameScope,
     callable_type_signatures_for,
+    procedure_integer_constant_lookup,
     runtime_callable_source_shadowed,
-    scoped_integer_constant_lookup,
     source_name_scope_for,
 )
-from ..const_expr import collect_body_literal_integer_constants, collect_module_literal_integer_constants
+from ..const_expr import collect_module_literal_integer_constants
 from ..context import PushFn, statement_tokens
 from ..walker import ProcedureStatementVisitor, token_name, token_text
 
@@ -73,6 +74,7 @@ def check_runtime_argument_values(
     project_visible_symbols: Sequence[VbaSymbol] | None,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    host_model: HostObjectModel | None = None,
 ) -> ProcedureStatementVisitor:
     module_signatures = callable_type_signatures_for(symbols, project_procedures)
     project_constants = resolve_raw_integer_constants(project_integer_constants or {}, {})
@@ -81,11 +83,8 @@ def check_runtime_argument_values(
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
         env = type_environment_for(symbols, member)
         source_names = source_name_scope_for(symbols, member, project_visible_symbols)
-        procedure_constants = dict(module_constants)
-        collect_body_literal_integer_constants(member.body, procedure_constants, activity)
-        proc_sym = procedure_symbol_for(symbols, member)
-        constants = scoped_integer_constant_lookup(
-            procedure_constants, symbols, proc_sym, project_visible_symbols
+        constants = procedure_integer_constant_lookup(
+            member, module_constants, symbols, project_visible_symbols, activity, host_model
         )
 
         def visitor(stmt: LeafStatementNode) -> None:

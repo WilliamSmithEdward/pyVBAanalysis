@@ -1,15 +1,15 @@
 """Helpers shared by more than one diagnostics rule family.
 
-Ported incrementally from xlide_vscode/src/analyzer/diagnostics/rules/shared.ts as
-families need them (the full file also has host/type-inference-coupled helpers -
-the exhaustive member-surface resolver, read-reference scanner - that land with
-their consumer rules in M8/M9).
+Ported from xlide_vscode/src/analyzer/diagnostics/rules/shared.ts: the exhaustive
+member-surface resolver, the read-reference scanner, the repeated-key reporter,
+and the statement classifiers several rules use.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import TypeVar
 
 from ...call.call_context import bare_call_statement_target as call_statement_target
 from ...completion import (
@@ -18,6 +18,7 @@ from ...completion import (
     resolve_member_surface_at,
 )
 from ...conditional import ConditionalActivityTracker, collect_conditional_directives
+from ...lexer.keyword_table import is_reserved_identifier
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import (
     BodyNode,
@@ -101,6 +102,49 @@ def declaration_name_hit(source: str, span: Span, name: str) -> NameTokenHit | N
     return None
 
 
+# -- repeated keys ---------------------------------------------------------
+
+_Entry = TypeVar("_Entry")
+
+
+def report_repeated_keys(
+    entries: Iterable[_Entry],
+    activity: ConditionalActivityTracker | None,
+    key_of: Callable[[_Entry], str | None],
+    span_of: Callable[[_Entry], Span],
+    report: Callable[[_Entry, _Entry], None],
+) -> None:
+    """Report every entry that repeats a key an earlier entry already took, once per
+    repeat, in source order. `key_of` returns None for an entry the rule does not
+    govern.
+
+    Entries in different arms of one `#If` chain never reach the compiler together,
+    so they are alternatives rather than repeats however the conditional constants
+    evaluate. Asking `activity` for the arm rather than for the activity lets a rule
+    keep looking inside a chain it cannot decide instead of going blind to a repeat
+    inside one arm (XLIDE issue #58)."""
+    taken: dict[str, list[_Entry]] = {}
+    for entry in entries:
+        key = key_of(entry)
+        if key is None:
+            continue
+        earlier = taken.get(key)
+        if earlier is None:
+            taken[key] = [entry]
+            continue
+        hit = next(
+            (
+                prior
+                for prior in earlier
+                if activity is None or not activity.mutually_exclusive(span_of(prior), span_of(entry))
+            ),
+            None,
+        )
+        earlier.append(entry)
+        if hit is not None:
+            report(entry, hit)
+
+
 # -- module-level declaration-statement classifier -------------------------
 
 # Visibility modifiers that may lead a module-level declaration in a procedure
@@ -165,6 +209,8 @@ def module_declaration_statement_in_procedure(source: str, span: Span) -> tuple[
 class ValueReadReference:
     name: str
     span: Span
+    # `[name]`: in Excel an Evaluate lookup rather than a variable.
+    bracketed: bool = False
 
 
 def for_each_undeclared_reference_span(
@@ -206,14 +252,22 @@ def value_read_references(
     for i in range(len(toks)):
         if i in skip or not _is_potential_variable_reference_token(_at(toks, i)):
             continue
-        if token_raw(_at(toks, i - 1)) == ".":
+        # `!` is VBA's default-member accessor, so `rs!CustomerName` and
+        # `Forms!frmMain!txtName` are MEMBER ACCESS exactly as a dot is: the name
+        # after it belongs to the receiver and was never a variable. The same
+        # character is the Single type suffix (`Dim x!`), but a suffix is only ever
+        # followed by an operator or the end of the statement, never by a name, so
+        # one test covers both.
+        if token_raw(_at(toks, i - 1)) in (".", "!"):
             continue
         name = token_name(toks[i])
         if not name:
             continue
         out.append(
             ValueReadReference(
-                name=name, span=Span(span.start + toks[i].start, span.start + toks[i].end)
+                name=name,
+                span=Span(span.start + toks[i].start, span.start + toks[i].end),
+                bracketed=toks[i].kind is TokenKind.BRACKETED_IDENTIFIER,
             )
         )
     return out
@@ -286,6 +340,14 @@ def _undeclared_reference_skip_indexes(
             skip.add(i + 1)
         if word == "addressof" and _is_potential_variable_reference_token(_at(toks, i + 1)):
             skip.add(i + 1)
+        # A CONTEXTUAL keyword is not a reserved identifier (MS-VBAL 3.3.5.2), so
+        # `Dim Text As String` is legal VBA and a reference to `Text` is a real
+        # variable read. The scanner therefore accepts one as a name, but each of
+        # these words also has a grammar position where it is SYNTAX, and reading
+        # the word there would report the statement's own keyword as an undefined
+        # variable. Those positions are skipped here.
+        if _is_contextual_grammar_word(toks, i, statement_head, first_executable):
+            skip.add(i)
         # Open-statement access-clause (MS-VBAL 5.4.5.1.1): in `Open path For
         # mode [Access access] [lock] As #f`, `Access` is a grammar word, not a
         # variable reference. It lexes as an identifier because it is not a
@@ -364,7 +426,62 @@ def _is_qualified_project_member_qualifier(
         return False
     if surface.kind == "standardModule":
         return True
+    # A bare module name in front of a dot is only a legal receiver when the module
+    # IS a value: a standard module is a namespace, and documents, forms, and
+    # classes marked `VB_PredeclaredId = True` have a default instance. A plain
+    # class module is a TYPE, so `Ticket.ChangeTest` is the same `Variable not
+    # defined` as any other undeclared name: the VBE refuses to compile it (XLIDE
+    # issue #47). Only a VOUCHED-FOR false reports: the attribute is invisible in
+    # the code pane, so a host that never read the header leaves this None and the
+    # name stays skipped.
+    if surface.kind == "class" and surface.predeclared_id is False:
+        return False
     return any(candidate.name.lower() == member_lower for candidate in surface.members)
+
+
+# Words `Open ... For <mode>` accepts that are not reserved identifiers.
+_OPEN_MODE_WORDS = frozenset({"binary", "output", "append", "random", "read"})
+
+# Clause keywords an `Open` mode word may follow.
+_OPEN_CLAUSE_HEADS = frozenset({"for", "access", "lock"})
+
+# Tokens after which a new statement begins on the same line.
+_STATEMENT_OPENERS = frozenset({"then", "else", ":"})
+
+
+def _is_contextual_grammar_word(
+    toks: Sequence[VbaToken], index: int, statement_head: str, first_executable: int
+) -> bool:
+    """True when a contextual keyword sits in the grammar position that gives it its
+    keyword meaning, rather than naming a variable.
+
+    Only the positions reachable inside a PROCEDURE BODY are listed. `Option`,
+    `Declare`, and `Property` headers never reach the reference scanner: the first
+    two are module-level and an in-procedure declaration is skipped whole.
+    """
+    word = token_text(_at(toks, index))
+    prev = token_text(_at(toks, index - 1))
+    # `Exit Property` and the `End Property` footer. Sub, Function, For and Do are
+    # reserved, so Property is the only one of these words that reaches the
+    # scanner at all.
+    if word == "property" and prev in ("exit", "end"):
+        return True
+    # `On Error GoTo/Resume ...` and the bare `Error <number>` statement. The latter
+    # starts a statement, which is not always token 0: `If x Then Error 5 Else Exit
+    # Sub` puts it after `Then`.
+    if word == "error" and (prev == "on" or index == first_executable or prev in _STATEMENT_OPENERS):
+        return True
+    # `Open path For Binary|Output|Append|Random [Access Read] [Lock Read] As #n`.
+    # The mode word follows the clause keyword that introduces it; the same words
+    # elsewhere in the statement stay readable.
+    if statement_head == "open" and word in _OPEN_MODE_WORDS and prev in _OPEN_CLAUSE_HEADS:
+        return True
+    # `For i = 1 To 10 Step 2`.
+    if word == "step" and statement_head == "for":
+        return True
+    # `As Object` in any statement that reaches here, such as the type clause of a
+    # `ReDim ... As Object`.
+    return word == "object" and prev == "as"
 
 
 def _simple_assignment_lhs_identifier_index(toks: Sequence[VbaToken]) -> int:
@@ -374,8 +491,18 @@ def _simple_assignment_lhs_identifier_index(toks: Sequence[VbaToken]) -> int:
     eq = top_level_operator_index(list(toks[start:]), "=")
     if eq != 1:
         return -1
+    # A name that SPELLS a contextual keyword is still a name, and this skip is what
+    # stops the assignment TARGET also being counted as a read (XLIDE #46).
+    # Bracketed names are deliberately NOT included: `[If] = x` is Excel's Evaluate
+    # shorthand rather than a variable, a separate question this skip must not
+    # answer as a side effect.
     name_tok = _at(toks, start)
-    return start if name_tok is not None and name_tok.kind is TokenKind.IDENTIFIER else -1
+    return (
+        start
+        if name_tok is not None
+        and (name_tok.kind is TokenKind.IDENTIFIER or _is_non_reserved_keyword(name_tok))
+        else -1
+    )
 
 
 def _is_line_label_only_statement(source: str, span: Span, toks: Sequence[VbaToken]) -> bool:
@@ -388,10 +515,24 @@ def _is_line_label_only_statement(source: str, span: Span, toks: Sequence[VbaTok
 
 
 def _is_potential_variable_reference_token(tok: VbaToken | None) -> bool:
-    return tok is not None and tok.kind in (
-        TokenKind.IDENTIFIER,
-        TokenKind.BRACKETED_IDENTIFIER,
-    )
+    if tok is None:
+        return False
+    if tok.kind is TokenKind.IDENTIFIER or tok.kind is TokenKind.BRACKETED_IDENTIFIER:
+        return True
+    return _is_non_reserved_keyword(tok)
+
+
+def _is_non_reserved_keyword(tok: VbaToken | None) -> bool:
+    """A word the VBE capitalizes in its statement context but MS-VBAL 3.3.5.2 does
+    not reserve, so `Dim Text As String` and `Dim Error As Long` are both legal and
+    a reference to one is a real variable read."""
+    if tok is None or tok.kind is not TokenKind.KEYWORD or is_reserved_identifier(tok.raw_text):
+        return False
+    # `Property` opens a declaration, and the parser already refuses `Dim Property
+    # As Long` with invalid-identifier-start, so the word can never reach a body as
+    # a variable. Scanning it only adds a second, confusing diagnostic to source
+    # that is already reported as malformed.
+    return token_text(tok) != "property"
 
 
 def _has_earlier_type_of(toks: Sequence[VbaToken], before: int) -> bool:

@@ -34,3 +34,6 @@ Thumbs.db
 
 # Note: the vendored XLIDE data package under pyvbaanalysis/data/ is intentionally
 # committed (it is the version-pinned contract surface), so it is NOT ignored here.
+
+# A pinned XLIDE checkout is a build input, reproducible from its ref at any time.
+artifacts/

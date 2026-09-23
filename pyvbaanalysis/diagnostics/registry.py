@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ..host.host_model import get_excel_object_model
 from .context import PushFn, RulePassContext
 from .exprwalk import ProcedureExpressionVisitor
 from .rules.argument_shape import check_argument_shape
@@ -51,6 +52,7 @@ from .rules.control_flow import (
 from .rules.declarations import (
     check_dim_initializer,
     check_duplicate_options,
+    check_option_statement_form,
     check_empty_type,
     check_fixed_length_string_bounds,
     check_identifier_too_long,
@@ -110,7 +112,14 @@ from .rules.type_of_is import (
     check_typeof_is_compatibility,
     check_typeof_missing_operand,
 )
+from .rules.dead_code import (
+    check_unreachable_code,
+    check_unused_declarations,
+    check_unused_private_procedures,
+)
+from .rules.doc_comments import check_doc_comments
 from .rules.late_binding import check_late_bound_friend_member
+from .rules.missing_reference import check_missing_library_reference
 from .rules.undeclared import (
     check_member_not_found,
     check_non_callable_call_statement,
@@ -159,6 +168,7 @@ def _unknown_call_statement(ctx: RulePassContext, push: PushFn) -> ProcedureStat
         known_procedures,
         ctx.opts.project_visible_symbols,
         ctx.opts.host_model,
+        ctx.opts.designer_class,
         push,
     )
 
@@ -214,9 +224,27 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="ambiguousEnumMemberReferences", run=lambda ctx, push: check_ambiguous_enum_member_references(ctx.source, ctx.mod, ctx.symbols, ctx.activity, ctx.module_name, ctx.opts.known_procedures, ctx.opts.project_procedures, ctx.opts.project_class_members, ctx.opts.project_visible_symbols, ctx.opts.host_model, push)),
     DiagnosticRuleEntry(name="constAssignment", procedure_statements=lambda ctx, push: check_const_assignment(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="optionExplicit", run=lambda ctx, push: check_option_explicit(ctx.source, ctx.mod, ctx.activity, push)),
-    DiagnosticRuleEntry(name="undeclaredVariables", run=lambda ctx, push: check_undeclared_variables(ctx.source, ctx.mod, ctx.symbols, ctx.activity, ctx.opts.known_identifiers, ctx.opts.project_procedures, ctx.opts.project_class_members, ctx.opts.project_visible_symbols, ctx.opts.host_model, push)),
+    DiagnosticRuleEntry(
+        name="undeclaredVariables",
+        run=lambda ctx, push: check_undeclared_variables(
+            ctx.source,
+            ctx.mod,
+            ctx.symbols,
+            ctx.activity,
+            ctx.opts.known_identifiers,
+            ctx.opts.project_procedures,
+            ctx.opts.project_class_members,
+            ctx.opts.project_visible_symbols,
+            ctx.opts.implicit_members,
+            ctx.opts.module_kind,
+            ctx.opts.host_model,
+            ctx.opts.designer_class,
+            push,
+        ),
+    ),
     DiagnosticRuleEntry(name="optionPlacement", run=lambda ctx, push: check_option_placement(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="duplicateOption", run=lambda ctx, push: check_duplicate_options(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="optionStatementForm", run=lambda ctx, push: check_option_statement_form(ctx.source, ctx.mod, ctx.opts, ctx.activity, push)),
     DiagnosticRuleEntry(name="procedureHeader", run=lambda ctx, push: check_procedure_header(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="invalidIdentifierStarts", run=lambda ctx, push: check_invalid_identifier_starts(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="moduleDeclarationsInProcedureBodies", run=lambda ctx, push: check_module_declarations_in_procedure_bodies(ctx.source, ctx.mod, ctx.activity, push)),
@@ -228,13 +256,13 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="propertySetterValueParameters", run=lambda ctx, push: check_property_setter_value_parameters(ctx.source, ctx.mod, ctx.activity, ctx.member_ctx, push)),
     DiagnosticRuleEntry(name="propertyAccessorSignatures", run=lambda ctx, push: check_property_accessor_signatures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="parameterOrder", run=lambda ctx, push: check_parameter_order(ctx.source, ctx.mod, ctx.activity, push)),
-    DiagnosticRuleEntry(name="parameterDefaultValues", run=lambda ctx, push: check_parameter_default_values(ctx.source, ctx.mod, ctx.activity, push)),
-    DiagnosticRuleEntry(name="parameterDefaultNotConstant", run=lambda ctx, push: check_non_constant_parameter_defaults(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="parameterDefaultValues", run=lambda ctx, push: check_parameter_default_values(ctx.source, ctx.mod, ctx.activity, ctx.member_ctx, push)),
+    DiagnosticRuleEntry(name="parameterDefaultNotConstant", run=lambda ctx, push: check_non_constant_parameter_defaults(ctx.source, ctx.mod, ctx.activity, ctx.member_ctx, push)),
     DiagnosticRuleEntry(name="constValueNotConstant", run=lambda ctx, push: check_non_constant_const_values(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="enumMemberNotConstant", run=lambda ctx, push: check_non_constant_enum_member_values(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="unbalancedParens", run=lambda ctx, push: check_unbalanced_parens(ctx.source, push)),
     DiagnosticRuleEntry(name="invalidExpressionSyntax", procedure_statements=lambda ctx, push: check_invalid_expression_syntax(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
-    DiagnosticRuleEntry(name="divisionByZeroExpressions", procedure_statements=lambda ctx, push: check_division_by_zero_expressions(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_integer_constants, ctx.opts.project_visible_symbols, ctx.activity, push)),
+    DiagnosticRuleEntry(name="divisionByZeroExpressions", procedure_statements=lambda ctx, push: check_division_by_zero_expressions(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_integer_constants, ctx.opts.project_visible_symbols, ctx.activity, push, ctx.opts.host_model)),
     DiagnosticRuleEntry(name="dimInitializer", run=lambda ctx, push: check_dim_initializer(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="invalidRedimTargets", procedure_statements=lambda ctx, push: check_invalid_redim_targets(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="redimImpossibleBounds", procedure_statements=lambda ctx, push: check_redim_impossible_bounds(ctx.source, ctx.mod, ctx.activity, push)),
@@ -279,11 +307,23 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="arrayBoundIntrinsicArguments", procedure_statements=lambda ctx, push: check_array_bound_intrinsic_arguments(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="scalarMemberAccess", procedure_statements=lambda ctx, push: check_scalar_member_access(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="objectVariableNotSet", run=lambda ctx, push: check_object_variable_not_set(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push, ctx.member_ctx)),
+    DiagnosticRuleEntry(
+        name="missingLibraryReference",
+        # The resolved model, not the raw option: a bare Excel project carries no
+        # host_model, so the Excel default is supplied here, or the rule would know
+        # of no library at all and stay silent.
+        run=lambda ctx, push: check_missing_library_reference(
+            ctx.source,
+            ctx.opts.host_model if ctx.opts.host_model is not None else get_excel_object_model(),
+            ctx.opts.referenced_hosts is not None,
+            push,
+        ),
+    ),
     DiagnosticRuleEntry(name="memberNotFound", procedure_statements=lambda ctx, push: check_member_not_found(ctx.source, ctx.member_ctx, push)),
     DiagnosticRuleEntry(name="nonCallableCallStatement", procedure_statements=lambda ctx, push: check_non_callable_call_statement(ctx.source, ctx.symbols, ctx.opts.known_procedures, ctx.opts.project_visible_symbols, push)),
-    DiagnosticRuleEntry(name="argumentCount", procedure_statements=lambda ctx, push: check_argument_count(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
-    DiagnosticRuleEntry(name="argumentTypes", procedure_statements=lambda ctx, push: check_argument_types(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, push)),
-    DiagnosticRuleEntry(name="runtimeArgumentValues", procedure_statements=lambda ctx, push: check_runtime_argument_values(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_integer_constants, ctx.opts.project_visible_symbols, ctx.activity, push)),
+    DiagnosticRuleEntry(name="argumentCount", procedure_statements=lambda ctx, push: check_argument_count(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, ctx.member_ctx, push)),
+    DiagnosticRuleEntry(name="argumentTypes", procedure_statements=lambda ctx, push: check_argument_types(ctx.source, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_visible_symbols, ctx.member_ctx, push)),
+    DiagnosticRuleEntry(name="runtimeArgumentValues", procedure_statements=lambda ctx, push: check_runtime_argument_values(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.opts.project_integer_constants, ctx.opts.project_visible_symbols, ctx.activity, push, ctx.opts.host_model)),
     DiagnosticRuleEntry(name="runtimeConversionValues", procedure_statements=lambda ctx, push: check_runtime_conversion_values(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="assignmentTypes", run=lambda ctx, push: check_assignment_types(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.member_ctx, ctx.activity, push)),
     DiagnosticRuleEntry(name="typeOfIsAlwaysFalse", procedure_expressions=lambda ctx, push: check_typeof_is_compatibility(ctx.symbols, ctx.member_ctx, push)),
@@ -295,4 +335,31 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="missingReturnAssignments", run=lambda ctx, push: check_missing_return_assignments(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.activity, ctx.opts.module_name, ctx.opts.implemented_interfaces, push)),
     DiagnosticRuleEntry(name="unknownCallStatement", procedure_statements=_unknown_call_statement),
     DiagnosticRuleEntry(name="lateBoundFriendMember", procedure_statements=_late_bound_friend_member),
+    DiagnosticRuleEntry(
+        name="unusedDeclarations",
+        run=lambda ctx, push: check_unused_declarations(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push),
+    ),
+    DiagnosticRuleEntry(
+        # A Private procedure is reachable from its own module only, so the module's
+        # text decides; the project's string literals are consulted for a name
+        # reached through Application.Run, OnTime and their kin.
+        name="unusedPrivateProcedures",
+        run=lambda ctx, push: check_unused_private_procedures(
+            ctx.source,
+            ctx.mod,
+            ctx.symbols,
+            ctx.module_kind,
+            ctx.activity,
+            ctx.opts.project_string_literal_words,
+            push,
+        ),
+    ),
+    DiagnosticRuleEntry(
+        name="unreachableCode",
+        run=lambda ctx, push: check_unreachable_code(ctx.source, ctx.mod, ctx.activity, push),
+    ),
+    DiagnosticRuleEntry(
+        name="docComments",
+        run=lambda ctx, push: check_doc_comments(ctx.source, ctx.mod, ctx.activity, push),
+    ),
 )

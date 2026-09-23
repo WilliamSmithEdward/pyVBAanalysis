@@ -4,17 +4,18 @@ The manifest pins the data package: per-file sha256 and size, the oracle case
 count, the audited diagnostic-code list, and the rule catalogue names. Re-run
 after re-vendoring any of the three evidence files:
 
-    python tools/generate_manifest.py <xlideVersion>
+    python tools/generate_manifest.py <xlideVersion> [--commit <sha>]
 
 The xlideVersion argument is the upstream xlide_vscode release the files were
-vendored from (e.g. 2.5.11).
+vendored from (e.g. 10.5.0), and --commit the exact commit. tools/vendor_data.py
+runs this as its last step, with the commit it pinned.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
-import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -29,9 +30,17 @@ _FILES = (
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        sys.exit("usage: python tools/generate_manifest.py <xlideVersion>")
-    xlide_version = sys.argv[1]
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("xlide_version", help="the upstream release the files were vendored from")
+    parser.add_argument(
+        "--commit",
+        help=(
+            "the XLIDE commit vendored from. A version string is a label somebody typed; "
+            "the commit is what makes the pin reproducible, so record it when it is known."
+        ),
+    )
+    args = parser.parse_args()
+    xlide_version = args.xlide_version
 
     files: dict[str, dict[str, object]] = {}
     for name in _FILES:
@@ -45,6 +54,7 @@ def main() -> None:
     manifest = {
         "sourceRepo": "WilliamSmithEdward/xlide_vscode",
         "xlideVersion": xlide_version,
+        **({"xlideCommit": args.commit} if args.commit else {}),
         "files": files,
         "oracleCaseCount": len(cases["cases"]),
         "diagnosticCodeCount": len(audit["diagnostics"]),

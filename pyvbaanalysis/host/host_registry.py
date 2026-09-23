@@ -16,20 +16,27 @@ The semantics are deliberately asymmetric:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from types import MappingProxyType
+from typing import Any, cast
 
 from .host_model import (
+    HostConstant,
     HostObjectModel,
+    HostType,
     get_access_object_model,
     get_excel_object_model,
     get_powerpoint_object_model,
+    get_vb6_object_model,
     get_word_object_model,
 )
 
 # The host tokens xlide_vbide normalizes from the process image, so an embedder
-# passes the string it already has.
+# passes the string it already has, plus `vb6`: a VB6 project is not an Office host
+# at all, but its code-behind needs the VB runtime's surface rather than Excel's,
+# and the analyzer selects a model by this token.
 VBA_HOST_TOKENS = frozenset(
-    {"excel", "word", "powerpoint", "access", "outlook", "visio", "project", "other"}
+    {"excel", "word", "powerpoint", "access", "outlook", "visio", "project", "vb6", "other"}
 )
 
 # A model that knows nothing: every lookup misses, so nothing is asserted. The
@@ -49,6 +56,7 @@ _MODELS_BY_TOKEN = {
     "word": get_word_object_model,
     "powerpoint": get_powerpoint_object_model,
     "access": get_access_object_model,
+    "vb6": get_vb6_object_model,
 }
 
 # Container extension (without the dot) -> host token. XLIDE's own file
@@ -93,6 +101,72 @@ def host_object_model_for_token(host: str | None) -> HostObjectModel | None:
         return None
     loader = _MODELS_BY_TOKEN.get(token)
     return loader() if loader is not None else EMPTY_HOST_MODEL
+
+
+# Merged models, keyed by the token list that produced them. Bounded by the handful
+# of host combinations a project can name, and each model is a shared singleton.
+_MERGED_BY_KEY: dict[str, HostObjectModel] = {}
+
+
+def host_object_model_for_tokens(tokens: list[str]) -> HostObjectModel | None:
+    """One model answering for a project's own host and every library it
+    references, in the order VBA resolves them.
+
+    A project that references another application's library can name its types and
+    call its members, so a Word document with a reference to Excel has to be
+    analyzed against both. The FIRST token wins every shared name, which is how VBA
+    resolves an ambiguous one: by the reference list's order, the project's own
+    host at the top.
+
+    Every library's globals are merged, because a library marks its global object
+    APPOBJECT in its type library and VBA binds that object's members bare for
+    anyone who references it. The host's own still wins a collision.
+
+    Returns None when the list adds nothing to what a single token would have
+    given, so every existing caller keeps the model it had, including the bare
+    `excel` that rides as the downstream Excel default.
+    """
+    known = [token for token in tokens if token in _MODELS_BY_TOKEN]
+    if len(known) <= 1:
+        return host_object_model_for_token(known[0] if known else (tokens[0] if tokens else None))
+    key = "+".join(known)
+    cached = _MERGED_BY_KEY.get(key)
+    if cached is not None:
+        return cached
+
+    models = [_MODELS_BY_TOKEN[token]() for token in known]
+    # Later models are applied first so the earlier ones overwrite them: the
+    # project's own host wins every name it shares with a referenced library.
+    layered = list(reversed(models))
+
+    def merged(field: str) -> Mapping[str, Any]:
+        out: dict[str, Any] = {}
+        for one in layered:
+            out.update(cast("Mapping[str, Any]", one.get(field) or {}))
+        return MappingProxyType(out)
+
+    # A type key already names its library; an enum key does not, so each
+    # referenced library's enums carry theirs.
+    enums: dict[str, Mapping[str, object]] = {}
+    for one in layered:
+        for name, entry in (one.get("enums") or {}).items():
+            enums[name] = entry if one is models[0] else {**entry, "library": one.get("hostName")}
+
+    result: HostObjectModel = {
+        "source": " + ".join(one["source"] for one in models),
+        "hostName": models[0].get("hostName", ""),
+        "globalType": models[0].get("globalType"),
+        # Each field merges the same-typed field of every layer, so the value
+        # types carry over from the source models unchanged.
+        "types": cast("Mapping[str, HostType]", merged("types")),
+        "aliases": cast("Mapping[str, str]", merged("aliases")),
+        "globals": cast("Mapping[str, str]", merged("globals")),
+        "constants": cast("Mapping[str, HostConstant]", merged("constants")),
+        "enums": MappingProxyType(enums),
+        "memberSignatures": cast("Mapping[str, Mapping[str, str]]", merged("memberSignatures")),
+    }
+    _MERGED_BY_KEY[key] = result
+    return result
 
 
 def host_knowledge_is_absent(model: HostObjectModel | None) -> bool:

@@ -30,14 +30,13 @@ from .diagnostics import (
     validate_severity_overrides,
 )
 from .project import analyze_project
-from .host import host_token_for_file_name
 from .reader import (
     LOOSE_EXTENSIONS,
     OFFICE_EXTENSIONS,
     LooseFileReadError,
     WorkbookReadError,
     load_loose_module,
-    read_office_modules,
+    read_office_project,
 )
 from .symbols import ModuleInput
 
@@ -152,10 +151,11 @@ def _analyze_workbook_group(
     errors: list[str] = []
     for path in paths:
         try:
-            modules = read_office_modules(path)
+            project = read_office_project(path)
         except WorkbookReadError as exc:
             errors.append(f"{path}: {exc}")
             continue
+        modules = project.modules
         inputs = [
             ModuleInput(module_name=m.name, module_kind=m.kind, source=m.source) for m in modules
         ]
@@ -164,7 +164,8 @@ def _analyze_workbook_group(
             only=only or None,
             severity_overrides=severity_overrides or None,
             inline_suppression=inline_suppression,
-            host=host_token_for_file_name(path.name),
+            host=project.host,
+            referenced_hosts=project.referenced_hosts,
         )
         sources = {m.name: m.source for m in modules}
         results.append(_ProjectResult(str(path), diagnostics, sources))

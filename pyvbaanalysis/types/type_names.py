@@ -2,9 +2,9 @@
 
 Ported from the host-free core of
 xlide_vscode/src/analyzer/diagnostics/typeInference.ts: type-name normalization
-and classification, plus numeric-literal bounds. The host/completion-coupled
-inference engine lands in type_inference.py (M8); these helpers have no host or
-completion dependency, so the rule families can use them now.
+and classification, plus numeric-literal bounds. They have no host or completion
+dependency, so every layer can use them; expression typing lives in
+diagnostics/argument_inference.py.
 """
 
 from __future__ import annotations
@@ -64,21 +64,6 @@ def is_provably_non_numeric_string(value: str) -> bool:
 
 def is_boolean_string(value: str) -> bool:
     return _BOOLEAN_STRING.match(value.strip()) is not None
-
-
-def is_known_object_assignment_type(type_name: str | None) -> bool:
-    """True when a declared type names an object that Set-binds and supports members.
-
-    Host-free slice (M7): the generic ``Object`` type qualifies; Variant and the
-    scalar types do not. Host aliases (Excel/Office) and project class types are
-    resolved by the full host-coupled inference in M8; until then they
-    conservatively return False, so the analyzer never invents a false positive
-    (it only misses some true positives).
-    """
-    normalized = normalize_type(type_name)
-    if normalized is None or normalized == "variant":
-        return False
-    return normalized == "object"
 
 
 @dataclass(frozen=True, slots=True)

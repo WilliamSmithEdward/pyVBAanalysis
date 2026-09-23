@@ -10,7 +10,7 @@ diagnostics engine consumes. Name resolution order follows MS-VBAL 5.3 / 4.2 /
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TypeVar, cast
 
@@ -20,8 +20,12 @@ from ..constants.integer_constant_expression import (
     parse_vba_integer_literal,
     resolve_raw_integer_constants,
 )
+from ..lexer.token_helpers import identifier_words
+from ..lexer.token_kinds import TokenKind
+from ..lexer.tokenize import tokenize_cached
 from ..parser.nodes import Span
 from .build_module_symbols import BuildModuleSymbolsOptions, build_module_symbols
+from .user_form_controls import has_authoritative_designer_header, parse_user_form_controls
 from .name_resolution import (
     BareIdentifierContext,
     BareIdentifierResolution,
@@ -30,6 +34,7 @@ from .name_resolution import (
     resolve_bare_identifier_binding,
 )
 from .symbol_model import (
+    ImplicitMember,
     ModuleSymbolKind,
     ModuleSymbols,
     SymbolVisibility,
@@ -44,6 +49,7 @@ from .symbol_model import (
     VbaSymbolKind,
     format_procedure_param_label,
     is_bare_callable_kind,
+    is_data_bound_designer_class,
     is_procedure_kind,
     procedure_params_from_symbol,
     procedure_signature_from_symbol,
@@ -52,6 +58,26 @@ from .symbol_model import (
 )
 
 _T = TypeVar("_T")
+
+_PREDECLARED_ID_RE = re.compile(r"^\s*Attribute\s+VB_PredeclaredId\s*=\s*([^\r\n]*)", re.IGNORECASE | re.MULTILINE)
+
+
+def _predeclared_id_from_source(source: str) -> bool | None:
+    """`Attribute VB_PredeclaredId` out of a module's own text, which only a
+    standalone export carries. Present and True is a default instance; present and
+    anything else is none. ABSENT returns None: a module whose header was stripped
+    has an unknown answer, not a negative one."""
+    match = _PREDECLARED_ID_RE.search(source)
+    if match is None:
+        return None
+    return match.group(1).strip().lower() == "true"
+
+
+def _set_or_forget(store: dict[str, _T], key: str, value: _T | None) -> None:
+    if value is None:
+        store.pop(key, None)
+    else:
+        store[key] = value
 
 
 @dataclass(slots=True)
@@ -62,6 +88,18 @@ class ModuleInput:
     module_kind: ModuleSymbolKind
     source: str
     conditional_compilation: ConditionalCompilationEnvironment | None = None
+    # Members the module has that its own text never declares: a UserForm's
+    # designer-declared controls, from a caller that can read the designer. None
+    # leaves the index to parse the module's own `.frm` header, which only a
+    # standalone export that spells its controls out carries.
+    implicit_members: Sequence[ImplicitMember] | None = None
+    # Whether the module has a default instance (`Attribute VB_PredeclaredId =
+    # True`), from a caller that read the attribute header. None leaves the index
+    # to read it from the module's own text, and unknown if the text lacks it.
+    predeclared_id: bool | None = None
+    # The host class the module's designer makes it: an Access form's
+    # `Access.Form`. None for a UserForm, which is always an MSForms.UserForm.
+    designer_class: str | None = None
 
 
 @dataclass(slots=True)
@@ -137,6 +175,38 @@ def _project_type_kind(symbol: VbaSymbol) -> VbaProjectTypeKind | None:
 
 def _is_type_exported(symbol: VbaSymbol) -> bool:
     return symbol.visibility is not SymbolVisibility.PRIVATE
+
+
+def _shadowed_by_own_module(
+    visible: list[VbaProjectTypeName], current_module_lower: str
+) -> list[VbaProjectTypeName]:
+    """A type the asking module declares shadows every other module's type of that
+    name, whatever either one's visibility is.
+
+    Measured in the VBE (oracle case `private_type_shadows_public_type_compile`): a
+    class with `Private Type JsonTextBuilder` compiles beside a standard module
+    exporting `Public Type JsonTextBuilder`, and inside the class the name means the
+    private one. Two libraries that each define a type of the same name, one of them
+    privately, are an ordinary way to end up here.
+
+    Only names the asking module declares are narrowed. A name that two OTHER
+    modules both export stays duplicated, because that one IS the compile error:
+    oracle case `two_public_types_same_name_third_module_compile` measures the VBE
+    refusing it with "Ambiguous name detected".
+    """
+    own = {
+        type_name.name.lower()
+        for type_name in visible
+        if (type_name.module_name or "").lower() == current_module_lower
+    }
+    if not own:
+        return list(visible)
+    return [
+        type_name
+        for type_name in visible
+        if type_name.name.lower() not in own
+        or (type_name.module_name or "").lower() == current_module_lower
+    ]
 
 
 def _is_enum_member_exported(enum_symbol: VbaSymbol, module_kind: ModuleSymbolKind | None) -> bool:
@@ -345,6 +415,9 @@ class ProjectIndex:
         "_module_sources",
         "_module_resolved_constants",
         "_module_implements_lists",
+        "_module_implicit_members",
+        "_module_predeclared_ids",
+        "_module_designer_classes",
         "_query_cache",
     )
 
@@ -354,6 +427,9 @@ class ProjectIndex:
         self._module_sources: dict[str, str] = {}
         self._module_resolved_constants: dict[str, dict[str, int | None]] = {}
         self._module_implements_lists: dict[str, list[str]] = {}
+        self._module_implicit_members: dict[str, Sequence[ImplicitMember]] = {}
+        self._module_predeclared_ids: dict[str, bool] = {}
+        self._module_designer_classes: dict[str, str] = {}
         self._query_cache: dict[str, object] = {}
 
     # --- mutation ---------------------------------------------------------
@@ -372,6 +448,9 @@ class ProjectIndex:
         key = input.module_name.lower()
         self._modules[key] = symbols
         self._module_sources[key] = input.source
+        _set_or_forget(self._module_implicit_members, key, input.implicit_members)
+        _set_or_forget(self._module_predeclared_ids, key, input.predeclared_id)
+        _set_or_forget(self._module_designer_classes, key, input.designer_class)
         self._invalidate(key)
 
     def remove_module(self, module_name: str) -> None:
@@ -379,7 +458,62 @@ class ProjectIndex:
         key = module_name.lower()
         self._modules.pop(key, None)
         self._module_sources.pop(key, None)
+        self._module_implicit_members.pop(key, None)
+        self._module_predeclared_ids.pop(key, None)
+        self._module_designer_classes.pop(key, None)
         self._invalidate(key)
+
+    # --- facts about a module beyond its code ------------------------------
+
+    def module_implicit_members(self, module_name: str) -> Sequence[ImplicitMember]:
+        """A form's designer-declared controls: what the caller supplied with the
+        module, or what the module's own `.frm` header carries. An Office form keeps
+        its control tree in a binary designer, so for one read without a designer
+        this answers nothing."""
+        key = module_name.lower()
+        supplied = self._module_implicit_members.get(key)
+        if supplied is not None:
+            return supplied
+        # No kind gate: the header itself is the evidence. Only a form's source opens
+        # with VERSION 5.00 and designer Begin blocks, so every other module parses
+        # to nothing, and a form whose kind arrived mislabeled still answers.
+        return self._cached(
+            f"implicitMembers:{key}",
+            lambda: [
+                ImplicitMember(control.name, control.type)
+                for control in parse_user_form_controls(self._module_sources.get(key, ""))
+            ],
+        )
+
+    def module_implicit_members_known(self, module_name: str) -> bool:
+        """True when the module's control list is AUTHORITATIVE: the caller supplied
+        it (an empty list included), or the source carries a `.frm` designer header
+        that spells its controls out. A claim that a form lacks a member is only
+        sound behind this: a form whose designer nobody read has an unknown control
+        list, not an empty one (XLIDE issue #26)."""
+        key = module_name.lower()
+        if key in self._module_implicit_members:
+            return True
+        return has_authoritative_designer_header(self._module_sources.get(key, ""))
+
+    def module_predeclared_id(self, module_name: str) -> bool | None:
+        """Whether the module has a default instance, or None when nobody can say. A
+        caller that read the attribute header answers directly; a standalone export
+        carries the header in its own text, so the source is the fallback. A module
+        whose header was stripped stays unknown rather than defaulting either way
+        (XLIDE issue #47)."""
+        key = module_name.lower()
+        supplied = self._module_predeclared_ids.get(key)
+        if supplied is not None:
+            return supplied
+        return self._cached(
+            f"predeclaredId:{key}", lambda: _predeclared_id_from_source(self._module_sources.get(key, ""))
+        )
+
+    def module_designer_class(self, module_name: str) -> str | None:
+        """The host class the module's designer makes it (`Access.Form`), when the
+        caller said."""
+        return self._module_designer_classes.get(module_name.lower())
 
     def _invalidate(self, key: str) -> None:
         self._module_resolved_constants.pop(key, None)
@@ -410,6 +544,25 @@ class ProjectIndex:
         return items
 
     # --- queries ----------------------------------------------------------
+
+    def string_literal_words(self) -> frozenset[str]:
+        """Lowercased identifier-shaped words inside every string literal of every
+        indexed module.
+
+        A procedure named in a string may be reached by name, `Application.Run
+        "Refresh"`, `Application.OnTime Now, "Poll"`, a shape's `OnAction`, which no
+        token-level reference scan can see.
+        """
+
+        def compute() -> frozenset[str]:
+            words: set[str] = set()
+            for source in self._module_sources.values():
+                for token in tokenize_cached(source):
+                    if token.kind is TokenKind.STRING_LITERAL:
+                        words.update(identifier_words(token.raw_text))
+            return frozenset(words)
+
+        return self._cached("stringLiteralWords", compute)
 
     def implemented_interface_names(self) -> frozenset[str]:
         """Lowercased names of every module some module declares with `Implements`.
@@ -473,6 +626,11 @@ class ProjectIndex:
             for mod in self._modules.values():
                 same_module = mod.module_name.lower() == current_lower
                 if mod.module_kind is ModuleSymbolKind.DOCUMENT or mod.module_kind is ModuleSymbolKind.USERFORM:
+                    names.add(mod.module_name.lower())
+                # A class with `VB_PredeclaredId = True` has a default instance, so
+                # its bare name is a value exactly as a document module's is. A plain
+                # class name is a TYPE, and stays out (XLIDE issue #47).
+                if mod.module_kind is ModuleSymbolKind.CLASS and self.module_predeclared_id(mod.module_name) is True:
                     names.add(mod.module_name.lower())
                 for symbol in self._visible_module_level_identifier_symbols(mod, same_module):
                     names.add(symbol.name.lower())
@@ -606,7 +764,7 @@ class ProjectIndex:
                             visibility=symbol.visibility,
                         )
                     )
-            return out
+            return _shadowed_by_own_module(out, current_lower)
 
         return list(self._cached(f"typeNames:{current_lower}", compute))
 
@@ -621,14 +779,54 @@ class ProjectIndex:
                 kind = _module_kind_as_type_name(mod.module_kind)
                 if kind not in (VbaProjectTypeKind.CLASS, VbaProjectTypeKind.DOCUMENT, VbaProjectTypeKind.USERFORM):
                     continue
-                members = self._visible_object_members(mod)
+                members = list(self._visible_object_members(mod))
+                if kind is VbaProjectTypeKind.USERFORM:
+                    # A form's controls are members of the form, declared by the
+                    # designer rather than by code, so a qualified reference from
+                    # another module (`EntryForm.NameBox`) must find them on the
+                    # form's type, not only inside its own code-behind (XLIDE #22).
+                    own = {member.name.lower() for member in members}
+                    for control in self.module_implicit_members(mod.module_name):
+                        if control.name.lower() not in own:
+                            members.append(
+                                VbaProjectClassMember(
+                                    name=control.name,
+                                    kind="property",
+                                    module_name=mod.module_name,
+                                    returns=control.type,
+                                )
+                            )
+                designer_class = self.module_designer_class(mod.module_name)
                 out.append(
                     VbaProjectClassMembers(
                         name=mod.module_name,
                         kind=kind.value,
                         module_name=mod.module_name,
                         implements=self._module_implements_for(mod),
-                        exhaustive=kind is VbaProjectTypeKind.CLASS,
+                        # Classes are source-exhaustive. A form is exhaustive when
+                        # its control list is authoritative (XLIDE #26): with the
+                        # controls and code-behind here and the MSForms UserForm
+                        # base merged at resolution, the surface proves absence the
+                        # way the VBE's compiler does. Document modules stay
+                        # non-exhaustive, their host base carrying more than any
+                        # list here, and so does an Access form or report, whose
+                        # record-source fields are members no list here can name.
+                        exhaustive=(
+                            kind is VbaProjectTypeKind.CLASS
+                            or (
+                                kind is VbaProjectTypeKind.USERFORM
+                                and self.module_implicit_members_known(mod.module_name)
+                                and not is_data_bound_designer_class(designer_class)
+                            )
+                        ),
+                        designer_class=designer_class,
+                        # Documents and forms always have a default instance; only
+                        # a class module has to be asked (XLIDE #47).
+                        predeclared_id=(
+                            self.module_predeclared_id(mod.module_name)
+                            if kind is VbaProjectTypeKind.CLASS
+                            else True
+                        ),
                         members=members,
                     )
                 )
@@ -662,6 +860,7 @@ class ProjectIndex:
                 *self.project_class_members(),
                 *self.project_standard_module_members(module_name),
                 *self._project_user_type_members(module_name),
+                *self._project_enum_members(module_name),
             ]
 
         return list(self._cached(f"memberSurfaces:{current_lower}", compute))
@@ -962,6 +1161,44 @@ class ProjectIndex:
                     )
                 )
         return out
+
+    def _project_enum_members(self, module_name: str) -> list[VbaProjectClassMembers]:
+        """Enum names are member surfaces too: `Corner.TopLeft` is ordinary VBA and is
+        how a reader tells one enum's TopLeft from another's."""
+        current_lower = module_name.lower()
+        out: list[VbaProjectClassMembers] = []
+        for mod in self._modules.values():
+            same_module = mod.module_name.lower() == current_lower
+            for symbol in mod.root.children or []:
+                if symbol.kind is not VbaSymbolKind.ENUM:
+                    continue
+                if not same_module and not _is_type_exported(symbol):
+                    continue
+                out.append(
+                    VbaProjectClassMembers(
+                        name=symbol.name,
+                        kind="enum",
+                        module_name=mod.module_name,
+                        exhaustive=True,
+                        members=self._enum_constant_members(symbol),
+                    )
+                )
+        return out
+
+    def _enum_constant_members(self, symbol: VbaSymbol) -> list[VbaProjectClassMember]:
+        return [
+            VbaProjectClassMember(
+                name=member.name,
+                kind="property",
+                returns=symbol.name,
+                signature=f"{symbol.name}.{member.name} As {symbol.name}",
+                writable=False,
+                module_name=member.module_name,
+                definitions=[_project_object_member_definition(member)],
+            )
+            for member in symbol.children or []
+            if member.kind is VbaSymbolKind.ENUM_MEMBER
+        ]
 
     def _user_type_field_members(self, symbol: VbaSymbol) -> list[VbaProjectClassMember]:
         out: list[VbaProjectClassMember] = []

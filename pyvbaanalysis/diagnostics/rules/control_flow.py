@@ -14,13 +14,13 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from ...completion.type_completion import resolve_type_name
-from ...conditional import ConditionalActivity, ConditionalActivityTracker
+from ...conditional import ConditionalActivityTracker
 from ...host.host_model import HostObjectModel
 from ...flow.procedure_labels import (
     collect_procedure_label_declarations,
     collect_procedure_label_references,
 )
-from ...lexer.token_kinds import TokenKind
+from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize
 from ...parser.nodes import (
     AssignmentNode,
@@ -64,7 +64,7 @@ from ..walker import (
     token_name,
     token_text,
 )
-from .shared import scan_conditional_compilation_branch_order
+from .shared import report_repeated_keys, scan_conditional_compilation_branch_order
 
 # -- checkForEachLoopTypes -------------------------------------------------
 
@@ -659,30 +659,41 @@ def _for_each_select_block(
 def check_duplicate_case_else(
     source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
 ) -> None:
+    """A `Select Case` block may contain at most one `Case Else` (MS-VBAL 5.4.2.10;
+    oracle-verified `duplicate_case_else_compile`). Only the block's own clauses
+    count, and every `Case Else` shares one key: only the arms of one `#If` chain
+    are alternatives, and an undecidable branch still counts, which is what a
+    genuine repeat inside one arm needs."""
+
+    def case_else_key(node: BodyNode) -> str | None:
+        if not is_leaf_statement(node) or (activity is not None and activity.is_inactive(node.span)):
+            return None
+        return "case else" if _case_else_tokens(source, node.span) is not None else None
+
+    def report(repeat: BodyNode, earlier: BodyNode) -> None:
+        hit = _case_else_tokens(source, repeat.span)
+        assert hit is not None
+        case_tok, else_tok = hit
+        push(
+            "duplicateCaseElse",
+            "A 'Select Case' block can have only one 'Case Else'.",
+            Span(absolute_span(repeat.span, case_tok).start, absolute_span(repeat.span, else_tok).end),
+        )
+
     def visit_select(select: SelectBlockNode) -> None:
-        seen_case_else = False
-        for node in select.body:
-            if not is_leaf_statement(node) or (
-                activity is not None and activity.activity_for_span(node.span) is not ConditionalActivity.ACTIVE
-            ):
-                continue
-            toks = statement_tokens_after_leading_label(source, node.span)
-            case_tok = toks[0] if toks else None
-            else_tok = toks[1] if len(toks) > 1 else None
-            if case_tok is None or else_tok is None or token_text(case_tok) != "case" or token_text(else_tok) != "else":
-                continue
-            if seen_case_else:
-                push(
-                    "duplicateCaseElse",
-                    "A 'Select Case' block can have only one 'Case Else'.",
-                    Span(absolute_span(node.span, case_tok).start, absolute_span(node.span, else_tok).end),
-                )
-            else:
-                seen_case_else = True
+        report_repeated_keys(select.body, activity, case_else_key, lambda node: node.span, report)
 
     for member in active_module_members(mod, activity):
         if isinstance(member, ProcedureNode):
             _for_each_select_block(member.body, activity, visit_select)
+
+
+def _case_else_tokens(source: str, span: Span) -> tuple[VbaToken, VbaToken] | None:
+    """The `Case` and `Else` tokens of a `Case Else` clause, or None."""
+    toks = statement_tokens_after_leading_label(source, span)
+    if len(toks) < 2 or token_text(toks[0]) != "case" or token_text(toks[1]) != "else":
+        return None
+    return toks[0], toks[1]
 
 
 # -- checkElseWithoutIf ----------------------------------------------------

@@ -4,7 +4,8 @@ Ported from the host-free slice of
 xlide_vscode/src/analyzer/diagnostics/typeInference.ts (declaredShapeForSourceBinding)
 plus procedureSymbolFor from analysisContext.ts. Resolves a bare identifier to the
 declared shape (as-type, array-ness, fixed-vs-dynamic) of its source binding using
-only the symbol graph. The host/completion-coupled inference lands in M8.
+only the symbol graph. Expression typing through the host model and the member
+resolver lives in diagnostics/argument_inference.py.
 """
 
 from __future__ import annotations

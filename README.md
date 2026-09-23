@@ -17,8 +17,13 @@ It looks for more than a hundred kinds of problem, including:
 - Undeclared variables and calls to procedures or members that do not exist.
 - Code the VBA compiler rejects: duplicate declarations, malformed statements, or a `Declare` that lacks `PtrSafe` on 64-bit
   Office.
+- A type from another Office application's library the project does not
+  reference, such as `Dim doc As Word.Document` in a workbook with no reference to
+  Word.
 - Likely run-time failures, such as dividing by a constant zero or a type mismatch
   from a bad conversion.
+- Dead code: variables nothing uses or nothing reads, private procedures nothing
+  calls, and statements no path reaches.
 
 It only reports a problem when it can prove one, and stays quiet otherwise, so the
 output does not bury you in false alarms.

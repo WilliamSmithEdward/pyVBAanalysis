@@ -19,7 +19,11 @@ from dataclasses import replace
 
 from ..completion import MemberCompletionContext
 from ..conditional import create_conditional_activity_tracker
-from ..host.host_registry import host_knowledge_is_absent, host_object_model_for_token
+from ..host.host_registry import (
+    host_knowledge_is_absent,
+    host_object_model_for_token,
+    host_object_model_for_tokens,
+)
 from ..lexer.token_kinds import TokenKind
 from ..lexer.tokenize import tokenize_cached
 from ..parser.nodes import ModuleNode, Span
@@ -83,12 +87,27 @@ def analyze_module(source: str, opts: AnalyzeModuleOptions | None = None) -> lis
 
 
 def with_resolved_host_model(opts: AnalyzeModuleOptions) -> AnalyzeModuleOptions:
-    """Resolve the `host` token into a host_model once, up front, so every
-    host_model consumer inherits the caller's choice. An explicit host_model
-    wins; absent both, the Excel defaults ride as they always have."""
-    if opts.host_model is not None or opts.host is None:
+    """Resolve the `host` token, and any referenced libraries, into a host_model
+    once, up front, so every host_model consumer inherits the caller's choice. An
+    explicit host_model wins; absent all three, the Excel defaults ride as they
+    always have.
+
+    A referenced library is resolved alongside the host, in declaration order,
+    which is the order VBA itself resolves an ambiguous name in. An absent host is
+    Excel here too: upstream merges only the tokens it is given, so a referenced
+    library with no host named would drop Excel from the merge, and "absent means
+    Excel" is the contract every other path in this port keeps.
+    """
+    if opts.host_model is not None:
         return opts
-    resolved = host_object_model_for_token(opts.host)
+    referenced = list(opts.referenced_hosts or ())
+    if opts.host is None and not referenced:
+        return opts
+    resolved = (
+        host_object_model_for_token(opts.host)
+        if not referenced
+        else host_object_model_for_tokens([opts.host or "excel", *referenced])
+    )
     if resolved is None:
         return opts
     return replace(opts, host_model=resolved)
@@ -234,7 +253,7 @@ def diagnostic_member_completion_context(
     me_project_type = _me_project_type_for(opts.module_name, opts.module_kind)
     if me_project_type:
         ctx.me_project_type = me_project_type
-    me_type = _me_host_type_for(opts.module_name, opts.module_kind, opts.host)
+    me_type = _me_host_type_for(opts.module_name, opts.module_kind, opts.host, opts.designer_class)
     if me_type:
         ctx.me_type = me_type
     return ctx
@@ -247,8 +266,17 @@ def _me_project_type_for(
 
 
 def _me_host_type_for(
-    module_name: str | None, module_kind: ModuleSymbolKind | None, host: str | None = None
+    module_name: str | None,
+    module_kind: ModuleSymbolKind | None,
+    host: str | None = None,
+    designer_class: str | None = None,
 ) -> str | None:
+    # A designer class is what the module IS, whatever kind it is listed as: an
+    # Access form's `Me` reaches Requery from `Access.Form`, which the module's own
+    # text never declares. The module's project type still applies alongside, so
+    # `Me` keeps its own procedures too.
+    if designer_class:
+        return designer_class
     if not module_name or module_kind is not ModuleSymbolKind.DOCUMENT:
         return None
     lower = module_name.lower()

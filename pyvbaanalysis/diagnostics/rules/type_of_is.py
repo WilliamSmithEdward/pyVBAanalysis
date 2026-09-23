@@ -24,11 +24,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
 
-from ...completion.member_access import MemberCompletionContext
+from ...completion.member_access import (
+    KnownObjectAssignmentType,
+    MemberCompletionContext,
+    resolve_known_object_assignment_type,
+    simple_type_name_for_assignment,
+)
 from ...conditional import ConditionalActivityTracker
-from ...host import resolve_host_alias
 from ...lexer.token_kinds import TokenKind
 from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import (
@@ -48,7 +51,6 @@ from ..call_extraction import InferredArgumentType
 from ..context import PushFn
 from ..exprwalk import ProcedureExpressionVisitor
 
-_SIMPLE_TYPE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TRAILING_ARRAY_RE = re.compile(r"\s*\(\s*\)\s*$")
 
 
@@ -130,64 +132,13 @@ def check_is_operator_operands(symbols: ModuleSymbols, push: PushFn) -> Procedur
 # -- checkTypeOfIsCompatibility (always-False) ------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class _ObjectAssignmentType:
-    kind: str  # 'generic' | 'host' | 'project'
-    display: str
-    key: str
-    implements: tuple[str, ...] = ()
-
-
-def _simple_type_name_for_assignment(type_text: str) -> str | None:
-    trimmed = _TRAILING_ARRAY_RE.sub("", type_text).strip()
-    return trimmed if _SIMPLE_TYPE_NAME_RE.match(trimmed) else None
-
-
-def _resolve_known_object_assignment_type(
-    type_text: str | None, member_ctx: MemberCompletionContext
-) -> _ObjectAssignmentType | None:
-    """Port of resolveKnownObjectAssignmentType: the object class a declared type
-    names, classified as generic Object, a host type, or an unambiguous project
-    class/document/userform. Returns None for Variant/scalar/unknown."""
-    if not type_text:
-        return None
-    normalized = normalize_type(type_text)
-    if not normalized or normalized == "variant":
-        return None
-    if normalized == "object":
-        return _ObjectAssignmentType(kind="generic", display=type_text, key="object")
-    if is_known_scalar_type(normalized):
-        return None
-    host = resolve_host_alias(type_text, member_ctx.model)
-    if host:
-        return _ObjectAssignmentType(kind="host", display=type_text, key=host.lower())
-    simple = _simple_type_name_for_assignment(type_text)
-    if not simple:
-        return None
-    lower = simple.lower()
-    matches = [
-        project_type
-        for project_type in (member_ctx.project_class_members or [])
-        if project_type.kind not in ("userType", "standardModule")
-        and project_type.name.lower() == lower
-    ]
-    if len(matches) != 1:
-        return None
-    return _ObjectAssignmentType(
-        kind="project",
-        display=matches[0].name,
-        key=lower,
-        implements=tuple(matches[0].implements or []),
-    )
-
-
 def _implements_object_type(
-    actual: _ObjectAssignmentType, expected: _ObjectAssignmentType
+    actual: KnownObjectAssignmentType, expected: KnownObjectAssignmentType
 ) -> bool:
     """Port of implementsObjectType: True when the actual project class declares
     `Implements <expected>` (honouring excel.-qualified host keys)."""
     expected_names = {expected.key}
-    simple = _simple_type_name_for_assignment(expected.display)
+    simple = simple_type_name_for_assignment(expected.display)
     if simple:
         expected_names.add(simple.lower())
     last_segment = expected.key.split(".")[-1]
@@ -207,10 +158,10 @@ def _object_assignment_incompatible(
     `expected_raw`-typed object reference. Port of the object-vs-object arm of
     objectAssignmentIncompatibilityReason (scalar/Variant/Nothing arms are not
     reachable here, both operands are already concrete object types)."""
-    expected = _resolve_known_object_assignment_type(expected_raw, member_ctx)
+    expected = resolve_known_object_assignment_type(expected_raw, member_ctx)
     if expected is None or expected.kind == "generic":
         return False
-    actual = _resolve_known_object_assignment_type(actual_raw, member_ctx)
+    actual = resolve_known_object_assignment_type(actual_raw, member_ctx)
     if actual is None or actual.kind == "generic":
         return False
     if expected.key == actual.key:
@@ -231,7 +182,7 @@ def object_assignment_incompatibility_reason(
     Reused by the member-assignment Set branch. Returns the human reason string XLIDE
     emits; None whenever the operands are not both provably-incompatible object types
     (Variant/Nothing/generic/implements all stay quiet)."""
-    expected = _resolve_known_object_assignment_type(expected_raw, member_ctx)
+    expected = resolve_known_object_assignment_type(expected_raw, member_ctx)
     if expected is None or actual is None:
         return None
     actual_type = normalize_type(actual.type_)
@@ -241,7 +192,7 @@ def object_assignment_incompatibility_reason(
         return "An object assignment requires an object value."
     if expected.kind == "generic":
         return None
-    actual_object = _resolve_known_object_assignment_type(actual.type_, member_ctx)
+    actual_object = resolve_known_object_assignment_type(actual.type_, member_ctx)
     if actual_object is None or actual_object.kind == "generic":
         return None
     if expected.key == actual_object.key:
@@ -252,7 +203,7 @@ def object_assignment_incompatibility_reason(
 
 
 def _is_implemented_by_any_project_class(
-    operand_type: _ObjectAssignmentType, member_ctx: MemberCompletionContext
+    operand_type: KnownObjectAssignmentType, member_ctx: MemberCompletionContext
 ) -> bool:
     """True when any project class declares `Implements <operandType>`, so the
     operand could hold a subtype that is-a the target (stay quiet, no-FP)."""
@@ -273,8 +224,8 @@ def _check_typeof_is(
     declared = env.get(operand_name.lower())
     if not declared:
         return  # undeclared / unknown type -> quiet
-    operand_type = _resolve_known_object_assignment_type(declared, member_ctx)
-    target_type = _resolve_known_object_assignment_type(expr.type_name, member_ctx)
+    operand_type = resolve_known_object_assignment_type(declared, member_ctx)
+    target_type = resolve_known_object_assignment_type(expr.type_name, member_ctx)
     if operand_type is None or target_type is None:
         return  # not both known object types -> quiet
     if operand_type.kind == "generic" or target_type.kind == "generic":

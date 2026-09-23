@@ -1,6 +1,6 @@
 """M9: eventHandlerModuleScope rule (moduleKind.ts checkEventHandlerModuleScope parity).
 
-Flags a Sub whose name matches an Excel event handler that the current module's
+Flags a Sub whose name matches an Office event handler that the current module's
 document type does not wire (or any non-document module). 0 oracle cases assert
 this style-policy code, so it is validated by a no-false-positive sweep over the
 FULL accepted corpus plus direct positives/controls. The rule reads the vendored
@@ -83,6 +83,34 @@ def test_explicit_document_type_overrides_name() -> None:
     )
     src = "Private Sub Worksheet_Change(ByVal Target As Range)\nEnd Sub"
     assert _CODE not in _codes(src, opts)
+
+
+# -- Word's ThisDocument and a UserForm (upstream's inferDocumentType) ------
+
+
+def test_document_event_in_word_thisdocument_is_silent() -> None:
+    # Found by the differential over a Word fixture: ThisDocument fell back to the
+    # worksheet type, so its own Document_New read as wired elsewhere.
+    src = "Private Sub Document_New()\nEnd Sub\nPrivate Sub Document_Open()\nEnd Sub"
+    assert _CODE not in _codes(src, _doc("ThisDocument"))
+
+
+def test_workbook_event_in_word_thisdocument_fires_as_upstream_words_it() -> None:
+    src = "Private Sub Workbook_Open()\nEnd Sub"
+    messages = [d.message for d in analyze_module(src, _doc("ThisDocument")) if d.code == _CODE]
+    assert messages == [
+        "'Workbook_Open' matches a Workbook event handler, but this document document module "
+        "is not where that event is wired. It will behave like an ordinary procedure here."
+    ]
+
+
+def test_document_event_in_a_userform_fires() -> None:
+    opts = AnalyzeModuleOptions(module_name="UserForm1", module_kind=ModuleSymbolKind.USERFORM)
+    messages = [d.message for d in analyze_module("Private Sub Document_New()\nEnd Sub", opts) if d.code == _CODE]
+    assert messages == [
+        "'Document_New' matches a Document event handler, but this userform module "
+        "is not where that event is wired. It will behave like an ordinary procedure here."
+    ]
 
 
 # -- no-false-positive sweep over the full accepted corpus -----------------

@@ -20,7 +20,7 @@ rule suite is validated against.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 
 from .conditional import ConditionalCompilationEnvironment
 from .diagnostics import AnalyzeModuleOptions, VbaDiagnostic, analyze_module
@@ -37,6 +37,7 @@ def analyze_module_options_for(
     whole_project: bool = True,
     inline_suppression: bool = True,
     host: str | None = None,
+    referenced_hosts: Sequence[str] | None = None,
 ) -> AnalyzeModuleOptions:
     """Build the AnalyzeModuleOptions for one module from a populated ProjectIndex.
 
@@ -50,10 +51,13 @@ def analyze_module_options_for(
     False when it does not (a single file in isolation) to suppress the rules that
     require the whole project rather than report them as false positives.
     ``host`` names the Office host the modules belong to ("word", "powerpoint",
-    "access"); absent means Excel, exactly as before.
+    "access"); absent means Excel, exactly as before. ``referenced_hosts`` names the
+    other Office libraries the project references, in declaration order; None means
+    the reference list is unknown, [] that it is known to name nothing else.
     """
     return AnalyzeModuleOptions(
         host=host,
+        referenced_hosts=referenced_hosts,
         module_name=module_name,
         module_kind=module_kind,
         whole_project=whole_project,
@@ -61,7 +65,9 @@ def analyze_module_options_for(
         severity_overrides=severity_overrides,
         conditional_compilation=conditional_compilation,
         project_procedures=index.procedure_signatures(),
-        project_class_members=index.project_class_members(),
+        # Every surface a qualified name can reach from this module: classes, and
+        # the standard modules, user Types and Enums it can see.
+        project_class_members=index.project_member_surfaces(module_name),
         project_integer_constants=index.visible_external_integer_constant_expressions(module_name),
         project_visible_symbols=index.visible_identifier_symbols(module_name),
         project_types=index.visible_type_names(module_name),
@@ -69,6 +75,13 @@ def analyze_module_options_for(
         known_identifiers=index.visible_identifier_names(module_name),
         known_non_type_names=index.visible_non_type_names(module_name),
         implemented_interfaces=index.implemented_interface_names(),
+        project_string_literal_words=index.string_literal_words(),
+        # A UserForm's controls are members its own text never declares. The index
+        # knows them when the caller supplied them with the module or the source
+        # carries a `.frm` header that lists them; otherwise the form's control
+        # list is unknown and stays None.
+        implicit_members=list(index.module_implicit_members(module_name)) or None,
+        designer_class=index.module_designer_class(module_name),
     )
 
 
@@ -118,6 +131,7 @@ def analyze_project(
     whole_project: bool = True,
     inline_suppression: bool = True,
     host: str | None = None,
+    referenced_hosts: Sequence[str] | None = None,
 ) -> dict[str, list[VbaDiagnostic]]:
     """Analyze a whole VBA project with full cross-module context.
 
@@ -170,6 +184,7 @@ def analyze_project(
             whole_project=whole_project,
             inline_suppression=inline_suppression,
             host=host,
+            referenced_hosts=referenced_hosts,
         )
         results[module.module_name] = analyze_module(module.source, opts)
     return results

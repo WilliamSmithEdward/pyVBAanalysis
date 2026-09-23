@@ -162,7 +162,16 @@ and never against Excel's. Analyzing a Word module under Excel's model reports
 members and constants that are perfectly legal in Word (`Selection.TypeText`,
 `ActiveDocument`, `wdOrientPortrait`), which is the false positive this avoids.
 
-`analyze_workbook` remains the Excel-only entry point and is unchanged.
+The project's reference list is read with its modules. A workbook that references
+the Word object library can declare `Dim doc As Word.Document` and use Word's
+constants, and those are checked against Word's model. A workbook that names
+`Word.Document` without the reference reports `missing-library-reference`: the VBE
+refuses that declaration with "User-defined type not defined". To read a container
+without analyzing it, `read_office_project(path)` in `pyvbaanalysis.reader` returns
+its modules, its host, and the other Office libraries it references.
+
+`analyze_workbook` is the Excel-only form of the same call: it refuses any other
+extension and otherwise returns exactly what `analyze_office_file` does.
 
 A path that is not a readable container, or a container with no readable VBA, raises
 `WorkbookReadError`. Legacy `.ppt` is not readable: pyOpenVBA reads it as a plain
@@ -180,9 +189,28 @@ knowledge at all rather than falling back to Excel's.
 from pyvbaanalysis import analyze_project
 
 analyze_project(modules, host="word")      # Word's object model
+analyze_project(modules, host="vb6")       # VB6: App, Screen, Printer, the intrinsic controls
 analyze_project(modules, host="outlook")   # no model yet: stays quiet, never Excel's
 analyze_project(modules)                   # Excel, exactly as before
 ```
+
+A VB6 project is no Office container, so nothing reads one from a file; pass its
+modules with `host="vb6"`. The VB6 model offers and describes, and never proves a
+member absent.
+
+Name the other Office libraries the project references the same way, in the order
+its References dialog lists them. The project's own host wins any name two
+libraries share, as it does in VBA:
+
+```python
+analyze_project(modules, referenced_hosts=["word"])   # an Excel project referencing Word
+analyze_project(modules, referenced_hosts=[])         # known to reference nothing else
+analyze_project(modules)                              # reference list unknown
+```
+
+`missing-library-reference` only reports against a known list. Left unset, the list
+is unknown, as it is for loose `.bas` files, and the check stays silent rather than
+guess that a reference is missing.
 
 The reader loads the workbook and its VBA into memory and does not bound the input
 size, so impose your own limit (for example a maximum file size) before pointing it
@@ -335,3 +363,7 @@ workbook. Tune the gate with the flags above: `--fail-level warning` to also fai
 warnings, `--severity option-explicit-missing=off` or `--ignore <code>` to mute a
 code, and `--partial-project` when the checked-in files are only a fragment of the
 project. Use `--format json` if a later step needs to parse the results.
+
+The dead-code checks (`unused-variable`, `variable-never-read`, `unused-procedure`,
+`unreachable-code`) report at `information` level. Without `--fail-level`, the gate
+fails on any diagnostic, so a single unused variable fails the run.

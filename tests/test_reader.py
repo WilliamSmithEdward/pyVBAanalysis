@@ -211,7 +211,10 @@ def test_loose_severity_override_is_case_insensitive(tmp_path: Path) -> None:
 # -- workbook reader (fake pyOpenVBA) --------------------------------------
 
 
-def _fake_pyopenvba(modules: list) -> types.SimpleNamespace:  # type: ignore[type-arg]
+def _fake_pyopenvba(
+    modules: list,  # type: ignore[type-arg]
+    libids: tuple[str, ...] = (),
+) -> types.SimpleNamespace:
     class _Kind:
         standard = "standard"
         other = "other"
@@ -227,7 +230,8 @@ def _fake_pyopenvba(modules: list) -> types.SimpleNamespace:  # type: ignore[typ
             return False
 
         def vba_project(self) -> types.SimpleNamespace:
-            return types.SimpleNamespace(modules=self._modules)
+            references = [types.SimpleNamespace(libid=libid) for libid in libids]
+            return types.SimpleNamespace(modules=self._modules, references=references)
 
     return types.SimpleNamespace(
         ExcelFile=_Office,
@@ -269,6 +273,34 @@ def test_analyze_workbook_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
     result = analyze_workbook("book.xlsm")
     assert "member-not-found" in {d.code for d in result["Module1"]}
     assert set(analyze_workbook("book.xlsm", only=["Module1"])) == {"Module1"}
+
+
+_WORD_LIBID = (
+    r"*\G{00020905-0000-0000-C000-000000000046}#8.7#0#"
+    r"C:\Program Files\Microsoft Office\root\Office16\MSWORD.OLB#Microsoft Word 16.0 Object Library"
+)
+
+
+@pytest.mark.parametrize(("libids", "reported"), [((), True), ((_WORD_LIBID,), False)])
+def test_analyze_workbook_reads_the_reference_list(
+    monkeypatch: pytest.MonkeyPatch, libids: tuple[str, ...], reported: bool
+) -> None:
+    """The Excel entry point and the generic one read the same container the same
+    way, so they agree on a library the workbook does or does not reference."""
+    entry = (
+        'Attribute VB_Name = "Module1"\r\n'
+        "Public Sub S()\r\n    Dim doc As Word.Document\r\nEnd Sub\r\n"
+    )
+    fake = _fake_pyopenvba([_fake_module("Module1", entry, "standard")], libids)
+    monkeypatch.setattr(workbook_mod, "_require_pyopenvba", lambda: fake)
+    by_workbook = analyze_workbook("book.xlsm")
+    assert ("missing-library-reference" in {d.code for d in by_workbook["Module1"]}) is reported
+    assert by_workbook == workbook_mod.analyze_office_file("book.xlsm")
+
+
+def test_analyze_workbook_refuses_other_hosts() -> None:
+    with pytest.raises(workbook_mod.WorkbookReadError, match="analyze_office_file"):
+        analyze_workbook("report.docm")
 
 
 def test_unsupported_extension_raises(monkeypatch: pytest.MonkeyPatch) -> None:

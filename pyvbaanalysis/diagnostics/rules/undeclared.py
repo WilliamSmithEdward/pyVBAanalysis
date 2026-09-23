@@ -26,7 +26,13 @@ from ...host import (
     resolve_host_constant,
     resolve_host_global,
 )
-from ...host.host_model import HostObjectModel
+from ...host.host_model import (
+    HostObjectModel,
+    get_host_members,
+    resolve_host_enum,
+    resolve_host_global_member,
+)
+from ...identity_cache import IdentityLru
 from ...lexer.keyword_table import is_reserved_identifier
 from ...lexer.token_helpers import match_paren_from
 from ...lexer.token_kinds import VbaToken
@@ -45,17 +51,21 @@ from ...runtime import (
     resolve_runtime_constant,
     resolve_runtime_function,
     resolve_runtime_object,
+    resolve_vba_library_qualifier,
 )
 from ...symbols.name_resolution import (
     BareIdentifierContext,
     BareIdentifierResolutionScope,
 )
 from ...symbols.symbol_model import (
+    ImplicitMember,
+    ModuleSymbolKind,
     ModuleSymbols,
     VbaProcedureSignature,
     VbaProjectClassMembers,
     VbaSymbol,
     VbaSymbolKind,
+    is_data_bound_designer_class,
 )
 from ..call_extraction import (
     CallableTypeSignature,
@@ -170,13 +180,19 @@ def check_unknown_call_statement(
     known_procedures: AbstractSet[str],
     project_visible_symbols: Sequence[VbaSymbol] | None,
     host_model: HostObjectModel | None,
+    designer_class: str | None,
     push: PushFn,
 ) -> ProcedureStatementVisitor:
     """A bare call statement whose callee resolves to nothing: "Sub or Function not
     defined". Resolution covers project procedures, source bindings, Application
     members, host globals, and the VBA runtime, so only truly-unknown names fire."""
     known = {name.lower() for name in known_procedures}
+    # The host injects Application's members into the global scope, so a bare call
+    # may legitimately bind to one of them (Calculate, Volatile, ...).
     app_members = application_member_names(host_model)
+    # A module IS its designer's class, so that class's own methods are in scope
+    # unqualified: Requery in an Access form.
+    designer_members = designer_class_member_names(designer_class, host_model)
 
     def is_known(name: str, proc_sym: VbaSymbol | None) -> bool:
         lower = name.lower()
@@ -186,7 +202,11 @@ def check_unknown_call_statement(
                 symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.CALL
             )
             or lower in app_members
+            or lower in designer_members
             or resolve_host_global(name, host_model) is not None
+            # The host's hidden Global interface is bare-callable too (XLIDE #34).
+            or resolve_host_global_member(name, host_model) is not None
+            or resolve_host_enum(name, host_model) is not None
             or resolve_runtime_object(name) is not None
             or resolve_runtime_function(name) is not None
         )
@@ -408,7 +428,10 @@ def check_undeclared_variables(
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None,
     project_members: Sequence[VbaProjectClassMembers] | None,
     project_visible_symbols: Sequence[VbaSymbol] | None,
+    implicit_members: Sequence[ImplicitMember] | None,
+    module_kind: ModuleSymbolKind | None,
     host_model: HostObjectModel | None,
+    designer_class: str | None,
     push: PushFn,
 ) -> None:
     """With Option Explicit, a variable must be declared before it is assigned or
@@ -416,10 +439,26 @@ def check_undeclared_variables(
     cross-module globals and enum members never false-positive."""
     if not _has_option_explicit(mod, activity) or known_identifiers is None:
         return
+    # A form's controls are declared by its DESIGNER, not its text. No control list
+    # at all is not an empty one: reading it as empty claimed every control the
+    # form's own code-behind names was undeclared (XLIDE issue #48).
+    if module_kind is ModuleSymbolKind.USERFORM and implicit_members is None:
+        return
+    # An Access form or report answers with a list too, but never the whole one:
+    # every field of its record source is a member as well, and only the running
+    # database knows them. A bare `CustomerID` there is a field, so the list cannot
+    # call it undeclared.
+    if is_data_bound_designer_class(designer_class):
+        return
+    implicit_member_names = {member.name.lower() for member in implicit_members or ()}
 
     known = {name.lower() for name in known_identifiers}
+    bracket_names_evaluate = _host_evaluates_bracketed_names(host_model)
     module_signatures = callable_type_signatures_for(symbols, project_procedures)
     app_members = application_member_names(host_model)
+    # The designer's class contributes members the text never declares, and a bare
+    # reference to one is correct code.
+    designer_members = designer_class_member_names(designer_class, host_model)
 
     def is_known(
         name: str, proc_sym: VbaSymbol | None, context: BareIdentifierContext
@@ -427,14 +466,27 @@ def check_undeclared_variables(
         lower = name.lower()
         return (
             lower == "vba"
+            # A UserForm's controls are members the designer declared, not the
+            # module's text; referring to one is correct VBA.
+            or lower in implicit_member_names
+            or lower in designer_members
             or source_identifier_bound(symbols, proc_sym, project_visible_symbols, name, context)
             or lower in known
             or lower in app_members
             or resolve_host_global(name, host_model) is not None
+            # Members of the host's hidden Global interface are callable bare
+            # (Word's InchesToPoints, Excel's Union), XLIDE #34.
+            or resolve_host_global_member(name, host_model) is not None
             or resolve_host_constant(name, host_model) is not None
+            # An enum name is a legal qualifier: `XlAxisType.xlCategory` is ordinary
+            # VBA, and Option Explicit called the qualifier undeclared.
+            or resolve_host_enum(name, host_model) is not None
             or resolve_runtime_constant(name) is not None
             or resolve_runtime_object(name) is not None
             or resolve_runtime_function(name) is not None
+            # VBA's own enums and modules qualify their members the same way:
+            # `VbMsgBoxResult.vbYes`, `ColorConstants.vbRed`, `Strings.Left`.
+            or resolve_vba_library_qualifier(name) is not None
         )
 
     for member in active_module_members(mod, activity):
@@ -473,9 +525,51 @@ def check_undeclared_variables(
                 module_signatures,
                 project_members,
             ):
+                if ref.bracketed and bracket_names_evaluate:
+                    continue
                 report(ref.name, ref.span, "using it", BareIdentifierContext.EXPRESSION)
 
         for_each_undeclared_reference_span(source, member.body, visit, activity)
+
+
+def _host_evaluates_bracketed_names(host_model: HostObjectModel | None) -> bool:
+    """Whether `[name]` on its own is a HOST LOOKUP rather than a variable.
+
+    In Excel the square brackets are shorthand for `Application.Evaluate`, so `[A1]`
+    and `[TaxRate]` are ordinary code that compiles and needs no declaration. Word
+    has no such feature: `v = [foo]` with nothing declaring `foo` is a compile error
+    there, so the report is right for Word and PowerPoint and must stay.
+
+    Only a POSITIVELY identified non-Excel host reports. An absent model is Excel's
+    by default, and a host whose model knows nothing asserts nothing, so both of
+    those suppress rather than guess.
+    """
+    host_name = host_model.get("hostName") if host_model is not None else None
+    return host_name is None or host_name == "Excel"
+
+
+_DESIGNER_CLASS_MEMBER_NAMES = IdentityLru(capacity=8)
+
+
+def designer_class_member_names(
+    designer_class: str | None, model: HostObjectModel | None
+) -> frozenset[str]:
+    """The members of the class a module's designer makes it, lowercased. Inside such
+    a module they are in scope unqualified, exactly as the module's own procedures
+    are, because the module IS one of these. Empty when the caller cannot say which
+    class it is, or the model does not carry that type."""
+    if not designer_class or model is None:
+        return frozenset()
+    by_type: dict[str, frozenset[str]] | None = _DESIGNER_CLASS_MEMBER_NAMES.get(model)
+    if by_type is None:
+        by_type = {}
+        _DESIGNER_CLASS_MEMBER_NAMES.put(by_type, model)
+    key = designer_class.lower()
+    names = by_type.get(key)
+    if names is None:
+        names = frozenset(member["name"].lower() for member in get_host_members(designer_class, model))
+        by_type[key] = names
+    return names
 
 
 def _undeclared_read_references(

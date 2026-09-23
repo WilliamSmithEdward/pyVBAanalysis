@@ -2,24 +2,39 @@
 
 Ported from the inference engine of
 xlide_vscode/src/analyzer/diagnostics/typeInference.ts: inferExpressionType and
-its operand splitters, the ByRef / string-arithmetic / numeric-overflow operand
-checks, incompatibilityReason, and validateArgumentTypes(ForSignature).
+its operand splitters, the host-global, runtime-object and external-constant
+value types, member-expression typing through the member-completion context, the
+ByRef / string-arithmetic / numeric-overflow operand checks,
+incompatibilityReason, and validateArgumentTypes(ForSignature).
 
-The host/completion-coupled resolution paths (host globals, runtime/host
-constants, and member-expression typing via the member-completion context)
-deliberately resolve to None here. That is precision-only: an unresolved
-argument type is simply not checked, so it can never become a false positive.
+The member-completion paths run only when the caller passes the source and a
+member context; without them an expression that needs one resolves to None, and
+an unresolved argument type is simply not checked.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 
+from ..completion.member_access import (
+    MemberCompletionContext,
+    MemberCompletionEntry,
+    is_explicit_element_accessor,
+    resolve_exact_member_completion,
+)
 from ..constants.integer_constant_expression import parse_decimal_integer_literal
+from ..host.host_model import (
+    HostConstant,
+    HostObjectModel,
+    get_host_members,
+    resolve_host_constant,
+    resolve_host_global,
+)
 from ..lexer.token_helpers import match_paren_from
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..parser.nodes import Span
+from ..runtime.vba_runtime import VbaRuntimeConstant, resolve_runtime_constant, resolve_runtime_object
 from ..symbols.symbol_model import qualified_procedure_key
 from ..types.type_inference import SourceDeclaredType
 from ..types.type_names import (
@@ -48,8 +63,10 @@ from .callable_signatures import (
     callable_signature_for,
     callable_signature_for_call,
     parenthesized_call_name_at,
+    parse_runtime_display_signature,
     runtime_callable_source_shadowed,
 )
+from .const_expr import numeric_external_constant_value
 from .context import PushFn
 from .walker import span_for_tokens, strip_header_brackets, token_name, token_text
 
@@ -74,6 +91,9 @@ def infer_argument_type(
     source_names: SourceNameScope | None = None,
     resolve_expression_type: SourceDeclaredTypeResolver | None = None,
     resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None = None,
+    *,
+    source: str | None = None,
+    member_ctx: MemberCompletionContext | None = None,
 ) -> InferredArgumentType | None:
     return infer_expression_type(
         _significant(slot),
@@ -83,6 +103,8 @@ def infer_argument_type(
         source_names,
         resolve_expression_type,
         resolve_qualified_expression_type,
+        source=source,
+        member_ctx=member_ctx,
     )
 
 
@@ -94,6 +116,9 @@ def infer_expression_type(
     source_names: SourceNameScope | None = None,
     resolve_expression_type: SourceDeclaredTypeResolver | None = None,
     resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None = None,
+    *,
+    source: str | None = None,
+    member_ctx: MemberCompletionContext | None = None,
 ) -> InferredArgumentType | None:
     if not toks:
         return None
@@ -102,6 +127,7 @@ def infer_expression_type(
         return infer_expression_type(
             unwrapped, slice_start, env, module_signatures, source_names,
             resolve_expression_type, resolve_qualified_expression_type,
+            source=source, member_ctx=member_ctx,
         )
     signed = _infer_signed_numeric_literal(toks, slice_start)
     if signed is not None:
@@ -109,18 +135,21 @@ def infer_expression_type(
     concatenation = _infer_string_concatenation_expression_type(
         toks, slice_start, env, module_signatures, source_names,
         resolve_expression_type, resolve_qualified_expression_type,
+        source=source, member_ctx=member_ctx,
     )
     if concatenation is not None:
         return concatenation
     arithmetic = _infer_arithmetic_expression_type(
         toks, slice_start, env, module_signatures, source_names,
         resolve_expression_type, resolve_qualified_expression_type,
+        source=source, member_ctx=member_ctx,
     )
     if arithmetic is not None:
         return arithmetic
     return _infer_atomic_expression_type(
         toks, slice_start, env, module_signatures, source_names,
         resolve_expression_type, resolve_qualified_expression_type,
+        source=source, member_ctx=member_ctx,
     )
 
 
@@ -155,6 +184,9 @@ def _infer_atomic_expression_type(
     source_names: SourceNameScope | None,
     resolve_expression_type: SourceDeclaredTypeResolver | None,
     resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None,
+    *,
+    source: str | None = None,
+    member_ctx: MemberCompletionContext | None = None,
 ) -> InferredArgumentType | None:
     first = toks[0]
     span = Span(slice_start + first.start, slice_start + first.end)
@@ -163,6 +195,7 @@ def _infer_atomic_expression_type(
         if literal is not None:
             return literal
 
+    model = member_ctx.model if member_ctx is not None else None
     name = token_name(first)
     if name and len(toks) == 1:
         declared_type = resolve_expression_type(name) if resolve_expression_type else None
@@ -178,8 +211,10 @@ def _infer_atomic_expression_type(
             return InferredArgumentType(
                 type_=sig.return_type, label=f"{name} As {sig.return_type}", span=span
             )
-        # Host globals and runtime/host constants deliberately resolve to None here.
-        return None
+        external_object = _infer_bare_external_object_expression_type(name, span, source_names, model)
+        if external_object is not None:
+            return external_object
+        return _infer_bare_external_constant_expression_type(name, span, source_names, model)
 
     if token_text(first) == "new" and len(toks) == 2:
         type_name = token_name(toks[1])
@@ -242,7 +277,11 @@ def _infer_atomic_expression_type(
                         span=member_span,
                     )
                 return None
-            # Qualified runtime/host constants deliberately resolve to None here.
+            external = _infer_qualified_external_constant_expression_type(
+                name, member, member_span, model
+            )
+            if external is not None:
+                return external
         if (
             member
             and len(toks) > 3
@@ -257,9 +296,229 @@ def _infer_atomic_expression_type(
                     label=f"{name}.{member}(...) As {sig.return_type}",
                     span=Span(slice_start + toks[2].start, slice_start + toks[2].end),
                 )
-    # Member-expression typing via the member-completion context deliberately
-    # resolves to None here.
+    if source is not None and member_ctx is not None:
+        return infer_member_expression_type(source, toks, slice_start, member_ctx)
     return None
+
+
+def _infer_bare_external_object_expression_type(
+    name: str,
+    span: Span,
+    source_names: SourceNameScope | None,
+    model: HostObjectModel | None,
+) -> InferredArgumentType | None:
+    """A host global (`Application`, `ActiveCell`) or runtime object (`Err`) named
+    bare, unless source declares the name."""
+    if runtime_callable_source_shadowed(name, source_names):
+        return None
+    host_type = resolve_host_global(name, model)
+    if host_type:
+        return InferredArgumentType(type_=host_type, label=f"{name} As {host_type}", span=span)
+    runtime_object = resolve_runtime_object(name)
+    if runtime_object is not None:
+        runtime_type = runtime_object.get("type", "")
+        return InferredArgumentType(type_=runtime_type, label=f"{name} As {runtime_type}", span=span)
+    return None
+
+
+def _infer_bare_external_constant_expression_type(
+    name: str,
+    span: Span,
+    source_names: SourceNameScope | None,
+    model: HostObjectModel | None,
+) -> InferredArgumentType | None:
+    """A VBA runtime or host constant named bare. A name both define stays unknown."""
+    if runtime_callable_source_shadowed(name, source_names):
+        return None
+    candidates = [
+        candidate
+        for candidate in (
+            _inferred_external_constant(name, resolve_runtime_constant(name)),
+            _inferred_external_constant(name, resolve_host_constant(name, model)),
+        )
+        if candidate is not None
+    ]
+    if len(candidates) != 1:
+        return None
+    return replace(candidates[0], span=span)
+
+
+# Qualifiers that name a host's own constant library, resolved against the CURRENT
+# host's model: `Word.wdRed` answers in a Word module and misses in an Excel one
+# (XLIDE issue #24).
+_HOST_CONSTANT_QUALIFIERS = frozenset({"excel", "word", "powerpoint", "access", "office"})
+
+
+def _infer_qualified_external_constant_expression_type(
+    qualifier: str,
+    name: str,
+    span: Span,
+    model: HostObjectModel | None,
+) -> InferredArgumentType | None:
+    lower = qualifier.lower()
+    if lower == "vba":
+        inferred = _inferred_external_constant(f"{qualifier}.{name}", resolve_runtime_constant(name))
+        return replace(inferred, span=span) if inferred is not None else None
+    if lower in _HOST_CONSTANT_QUALIFIERS:
+        inferred = _inferred_external_constant(f"{qualifier}.{name}", resolve_host_constant(name, model))
+        return replace(inferred, span=span) if inferred is not None else None
+    return None
+
+
+def _inferred_external_constant(
+    display_name: str, constant: VbaRuntimeConstant | HostConstant | None
+) -> InferredArgumentType | None:
+    if constant is None:
+        return None
+    declared_type = constant.get("type")
+    numeric_value = numeric_external_constant_value(constant.get("value"))
+    if numeric_value is not None:
+        return InferredArgumentType(
+            type_="Long",
+            label=f"{display_name} As {declared_type if declared_type is not None else 'Long'}",
+            span=Span(0, 0),
+            numeric_value=numeric_value,
+            numeric_text=display_name,
+            # A named-constant origin, so an overflow reads as the constant's value
+            # rather than as a "numeric literal".
+            numeric_constant_name=display_name,
+        )
+    if normalize_type(declared_type) == "string":
+        return InferredArgumentType(
+            type_="String",
+            label=f"{display_name} As {declared_type if declared_type is not None else 'String'}",
+            span=Span(0, 0),
+        )
+    return None
+
+
+# -- member-expression typing ----------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _FinalMemberToken:
+    name: str
+    token: VbaToken
+    called: bool
+    argument_tokens: Sequence[VbaToken] | None = None
+
+
+def infer_member_expression_type(
+    source: str,
+    toks: Sequence[VbaToken],
+    slice_start: int,
+    member_ctx: MemberCompletionContext,
+) -> InferredArgumentType | None:
+    """The type a member-access expression yields (`ActiveSheet.Range("A1")`,
+    `p.Name`), from the member the completion context resolves."""
+    if _has_top_level_operator(toks):
+        return None
+    resolved = _final_member_token_in_expression(toks)
+    if resolved is None:
+        return None
+    member = resolve_exact_member_completion(
+        source, resolved.name, slice_start + resolved.token.end, member_ctx
+    )
+    if member is None or not member.returns:
+        return None
+    if not resolved.called and member.kind == "method" and not _member_accepts_zero_arguments(member):
+        return None
+    return_type = _member_expression_return_type(member, resolved.argument_tokens, member_ctx)
+    label_start = toks[0].start if toks else resolved.token.start
+    label_end = toks[-1].end if resolved.called else resolved.token.end
+    label_text = source[slice_start + label_start : slice_start + label_end].strip()
+    return InferredArgumentType(
+        type_=return_type,
+        label=f"{label_text} As {return_type}",
+        span=Span(slice_start + resolved.token.start, slice_start + resolved.token.end),
+    )
+
+
+def _member_expression_return_type(
+    member: MemberCompletionEntry,
+    argument_tokens: Sequence[VbaToken] | None,
+    member_ctx: MemberCompletionContext,
+) -> str:
+    # Calling a member with arguments indexes into it. When the member returns a
+    # host collection (one whose Item resolves to an element type), the call yields
+    # that element: ws.ChartObjects(1) is a ChartObject, not the collection. A
+    # concrete-typed call keeps its declared type (ws.Range("A1") stays Range), and
+    # Item/_Default/Add already return the resolved element.
+    if member.returns and argument_tokens and not is_explicit_element_accessor(member.name):
+        element = _default_host_item_return_type(member.returns, member_ctx)
+        return element if element is not None else member.returns
+    return member.returns if member.returns else "Variant"
+
+
+def _default_host_item_return_type(type_name: str, member_ctx: MemberCompletionContext) -> str | None:
+    item = next(
+        (m for m in get_host_members(type_name, member_ctx.model) if m["name"].lower() == "item"),
+        None,
+    )
+    if item is None:
+        return None
+    if item.get("returns"):
+        return item["returns"]
+    # A mixed-element collection (Sheets, whose Item is a Worksheet OR a Chart)
+    # carries returnsAnyOf instead. Its indexed element is a late-bound Object, which
+    # any specific object target accepts, so `Set ws = ThisWorkbook.Sheets("x")` is
+    # not a mismatch while single-typed collections stay strict.
+    if item.get("returnsAnyOf"):
+        return "Object"
+    return None
+
+
+def _final_member_token_in_expression(toks: Sequence[VbaToken]) -> _FinalMemberToken | None:
+    if not toks:
+        return None
+    last = toks[-1]
+    last_name = token_name(last)
+    if last_name and len(toks) >= 2 and toks[-2].raw_text == ".":
+        return _FinalMemberToken(last_name, last, called=False)
+    if last.raw_text != ")":
+        return None
+    open_index = _matching_open_paren_index(toks, len(toks) - 1)
+    if open_index < 2:
+        return None
+    member = toks[open_index - 1]
+    member_name = token_name(member)
+    if not member_name or toks[open_index - 2].raw_text != ".":
+        return None
+    return _FinalMemberToken(
+        member_name, member, called=True, argument_tokens=toks[open_index + 1 : -1]
+    )
+
+
+def _matching_open_paren_index(toks: Sequence[VbaToken], close: int) -> int:
+    depth = 0
+    for i in range(close, -1, -1):
+        raw = toks[i].raw_text
+        if raw == ")":
+            depth += 1
+        elif raw == "(":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _has_top_level_operator(toks: Sequence[VbaToken]) -> bool:
+    depth = 0
+    for tok in toks:
+        raw = tok.raw_text
+        if raw in ("(", "["):
+            depth += 1
+        elif raw in (")", "]"):
+            depth -= 1
+        elif depth == 0 and tok.kind is TokenKind.OPERATOR:
+            return True
+    return False
+
+
+def _member_accepts_zero_arguments(member: MemberCompletionEntry) -> bool:
+    if not member.signature:
+        return False
+    return callable_accepts_zero_arguments(parse_runtime_display_signature(member.name, member.signature))
 
 
 def _infer_atomic_literal(first: VbaToken, span: Span) -> InferredArgumentType | None:
@@ -349,6 +608,9 @@ def _infer_arithmetic_expression_type(
     source_names: SourceNameScope | None,
     resolve_expression_type: SourceDeclaredTypeResolver | None,
     resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None,
+    *,
+    source: str | None = None,
+    member_ctx: MemberCompletionContext | None = None,
 ) -> InferredArgumentType | None:
     parts = _split_top_level_arithmetic_operands(toks)
     if len(parts) < 2:
@@ -357,6 +619,7 @@ def _infer_arithmetic_expression_type(
         inferred = infer_expression_type(
             part, slice_start, env, module_signatures, source_names,
             resolve_expression_type, resolve_qualified_expression_type,
+            source=source, member_ctx=member_ctx,
         )
         normalized = normalize_type(inferred.type_ if inferred is not None else None)
         if not normalized or not is_numeric_type(normalized):
@@ -374,6 +637,9 @@ def _infer_string_concatenation_expression_type(
     source_names: SourceNameScope | None,
     resolve_expression_type: SourceDeclaredTypeResolver | None,
     resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None,
+    *,
+    source: str | None = None,
+    member_ctx: MemberCompletionContext | None = None,
 ) -> InferredArgumentType | None:
     parts = _split_top_level_operands(toks, ("&",))
     if len(parts) < 2:
@@ -382,6 +648,7 @@ def _infer_string_concatenation_expression_type(
         inferred = infer_expression_type(
             part, slice_start, env, module_signatures, source_names,
             resolve_expression_type, resolve_qualified_expression_type,
+            source=source, member_ctx=member_ctx,
         )
         normalized = normalize_type(inferred.type_ if inferred is not None else None)
         if not normalized or not is_string_concatenation_operand_type(normalized):
@@ -640,6 +907,9 @@ def validate_argument_types(
     push: PushFn,
     resolve_expression_type: SourceDeclaredTypeResolver | None = None,
     resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None = None,
+    *,
+    source: str | None = None,
+    member_ctx: MemberCompletionContext | None = None,
 ) -> None:
     sig = callable_signature_for_call(call, module_signatures, source_names)
     if sig is None or not sig.params:
@@ -647,6 +917,7 @@ def validate_argument_types(
     validate_argument_types_for_signature(
         sig, call, env, module_signatures, source_names, push,
         resolve_expression_type, resolve_qualified_expression_type,
+        source=source, member_ctx=member_ctx,
     )
 
 
@@ -659,6 +930,9 @@ def validate_argument_types_for_signature(
     push: PushFn,
     resolve_expression_type: SourceDeclaredTypeResolver | None = None,
     resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None = None,
+    *,
+    source: str | None = None,
+    member_ctx: MemberCompletionContext | None = None,
 ) -> None:
     if not sig.params:
         return
@@ -709,6 +983,7 @@ def validate_argument_types_for_signature(
         actual = infer_argument_type(
             value_slot, call.slice_start, env, module_signatures, source_names,
             resolve_expression_type, resolve_qualified_expression_type,
+            source=source, member_ctx=member_ctx,
         )
         if actual is None:
             continue

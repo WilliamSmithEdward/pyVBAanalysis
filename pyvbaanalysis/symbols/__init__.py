@@ -17,6 +17,7 @@ from .name_resolution import (
     source_identifier_names,
 )
 from .symbol_model import (
+    ImplicitMember,
     ModuleSymbolKind,
     ModuleSymbols,
     SymbolVisibility,
@@ -45,6 +46,7 @@ __all__ = [
     "BareIdentifierResolutionScope",
     "resolve_bare_identifier_binding",
     "source_identifier_names",
+    "ImplicitMember",
     "ModuleSymbolKind",
     "ModuleSymbols",
     "SymbolVisibility",

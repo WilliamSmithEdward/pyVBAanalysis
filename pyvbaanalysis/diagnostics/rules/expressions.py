@@ -22,6 +22,7 @@ from ...constants.integer_constant_expression import (
     IntegerConstantLookup,
     resolve_raw_integer_constants,
 )
+from ...host.host_model import HostObjectModel
 from ...lexer.token_helpers import match_paren_from
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize_cached
@@ -54,12 +55,11 @@ from ..callable_signatures import (
     bare_callable_source_shadowed,
     callable_signature_for,
     callable_type_signatures_for,
+    procedure_integer_constant_lookup,
     runtime_callable_source_shadowed,
-    scoped_integer_constant_lookup,
     source_name_scope_for,
 )
 from ..const_expr import (
-    collect_body_literal_integer_constants,
     collect_module_literal_integer_constants,
     fold_integer_expression_tokens,
 )
@@ -133,17 +133,15 @@ def check_division_by_zero_expressions(
     project_visible_symbols: Sequence[VbaSymbol] | None,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    host_model: HostObjectModel | None = None,
 ) -> ProcedureStatementVisitor:
     """`/`, `\\`, or `Mod` against a provably-zero divisor raises Run-time error 11."""
     project_constants = resolve_raw_integer_constants(project_integer_constants or {}, {})
     module_constants = collect_module_literal_integer_constants(mod, activity, project_constants)
 
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
-        procedure_constants = dict(module_constants)
-        collect_body_literal_integer_constants(member.body, procedure_constants, activity)
-        proc_sym = procedure_symbol_for(symbols, member)
-        constants = scoped_integer_constant_lookup(
-            procedure_constants, symbols, proc_sym, project_visible_symbols
+        constants = procedure_integer_constant_lookup(
+            member, module_constants, symbols, project_visible_symbols, activity, host_model
         )
 
         def visitor(stmt: LeafStatementNode) -> None:

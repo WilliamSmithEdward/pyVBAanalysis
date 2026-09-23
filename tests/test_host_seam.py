@@ -93,9 +93,16 @@ def test_an_explicit_model_outranks_the_token() -> None:
 
 
 def test_word_source_false_positives_under_excel() -> None:
-    # Pins the reason the seam exists; if this ever goes silent on its own the
-    # test below stops proving anything.
-    assert _codes(WORD_SOURCE) == ["member-not-found"]
+    """Pins the reason the seam exists; if this ever goes silent on its own the
+    test below stops proving anything.
+
+    A project pass is where it shows. Standalone, `Selection.TypeText` no longer
+    reports under Excel at all: XLIDE 10.x treats Excel.Range as extensible, so an
+    absent member on it is not provable, and the undeclared-variable findings need
+    the identifier set a project pass supplies.
+    """
+    modules = [ModuleInput("Mod1", ModuleSymbolKind.STANDARD, WORD_SOURCE)]
+    assert [d.code for d in analyze_project(modules)["Mod1"]]
 
 
 @pytest.mark.parametrize("host", ["word", "outlook"])
@@ -236,11 +243,11 @@ def test_the_host_token_survives_a_project_pass() -> None:
     undeclared-variable rule is live and Word's own constants must resolve."""
     modules = [ModuleInput("Mod1", ModuleSymbolKind.STANDARD, WORD_SOURCE)]
     assert analyze_project(modules, host="word") == {"Mod1": []}
-    # The same source under Excel: four findings, every one of them false. Two
-    # globals (ActiveDocument), one constant (wdOrientPortrait) and one member
-    # (Selection.TypeText) all miss against the wrong host's surface.
+    # The same source under Excel: three findings, every one of them false. Two
+    # globals (ActiveDocument) and one constant (wdOrientPortrait) miss against the
+    # wrong host's surface. Selection.TypeText used to be a fourth; Excel.Range is
+    # extensible as of XLIDE 10.x, so an absent member on it is no longer reported.
     assert sorted(d.code for d in analyze_project(modules)["Mod1"]) == [
-        "member-not-found",
         "undeclared-variable",
         "undeclared-variable",
         "undeclared-variable",
@@ -324,22 +331,43 @@ def test_an_ordinary_class_module_is_not_a_document() -> None:
 # -- absent-host behavior is provably unchanged ----------------------------
 
 
+def _is_compare_database(diagnostic: object) -> bool:
+    return (
+        getattr(diagnostic, "code", "") == "invalid-option-statement"
+        and "Option Compare Database" in getattr(diagnostic, "message", "")
+    )
+
+
 def test_the_excel_corpus_is_identical_with_and_without_the_token() -> None:
     """Every oracle case analyzed twice: no host token, then host='excel'.
 
     This is the differential that makes "absent means Excel" a property of the
     whole corpus rather than a claim about one code path.
+
+    One finding deliberately depends on whether a host was NAMED rather than which
+    object model answers: `Option Compare Database` is an Access directive, and it
+    is reported only where a project names a host that is not Access. A file no
+    project claims names no host and is left alone. So that finding is set aside
+    here, and the test below pins that it is the only difference.
     """
     checked = 0
     for case in CASES.values():
         baseline = case_codes(case)
         for module in case.modules:
-            assert analyze_module(
-                module.source, AnalyzeModuleOptions(host="excel", module_name=module.name)
-            ) == analyze_module(module.source, AnalyzeModuleOptions(module_name=module.name))
+            named = analyze_module(module.source, AnalyzeModuleOptions(host="excel", module_name=module.name))
+            absent = analyze_module(module.source, AnalyzeModuleOptions(module_name=module.name))
+            assert [d for d in named if not _is_compare_database(d)] == absent
         assert case_codes(case) == baseline
         checked += 1
     assert checked > 400
+
+
+def test_option_compare_database_is_the_one_finding_a_named_host_adds() -> None:
+    source = "Option Explicit\nOption Compare Database\n"
+    assert analyze_module(source, AnalyzeModuleOptions()) == []
+    named = analyze_module(source, AnalyzeModuleOptions(host="excel"))
+    assert [d.code for d in named] == ["invalid-option-statement"]
+    assert analyze_module(source, AnalyzeModuleOptions(host="access")) == []
 
 
 # -- reading real containers -----------------------------------------------

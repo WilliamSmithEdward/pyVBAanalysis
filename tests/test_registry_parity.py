@@ -8,8 +8,9 @@ section 6 says CI must flag: "a code in the audit ... has no Python rule
 emitting it (unported code)".
 
 Every ported rule reports through ``push("<ruleName>", ...)`` with a literal
-rule-name string (the DIAGNOSTIC_RULES key), so a static scan of the diagnostics
-package recovers the emitted-rule set without executing any rule. After an
+rule-name string (the DIAGNOSTIC_RULES key), or through a local ``report`` helper
+that forwards one to push, so a static scan of the diagnostics package recovers
+the emitted-rule set without executing any rule. After an
 upstream data re-pin, this gate turns red on precisely the rules that still
 need porting.
 """
@@ -28,6 +29,11 @@ _PUSH_RE = re.compile(r'push\(\s*"(\w+)"')
 # rule = "a" if condition else "b" - a rule name selected at runtime between two
 # literals and pushed via the variable (argument_inference.py's type-mismatch pair).
 _SELECTED_RE = re.compile(r'"(\w+)"\s*\n?\s*if\s.+?\selse\s+"(\w+)"', re.DOTALL)
+# report("ruleName", ...) - a rule module's local helper that forwards to push, as
+# doc_comments.py does after upstream's docComments.ts. Other local helpers named
+# `report` take a word that is not a rule name ("variable", "enum", ...), so only
+# catalogue names count, exactly as for the runtime-selected names above.
+_REPORT_RE = re.compile(r'report\(\s*"(\w+)"')
 
 # Catalogue rules the Python port deliberately does not emit.
 _NOT_PORTED = {
@@ -55,6 +61,7 @@ def _scan() -> tuple[set[str], set[str]]:
         pushed |= set(_PUSH_RE.findall(text))
         for pair in _SELECTED_RE.findall(text):
             selected |= {name for name in pair if name in DIAGNOSTIC_RULES}
+        selected |= {name for name in _REPORT_RE.findall(text) if name in DIAGNOSTIC_RULES}
     return pushed, selected
 
 

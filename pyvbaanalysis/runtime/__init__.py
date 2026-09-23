@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .vba_runtime import (
     VBA_RUNTIME_FUNCTIONS,
+    VbaLibraryQualifier,
     VbaRuntimeConstant,
     VbaRuntimeFunction,
     VbaRuntimeObject,
@@ -12,11 +13,13 @@ from .vba_runtime import (
     resolve_runtime_function,
     resolve_runtime_object,
     resolve_runtime_object_type,
+    resolve_vba_library_qualifier,
     runtime_allows_explicit_call,
 )
 
 __all__ = [
     "VBA_RUNTIME_FUNCTIONS",
+    "VbaLibraryQualifier",
     "VbaRuntimeConstant",
     "VbaRuntimeFunction",
     "VbaRuntimeObject",
@@ -25,5 +28,6 @@ __all__ = [
     "resolve_runtime_function",
     "resolve_runtime_object",
     "resolve_runtime_object_type",
+    "resolve_vba_library_qualifier",
     "runtime_allows_explicit_call",
 ]

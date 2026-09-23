@@ -373,8 +373,10 @@ def check_declare_ptr_safe_for_win64(source: str, mod: ModuleNode, conditional_c
 
 
 def _describe_event_document_type(document_type: EventHandlerDocumentType | None) -> str:
-    if document_type in ("workbook", "worksheet", "chart"):
+    if document_type in ("workbook", "worksheet", "chart", "document"):
         return document_type
+    if document_type == "userform":
+        return "UserForm"
     return "unknown"
 
 
@@ -387,7 +389,7 @@ def check_event_handler_module_scope(
     activity: ConditionalActivityTracker | None,
     push: PushFn,
 ) -> None:
-    """A Sub whose name matches an Excel event handler that this module's document
+    """A Sub whose name matches an Office event handler that this module's document
     type does not wire. Port of checkEventHandlerModuleScope: pure AST + the vendored
     event catalogue + module kind; no binder or host surface. A Sub named like an
     event in the wrong module (or any non-document module) behaves as an ordinary
@@ -412,7 +414,7 @@ def check_event_handler_module_scope(
         push(
             "eventHandlerWrongModule",
             f"'{event.name}' matches a {event.owner} event handler, but this "
-            f"{module_description} is not where Excel wires that event. "
+            f"{module_description} is not where that event is wired. "
             "It will behave like an ordinary procedure here.",
             declared_name_span(source, member.span, member.name),
         )

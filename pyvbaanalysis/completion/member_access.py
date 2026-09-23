@@ -1,29 +1,25 @@
-"""Member-access type/surface resolver (reduced port of memberAccess.ts).
+"""Member-access type/surface resolver (the diagnostics half of memberAccess.ts).
 
 Given VBA source and an offset just after a member-access dot, this resolves the
 type of the receiver expression and returns the verified member surface available
-on it. The diagnostics consume exactly one seam,
-``resolve_member_surface_at(source, offset, ctx) -> ResolvedMemberSurface`` (wrapped
-by ``resolve_exhaustive_member_surface`` in ``rules/shared``), and read only
-``surface.owner`` (the message string) and member ``.name`` (a lowercased
-membership test).
+on it. The diagnostics consume two seams: ``resolve_member_surface_at`` (wrapped by
+``resolve_exhaustive_member_surface`` in ``rules/shared``) for member-not-found, and
+``resolve_exact_member_completion`` for the one member a call or assignment names,
+with its returns, writability and call signature.
 
-This is a DELIBERATELY REDUCED subset of the 1394-line memberAccess.ts. Dropped
-verbatim: every completion-UX path (``resolveMemberCompletions``,
-``resolveMemberCompletionNamed``, ``resolveMemberDefinitionsAt``,
-``completionFromSurfaceMember``, signature/doc/returns rendering, the typed-prefix
-filtering, the partial-identifier peel, and all VbaDoc plumbing). What remains is
-exactly the receiver-type resolution and the member-surface construction the
-no-false-positive member-not-found contract rides on. The EXHAUSTIVE flag is never
-synthesized: host surfaces use the host model's ``exhaustive`` flag and project
-surfaces use ``VbaProjectClassMembers.exhaustive`` verbatim.
+The completion-UX paths of memberAccess.ts are not ported: completion rows, the
+typed-prefix filter, documentation rendering, definition lookup, and the implicit
+control members an editor passes for the form being edited (the diagnostics context
+never carries them). The EXHAUSTIVE flag is never synthesized: host surfaces use the
+host model's ``exhaustive`` flag and project surfaces use
+``VbaProjectClassMembers.exhaustive`` verbatim.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..host import (
     HostObjectModel,
@@ -32,9 +28,17 @@ from ..host import (
     resolve_host_alias,
     resolve_host_global,
 )
-from ..host.host_model import HostMember
+from ..host.host_model import (
+    HostMember,
+    get_host_enum_members,
+    resolve_host_enum,
+    resolve_host_global_member,
+    resolve_host_member_signature,
+)
+from ..host.msforms import VBA_USERFORM_TYPE, msforms_control_members, resolve_msforms_type_name
+from ..host.type_extensibility import host_type_resolves_when_compiling
 from ..identity_cache import IdentityLru
-from ..lexer.token_helpers import IDENT_RE, is_ident_like
+from ..lexer.token_helpers import is_ident_like, is_identifier
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..lexer.tokenize import tokenize
 from ..parser.nodes import (
@@ -47,16 +51,25 @@ from ..parser.nodes import (
     is_leaf_statement,
 )
 from ..parser.parse_module import parse_module
-from ..runtime import resolve_runtime_object, resolve_runtime_object_type
-from ..symbols.symbol_model import VbaProjectClassMember, VbaProjectClassMembers
+from ..runtime import resolve_runtime_object, resolve_runtime_object_type, resolve_vba_library_qualifier
+from ..symbols.symbol_model import (
+    VbaProjectClassMember,
+    VbaProjectClassMembers,
+    is_data_bound_designer_class,
+)
 from ..types.type_names import is_known_scalar_type, normalize_type
 from .cursor_context import completion_significant_tokens
 
 _PROJECT_TYPE_PREFIX = "project:"
+# Receiver key for a host enumeration used as a qualifier: `XlAxisType.xlCategory`.
+_HOST_ENUM_PREFIX = "hostEnum:"
+# Receiver key for a VBA library enum or module of constants: `VbMsgBoxResult.vbYes`.
+_VBA_LIBRARY_PREFIX = "vbaLibrary:"
 _COMBINED_TYPE_PREFIX = "combined:"
 _COMBINED_TYPE_SEPARATOR = "|"
 _UNION_TYPE_PREFIX = "union:"
 _UNION_TYPE_SEPARATOR = "|"
+_TRAILING_EMPTY_PARENS_RE = re.compile(r"\s*\(\s*\)\s*$")
 
 
 @dataclass(slots=True)
@@ -87,14 +100,17 @@ class MemberCompletionContext:
 @dataclass(frozen=True, slots=True)
 class MemberCompletionEntry:
     """One member of a resolved surface. Mirrors XLIDE's CompletionMemberSource: most
-    diagnostics read only ``name``/``kind``, but the assignment-type rule reads
-    ``returns``/``writable``/``write_type`` from the exact resolved member."""
+    diagnostics read only ``name``/``kind``, the assignment-type rule reads
+    ``returns``/``writable``/``write_type`` from the exact resolved member, and the
+    member-call rules read its ``signature``."""
 
     name: str
     kind: str
     returns: str | None = None
     writable: bool | None = None
     write_type: str | None = None
+    # The verified call signature, when the source or the host metadata has one.
+    signature: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,7 +216,11 @@ def resolve_exact_member_completion(
     if surface is None:
         return None
     lower = member_name.lower()
-    return next((m for m in surface.members if m.name.lower() == lower), None)
+    member = next((m for m in surface.members if m.name.lower() == lower), None)
+    if member is None or member.signature is not None:
+        return member
+    signature = _signature_for_member(current_type, member.name, ctx)
+    return replace(member, signature=signature) if signature is not None else member
 
 
 def resolve_receiver_type_at(
@@ -289,7 +309,7 @@ def _receiver_type_from_tokens(
     )
 
 
-def _is_explicit_element_accessor(name: str) -> bool:
+def is_explicit_element_accessor(name: str) -> bool:
     """Members whose declared return IS the already-resolved element/result: the
     default member (Item/_Default) and the creation method Add. A call to one of
     these must not be element-indexed again, or a collection whose element is
@@ -318,7 +338,7 @@ def _receiver_type_from_implicit_with_chain(
         # not re-indexed (avoids over-resolving SparklineGroups.Item(1) one level).
         current_type = _apply_default_member_return_type(
             resolved.type,
-            segment.has_arguments and not _is_explicit_element_accessor(segment.name),
+            segment.has_arguments and not is_explicit_element_accessor(segment.name),
             ctx,
         )
     return current_type
@@ -386,7 +406,7 @@ def _receiver_type_from_chain(
         # accessors (Item/_Default/Add), which already return the element.
         current_type = _apply_default_member_return_type(
             resolved.type,
-            segment.has_arguments and not _is_explicit_element_accessor(segment.name),
+            segment.has_arguments and not is_explicit_element_accessor(segment.name),
             ctx,
         )
         s += 1
@@ -552,7 +572,30 @@ def _resolve_root(
     as_code = (ctx.code_names or {}).get(lower)
     if as_code:
         return _combined_type_key(project_key, as_code) if project_key else as_code
-    if project_surface is not None and project_surface.kind == "standardModule":
+    # A member of the host's hidden Global interface with a typed return is a
+    # receiver too: Excel's Union(a, b) yields a Range, Word's RecentFiles a
+    # RecentFiles (XLIDE #34). Ranked with the other host-injected names.
+    global_member = resolve_host_global_member(root, model)
+    as_global_member = global_member.get("returns") if global_member is not None else None
+    if as_global_member:
+        return _combined_type_key(project_key, as_global_member) if project_key else as_global_member
+    # VBA's own enums and modules of constants reach their constants too:
+    # `VbMsgBoxResult.vbYes`, `ColorConstants.vbRed`. VBA is first in every
+    # project's references, so it has a name a host shares: `Constants.vbCrLf` in
+    # Excel is VBA's module, not Excel's Constants enum.
+    as_vba_library = resolve_vba_library_qualifier(root) if project_key is None else None
+    if as_vba_library is not None and as_vba_library.constants is not None:
+        return f"{_VBA_LIBRARY_PREFIX}{as_vba_library.name}"
+    # An enum name reaches its own constants: `XlAxisType.xlCategory` is ordinary
+    # VBA and is how a reader tells one library's xlNone from another's.
+    as_enum = resolve_host_enum(root, model) if project_key is None else None
+    if as_enum is not None:
+        return f"{_HOST_ENUM_PREFIX}{as_enum.get('displayName', root)}"
+    # A standard module's name reaches its members, and so does a class, form or
+    # Enum name: forms carry a default instance, factory-style classes are
+    # addressed by name as a matter of course, and `Corner.TopLeft` is ordinary
+    # VBA. Misusing a class that is not predeclared is the diagnostics' concern.
+    if project_surface is not None and project_surface.kind in ("standardModule", "class", "userform", "enum"):
         return _project_type_key(lower)
     return (
         None
@@ -664,7 +707,28 @@ def _statement_executable_start(statement: Sequence[VbaToken]) -> int:
 # -- member surface --------------------------------------------------------
 
 
+# A surface depends only on its type key, the project's type list and the host model,
+# and the member-call rules ask for the same few receivers once per call. Rebuilding
+# a project class's entry list per lookup was the dominant cost of a project pass, so
+# surfaces are memoized per (project types, model) pair, whose objects live for the
+# pass. Consumers never mutate a surface.
+_SURFACES_CACHE = IdentityLru()
+
+
 def _member_surface_for_type(
+    type_name: str, ctx: MemberCompletionContext
+) -> _MemberSurface | None:
+    surfaces: dict[str, _MemberSurface | None] | None = _SURFACES_CACHE.get(
+        ctx.project_class_members, ctx.model
+    )
+    if surfaces is None:
+        surfaces = _SURFACES_CACHE.put({}, ctx.project_class_members, ctx.model)
+    if type_name not in surfaces:
+        surfaces[type_name] = _build_member_surface_for_type(type_name, ctx)
+    return surfaces[type_name]
+
+
+def _build_member_surface_for_type(
     type_name: str, ctx: MemberCompletionContext
 ) -> _MemberSurface | None:
     union = _parse_union_type_key(type_name)
@@ -681,21 +745,67 @@ def _member_surface_for_type(
             members=_merge_completion_members(*[surface.members for surface in surfaces]),
             exhaustive=all(surface.exhaustive for surface in surfaces),
         )
+    if type_name.startswith(_VBA_LIBRARY_PREFIX):
+        qualifier = resolve_vba_library_qualifier(type_name[len(_VBA_LIBRARY_PREFIX) :])
+        if qualifier is None or qualifier.constants is None:
+            return None
+        # A constant declares a type rather than returning a chainable object, so
+        # none of these members carries `returns`.
+        return _MemberSurface(
+            owner=qualifier.name,
+            members=[
+                MemberCompletionEntry(name=constant.get("name", ""), kind="property")
+                for constant in qualifier.constants
+            ],
+            # Its members are exactly the type library's, so one can be proved absent.
+            exhaustive=True,
+        )
+    if type_name.startswith(_HOST_ENUM_PREFIX):
+        enum_name = type_name[len(_HOST_ENUM_PREFIX) :]
+        constants = get_host_enum_members(enum_name, ctx.model)
+        if not constants:
+            return None
+        return _MemberSurface(
+            owner=enum_name,
+            members=[
+                MemberCompletionEntry(name=constant.get("name", ""), kind="property")
+                for constant in constants
+            ],
+            # An enum's members are exactly its constants, so this surface can prove
+            # one absent, unlike the object types, which never can.
+            exhaustive=True,
+        )
     combined = _parse_combined_type_key(type_name)
     if combined is not None:
         project_key, host_type_name = combined
         project_type = _project_class_members_by_name(ctx).get(project_key)
         host_type = get_host_type(host_type_name, ctx.model)
-        if project_type is None and host_type is None:
+        # A form's `Me` can be combined:<form>|MSForms.UserForm, and MSForms is no
+        # part of a host model, so the base surface comes from the forms metadata
+        # when the host type names a forms class.
+        forms_members = msforms_control_members(host_type_name)
+        base_members = (
+            forms_members if forms_members is not None else get_host_members(host_type_name, ctx.model)
+        )
+        if project_type is None and host_type is None and forms_members is None:
             return None
         return _MemberSurface(
             owner=project_type.name if project_type is not None else host_type_name,
             members=_merge_completion_members(
                 _project_member_entries(project_type),
-                _host_member_entries(get_host_members(host_type_name, ctx.model)),
+                _host_member_entries(base_members),
             ),
+            # A form's own `Me` follows the rule its qualified name does (XLIDE #26):
+            # the forms base plus an index-proven control list proves absence.
+            # Other combined surfaces keep the host-exhaustive gate, with no
+            # extensibility gate, unlike a bare host type: a document module such
+            # as ThisWorkbook is the project's own class, and the VBE refuses a
+            # member it lacks even though Excel's Workbook interface is extensible
+            # (oracle case workbook_unknown_member_compile).
             exhaustive=(
-                _project_source_surface_complete_when_merged_with_host(project_type)
+                project_type is not None and project_type.exhaustive is True
+                if forms_members is not None
+                else _project_source_surface_complete_when_merged_with_host(project_type)
                 and host_type is not None
                 and host_type.get("exhaustive") is True
             ),
@@ -706,6 +816,34 @@ def _member_surface_for_type(
         )
         if project_type is None:
             return None
+        if project_type.kind == "userform" and is_data_bound_designer_class(project_type.designer_class):
+            # An Access form or report is its own library's class, not a UserForm:
+            # `Form_Orders.Requery` reaches Access.Form's members, and Show and Hide
+            # are not among them. Never exhaustive: its record-source fields are
+            # members no list here can name.
+            designer_class = project_type.designer_class or ""
+            return _MemberSurface(
+                owner=project_type.name,
+                members=_merge_completion_members(
+                    _project_member_entries(project_type),
+                    _host_member_entries(get_host_members(designer_class, ctx.model)),
+                ),
+                exhaustive=False,
+            )
+        if project_type.kind == "userform":
+            # A form IS an MSForms.UserForm wherever it is reached from, so a
+            # qualified reference from another module gets Show, Hide and the rest
+            # of the form surface beside the form's code and controls (XLIDE #22).
+            # Exhaustive exactly when the index proved the control list: the merged
+            # surface then proves absence the way the VBE's compiler does (#26).
+            return _MemberSurface(
+                owner=project_type.name,
+                members=_merge_completion_members(
+                    _project_member_entries(project_type),
+                    _host_member_entries(msforms_control_members(VBA_USERFORM_TYPE) or []),
+                ),
+                exhaustive=project_type.exhaustive is True,
+            )
         return _MemberSurface(
             owner=project_type.name,
             members=_project_member_entries(project_type),
@@ -720,16 +858,39 @@ def _member_surface_for_type(
         return _MemberSurface(
             owner=runtime_object.get("name", type_name),
             members=[
-                MemberCompletionEntry(name=m["name"], kind=m.get("kind", "property"))
+                MemberCompletionEntry(
+                    name=m["name"],
+                    kind=m.get("kind", "property"),
+                    returns=m.get("returns"),
+                    signature=m.get("signature"),
+                )
                 for m in (runtime_object.get("members") or [])
             ],
             exhaustive=runtime_object.get("exhaustive") is True,
+        )
+    control_members = msforms_control_members(type_name)
+    if control_members is not None:
+        return _MemberSurface(
+            owner=type_name,
+            members=_host_member_entries(control_members),
+            # Not exhaustive: this list is for offering members, and treating it as
+            # complete would let absence become a diagnostic about form code.
+            exhaustive=False,
         )
     host_type = get_host_type(type_name, ctx.model)
     return _MemberSurface(
         owner=type_name,
         members=_host_member_entries(get_host_members(type_name, ctx.model)),
-        exhaustive=host_type is not None and host_type.get("exhaustive") is True,
+        # A complete member list proves absence only where the type library says
+        # VBA resolves against the interface while compiling. Most of Excel's
+        # object model is extensible, so `Application.Match`, a worksheet function
+        # on no interface at all, is ordinary VBA, and calling it absent reported
+        # working code as an error.
+        exhaustive=(
+            host_type is not None
+            and host_type.get("exhaustive") is True
+            and host_type_resolves_when_compiling(type_name)
+        ),
     )
 
 
@@ -738,7 +899,10 @@ def _host_member_entries(members: Sequence[HostMember]) -> list[MemberCompletion
     # (the assignment-type rule treats writable === undefined as "cannot decide").
     return [
         MemberCompletionEntry(
-            name=m["name"], kind=m.get("kind", "property"), returns=m.get("returns")
+            name=m["name"],
+            kind=m.get("kind", "property"),
+            returns=m.get("returns"),
+            signature=m.get("signature"),
         )
         for m in members
     ]
@@ -756,9 +920,52 @@ def _project_member_entries(
             returns=m.returns,
             writable=m.writable,
             write_type=m.write_type,
+            signature=m.signature,
         )
         for m in project_type.members
     ]
+
+
+def _signature_for_member(
+    type_name: str, member_name: str, ctx: MemberCompletionContext
+) -> str | None:
+    """The call signature of `member_name` on the receiver `type_name` when the
+    surface member itself carries none: a union answers only when every type that
+    has one agrees, and a host type also consults the model's signature table."""
+    union = _parse_union_type_key(type_name)
+    if union is not None:
+        signatures = [
+            signature
+            for signature in (_signature_for_member(item, member_name, ctx) for item in union)
+            if signature
+        ]
+        return signatures[0] if len(set(signatures)) == 1 else None
+    combined = _parse_combined_type_key(type_name)
+    if combined is not None:
+        project_key, host_type_name = combined
+        project_signature = _project_member_signature(project_key, member_name, ctx)
+        if project_signature is not None:
+            return project_signature
+        return resolve_host_member_signature(host_type_name, member_name, ctx.model)
+    if type_name.startswith(_PROJECT_TYPE_PREFIX):
+        return _project_member_signature(type_name[len(_PROJECT_TYPE_PREFIX) :], member_name, ctx)
+    runtime_object = resolve_runtime_object_type(type_name)
+    if runtime_object is not None:
+        lower = member_name.lower()
+        runtime_member = next(
+            (m for m in (runtime_object.get("members") or []) if m["name"].lower() == lower), None
+        )
+        return runtime_member.get("signature") if runtime_member is not None else None
+    return resolve_host_member_signature(type_name, member_name, ctx.model)
+
+
+def _project_member_signature(
+    project_key: str, member_name: str, ctx: MemberCompletionContext
+) -> str | None:
+    project_member = _project_member_by_name(
+        _project_class_members_by_name(ctx).get(project_key), member_name
+    )
+    return project_member.signature if project_member is not None else None
 
 
 # -- member-return chaining ------------------------------------------------
@@ -790,7 +997,9 @@ def _resolve_any_member_return_type(
         if project_member is not None and project_member.returns:
             type_ = _resolve_declared_object_type(project_member.returns, ctx, ctx.model)
             return _ResolvedMemberReturn(type=type_, kind=project_member.kind) if type_ else None
-        return _host_member_return(host_type_name, member_name, ctx.model)
+        return _msforms_member_return(host_type_name, member_name) or _host_member_return(
+            host_type_name, member_name, ctx.model
+        )
     if not owner_type.startswith(_PROJECT_TYPE_PREFIX):
         runtime_object = resolve_runtime_object_type(owner_type)
         if runtime_object is not None:
@@ -804,7 +1013,9 @@ def _resolve_any_member_return_type(
                     type=member["returns"], kind=member.get("kind", "property")
                 )
             return None
-        return _host_member_return(owner_type, member_name, ctx.model)
+        return _msforms_member_return(owner_type, member_name) or _host_member_return(
+            owner_type, member_name, ctx.model
+        )
     project_type = _project_class_members_by_name(ctx).get(
         owner_type[len(_PROJECT_TYPE_PREFIX) :]
     )
@@ -832,6 +1043,21 @@ def _apply_default_member_return_type(
     return resolved.type if resolved is not None else type_name
 
 
+def _msforms_member_return(owner_type: str, member_name: str) -> _ResolvedMemberReturn | None:
+    """`Views.SelectedItem.` chains into the returned object's own MSForms surface
+    (XLIDE #32): the member's bare return name ("Tab", "Font") resolves to its
+    qualified type exactly when the forms metadata carries that surface, so a
+    primitive or unmodelled return ends the chain instead of guessing."""
+    lower = member_name.lower()
+    member = next(
+        (m for m in msforms_control_members(owner_type) or [] if m["name"].lower() == lower), None
+    )
+    if member is None or not member.get("returns"):
+        return None
+    type_ = resolve_msforms_type_name(f"MSForms.{member['returns']}")
+    return _ResolvedMemberReturn(type=type_, kind=member.get("kind", "property")) if type_ else None
+
+
 def _host_member_return(
     owner_type: str, member_name: str, model: HostObjectModel | None
 ) -> _ResolvedMemberReturn | None:
@@ -857,14 +1083,15 @@ def _host_member_return(
 def _resolve_declared_object_type(
     declared_type: str, ctx: MemberCompletionContext, model: HostObjectModel | None
 ) -> str | None:
-    host = resolve_host_alias(declared_type, model)
-    if host:
-        return host
+    # The project's own declarations are consulted BEFORE the referenced type
+    # libraries, which is what VBA does. The Excel object model owns many ordinary
+    # nouns (Point, Border, Font, Shape, Style, Name), so a class declared as one of
+    # those got the library type's members instead of its own (XLIDE #11).
     key = _project_key_for_type_name(declared_type, ctx)
     if key:
         code_name_host = (ctx.code_names or {}).get(key)
         return _combined_type_key(key, code_name_host) if code_name_host else _project_type_key(key)
-    return None
+    return resolve_host_alias(declared_type, model) or resolve_msforms_type_name(declared_type)
 
 
 def _project_key_for_type_name(
@@ -877,12 +1104,20 @@ def _project_key_for_type_name(
     if not key:
         return None
     project_type = _project_class_members_by_name(ctx).get(key)
-    return key if project_type is not None and project_type.kind != "standardModule" else None
+    # A standard module is not a type anything is declared against, and an Enum is
+    # a VALUE type: `Dim c As Corner` is a Long, not an object. Both are member
+    # surfaces so `Module.Member` and `Corner.TopLeft` resolve, but neither may
+    # answer here or a plain enum variable would look like an object.
+    return (
+        key
+        if project_type is not None and project_type.kind not in ("standardModule", "enum")
+        else None
+    )
 
 
 def _simple_type_name(type_text: str) -> str | None:
     trimmed = type_text.strip()
-    return trimmed if IDENT_RE.match(trimmed) else None
+    return trimmed if is_identifier(trimmed) else None
 
 
 def _project_type_key(lower_name: str) -> str:
@@ -957,9 +1192,17 @@ def _project_source_surface_complete_when_merged_with_host(
     return True
 
 
+_PROJECT_TYPES_BY_NAME_CACHE = IdentityLru()
+
+
 def _project_class_members_by_name(
     ctx: MemberCompletionContext,
 ) -> dict[str, VbaProjectClassMembers]:
+    """The project's types by lowercased name. A name two types share answers
+    neither, since it cannot be told which one a reference means."""
+    cached = _PROJECT_TYPES_BY_NAME_CACHE.get(ctx.project_class_members)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
     out: dict[str, VbaProjectClassMembers] = {}
     ambiguous: set[str] = set()
     for type_ in ctx.project_class_members or []:
@@ -971,7 +1214,7 @@ def _project_class_members_by_name(
             ambiguous.add(key)
             continue
         out[key] = type_
-    return out
+    return _PROJECT_TYPES_BY_NAME_CACHE.put(out, ctx.project_class_members)  # type: ignore[no-any-return]
 
 
 def _project_member_by_name(
@@ -1072,6 +1315,9 @@ def _set_assignment(source: str, stmt: LeafStatementNode) -> _SetAssignment | No
 def _find_declared_binding(
     source: str, offset: int, name: str, ctx: MemberCompletionContext
 ) -> _DeclaredBinding | None:
+    """A local variable, parameter, module-level variable or module procedure named
+    `name`, preferring the procedure that encloses `offset`. Untyped declarations
+    still shadow globals, so callers learn of them even with no `As` text."""
     module = ctx.parsed_module if ctx.parsed_module is not None else parse_module(source)
     lower = name.lower()
     enclosing = _enclosing_procedure(module, offset)
@@ -1080,62 +1326,84 @@ def _find_declared_binding(
         for param in enclosing.params:
             if param.name.lower() == lower:
                 return _DeclaredBinding(as_type=param.as_type)
-        local = _find_in_body(enclosing.body, lower)
+        local = _body_bindings(enclosing).get(lower)
         if local is not None:
             return local
 
-    for mem in module.members:
-        if isinstance(mem, VariableGroupNode):
-            hit = _match_group(mem, lower)
-            if hit is not None:
-                return hit
-    return _module_procedure_binding(module, lower)
+    bindings = _module_bindings(module)
+    variable = bindings.variables.get(lower)
+    return variable if variable is not None else bindings.procedures.get(lower)
 
 
-def _module_procedure_binding(module: ModuleNode, lower: str) -> _DeclaredBinding | None:
-    """A module-level procedure of this name, as a receiver.
+# Receiver lookups run once per dotted reference, and every member call a rule
+# checks resolves one, so the declarations each lookup scanned are indexed once per
+# parsed module and procedure instead. The first declaration of a name wins, as the
+# scans did.
+_MODULE_BINDINGS_CACHE = IdentityLru()
+_BODY_BINDINGS_CACHE = IdentityLru(capacity=16)
 
-    The module's own members shadow the host's globals, and this is where the two
-    used to disagree: a module VARIABLE named `rows` resolved from the declaration
-    above, while `Public Property Get rows() As Widget` fell through to Excel's
-    global `Rows`, so `rows.Where(p)` was measured against `Excel.Range`
-    (XLIDE issue #68). The names that collide are the ones every workbook uses:
-    rows, columns, cells, selection, names, sheets, application.
+
+@dataclass(frozen=True, slots=True)
+class _ModuleBindings:
+    variables: dict[str, _DeclaredBinding]
+    procedures: dict[str, _DeclaredBinding]
+
+
+def _module_bindings(module: ModuleNode) -> _ModuleBindings:
+    """The module-level variables, then the module's procedures, as receivers.
+
+    The module's own procedures shadow the host's globals, and this is where the two
+    used to disagree: a module VARIABLE named `rows` resolved from its declaration,
+    while `Public Property Get rows() As Widget` fell through to Excel's global
+    `Rows`, so `rows.Where(p)` was measured against `Excel.Range` (XLIDE issue #68).
+    The names that collide are the ones every workbook uses: rows, columns, cells,
+    selection, names, sheets, application.
 
     A Function or Property Get yields its return type. A Sub, or a Property with
     only Let/Set, yields nothing readable, but it still shadows the global, so it
-    binds with no type rather than letting the host answer for it.
-    """
-    shadow: _DeclaredBinding | None = None
+    binds with no type rather than letting the host answer for it."""
+    cached = _MODULE_BINDINGS_CACHE.get(module)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    variables: dict[str, _DeclaredBinding] = {}
+    readable: dict[str, _DeclaredBinding] = {}
+    shadows: dict[str, _DeclaredBinding] = {}
     for mem in module.members:
-        if not isinstance(mem, ProcedureNode) or mem.name.lower() != lower:
-            continue
-        if mem.proc_kind in (ProcKind.FUNCTION, ProcKind.PROPERTY_GET):
-            return _DeclaredBinding(as_type=mem.return_type or None)
-        shadow = _DeclaredBinding(as_type=None)
-    return shadow
+        if isinstance(mem, VariableGroupNode):
+            _add_group_bindings(mem, variables)
+        elif isinstance(mem, ProcedureNode):
+            lower = mem.name.lower()
+            if mem.proc_kind in (ProcKind.FUNCTION, ProcKind.PROPERTY_GET):
+                readable.setdefault(lower, _DeclaredBinding(as_type=mem.return_type or None))
+            else:
+                shadows.setdefault(lower, _DeclaredBinding(as_type=None))
+    bindings = _ModuleBindings(variables=variables, procedures={**shadows, **readable})
+    return _MODULE_BINDINGS_CACHE.put(bindings, module)  # type: ignore[no-any-return]
 
 
-def _find_in_body(body: Sequence[BodyNode], lower: str) -> _DeclaredBinding | None:
+def _body_bindings(proc: ProcedureNode) -> dict[str, _DeclaredBinding]:
+    """A procedure body's declarations, recursing into block nodes."""
+    cached = _BODY_BINDINGS_CACHE.get(proc)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    out: dict[str, _DeclaredBinding] = {}
+    _collect_body_bindings(proc.body, out)
+    return _BODY_BINDINGS_CACHE.put(out, proc)  # type: ignore[no-any-return]
+
+
+def _collect_body_bindings(body: Sequence[BodyNode], out: dict[str, _DeclaredBinding]) -> None:
     for node in body:
         if isinstance(node, VariableGroupNode):
-            hit = _match_group(node, lower)
-            if hit is not None:
-                return hit
+            _add_group_bindings(node, out)
         else:
             child = getattr(node, "body", None)
             if isinstance(child, list):
-                hit = _find_in_body(child, lower)
-                if hit is not None:
-                    return hit
-    return None
+                _collect_body_bindings(child, out)
 
 
-def _match_group(group: VariableGroupNode, lower: str) -> _DeclaredBinding | None:
+def _add_group_bindings(group: VariableGroupNode, out: dict[str, _DeclaredBinding]) -> None:
     for decl in group.declarations:
-        if decl.name.lower() == lower:
-            return _DeclaredBinding(as_type=decl.as_type)
-    return None
+        out.setdefault(decl.name.lower(), _DeclaredBinding(as_type=decl.as_type))
 
 
 # -- AST helpers -----------------------------------------------------------
@@ -1181,38 +1449,79 @@ def _enclosing_procedure(module: ModuleNode, offset: int) -> ProcedureNode | Non
     return None
 
 
-# -- object-assignment type gate (for objectState M9 wiring) ---------------
+# -- object-assignment types -----------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class KnownObjectAssignmentType:
+    """The object class a declared type names."""
+
+    # 'generic' | 'host' | 'project'. A generic type short-circuits compatibility
+    # in both directions, which is what the untyped `Object` needs and what keeps
+    # `Collection` from inventing mismatch errors while still requiring `Set`.
+    kind: str
+    display: str
+    key: str
+    implements: tuple[str, ...] = ()
+
+
+def resolve_known_object_assignment_type(
+    type_name: str | None, ctx: MemberCompletionContext
+) -> KnownObjectAssignmentType | None:
+    """The object class a declared type names, when it names one that Set-binds and
+    supports members: the generic `Object`, VBA's `Collection`, a host alias
+    resolved through the host model, or an unambiguous project class, document or
+    form. None for Variant, the scalar types and anything unknown. Ported from
+    resolveKnownObjectAssignmentType (typeInference.ts)."""
+    if not type_name:
+        return None
+    normalized = normalize_type(type_name)
+    if not normalized or normalized == "variant":
+        return None
+    if normalized == "object":
+        return KnownObjectAssignmentType(kind="generic", display=type_name, key="object")
+    if is_known_scalar_type(normalized):
+        return None
+    # VBA's own creatable class. It belongs to no host model and to no project, so
+    # neither lookup below reaches it, and `Dim c As Collection : c = ...` read as
+    # clean while refusing to compile.
+    if normalized == "collection":
+        return KnownObjectAssignmentType(kind="generic", display=type_name, key="collection")
+    host = resolve_host_alias(type_name, ctx.model)
+    if host:
+        return KnownObjectAssignmentType(kind="host", display=type_name, key=host.lower())
+    simple = simple_type_name_for_assignment(type_name)
+    if not simple:
+        return None
+    lower = simple.lower()
+    matches = [
+        project_type
+        for project_type in (ctx.project_class_members or [])
+        # userType and enum are VALUE types: `Dim c As Corner` is a Long, not an
+        # object, so neither can make an assignment require Set.
+        if project_type.kind not in ("userType", "enum", "standardModule")
+        and project_type.name.lower() == lower
+    ]
+    if len(matches) != 1:
+        return None
+    return KnownObjectAssignmentType(
+        kind="project",
+        display=matches[0].name,
+        key=lower,
+        implements=tuple(matches[0].implements or []),
+    )
 
 
 def is_known_object_assignment_type(
     type_name: str | None, ctx: MemberCompletionContext
 ) -> bool:
-    """True when a declared type names an object that Set-binds and supports
-    members. Ported from resolveKnownObjectAssignmentType (typeInference.ts): the
-    generic ``Object`` type, any host alias (Excel/Office) resolved through the
-    host model, or an unambiguous project class/document/userform type qualify.
-    ``Variant`` and the scalar types do not. Used to widen the host-free
-    is_known_object_assignment_type so that e.g. ``Dim ws As Worksheet`` counts as
-    an object variable."""
-    if not type_name:
-        return False
-    normalized = normalize_type(type_name)
-    if not normalized or normalized == "variant":
-        return False
-    if normalized == "object":
-        return True
-    if is_known_scalar_type(normalized):
-        return False
-    if resolve_host_alias(type_name, ctx.model) is not None:
-        return True
-    simple = _simple_type_name(type_name)
-    if not simple:
-        return False
-    lower = simple.lower()
-    matches = [
-        project_type
-        for project_type in (ctx.project_class_members or [])
-        if project_type.kind not in ("userType", "standardModule")
-        and project_type.name.lower() == lower
-    ]
-    return len(matches) == 1
+    """True when a declared type names an object that Set-binds and supports members
+    (see resolve_known_object_assignment_type)."""
+    return resolve_known_object_assignment_type(type_name, ctx) is not None
+
+
+def simple_type_name_for_assignment(type_text: str) -> str | None:
+    """The bare type name of an As clause, without a trailing `()`, when it is one
+    identifier."""
+    trimmed = _TRAILING_EMPTY_PARENS_RE.sub("", type_text).strip()
+    return trimmed if is_identifier(trimmed) else None

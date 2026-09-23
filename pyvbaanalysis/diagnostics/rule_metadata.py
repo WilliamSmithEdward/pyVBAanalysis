@@ -64,6 +64,7 @@ _SPEC_REFERENCE_REPLACEMENTS = {
     "docs/xlide_vba_analysis_suppression_comments.md": (
         "Analysis suppression directive comment syntax"
     ),
+    "user_guides/vba-doc-comments.md": "Doc comment syntax",
 }
 
 
@@ -77,7 +78,8 @@ def _public_spec_reference(spec_reference: str | None) -> str | None:
         return None
     spec_reference = _SPEC_REFERENCE_REPLACEMENTS.get(spec_reference, spec_reference)
     # "VBE oracle" is the internal evidence harness; name the compiler it models.
-    return spec_reference.replace("VBE oracle", "VBE compiler")
+    # e.g. "... plus XLIDE dead-code policy" -> "... plus dead-code policy".
+    return spec_reference.replace("VBE oracle", "VBE compiler").replace("XLIDE ", "")
 
 
 def _build(rule_name: str, raw: dict[str, Any]) -> DiagnosticRuleMetadata:

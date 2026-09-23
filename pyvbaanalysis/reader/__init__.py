@@ -31,10 +31,12 @@ from .workbook import (
     OFFICE_EXTENSIONS,
     POWERPOINT_EXTENSIONS,
     WORD_EXTENSIONS,
+    OfficeProject,
     WorkbookReadError,
     analyze_office_file,
     analyze_workbook,
     read_office_modules,
+    read_office_project,
     read_workbook_modules,
 )
 
@@ -47,6 +49,7 @@ __all__ = [
     "WORD_EXTENSIONS",
     "LoadedModule",
     "LooseFileReadError",
+    "OfficeProject",
     "WorkbookReadError",
     "analyze_loose_file",
     "analyze_loose_files",
@@ -57,6 +60,7 @@ __all__ = [
     "loaded_module_from_text",
     "module_name_from_text",
     "read_office_modules",
+    "read_office_project",
     "read_workbook_modules",
     "strip_export_header",
 ]

@@ -1,20 +1,18 @@
 """Rule family: object-variable state.
 
-Ported from the object-variable-not-set rule of
-xlide_vscode/src/analyzer/diagnostics/rules/objectState.ts: a local object
-variable that is still Nothing when a member is accessed raises Run-time error
-'91'. It tracks an unset->set lattice per local over the shared dataflow walk,
+Ported from xlide_vscode/src/analyzer/diagnostics/rules/objectState.ts: member
+access on a variable declared as a scalar, and a local object variable that is
+still Nothing when a member is accessed, which raises Run-time error '91'. The
+latter tracks an unset->set lattice per local over the shared dataflow walk,
 falling back to the conservative straight-line walk for procedures with
 unstructured flow.
 
-M9 slice: object typing uses the host-aware is_known_object_assignment_type (from
-the member-completion engine), so host-typed locals like `Dim ws As Worksheet`
-count as object variables via resolve_host_alias; and the member-surface
-suppression (hasDefiniteMissingMember) is wired to the exhaustive member surface so
-an objectVariableNotSet report is suppressed when the member is provably missing
-(suppression-only, it can REMOVE a diagnostic, never add one). The
-scalar-member-access rule in the same XLIDE family needs the type environment +
-member surface and lands in M8.
+Object typing uses the host-aware is_known_object_assignment_type (from the
+member-completion engine), so host-typed locals like `Dim ws As Worksheet` count as
+object variables; and the member-surface suppression (hasDefiniteMissingMember) is
+wired to the exhaustive member surface, so an objectVariableNotSet report is
+suppressed when the member is provably missing (suppression-only: it can REMOVE a
+diagnostic, never add one).
 """
 
 from __future__ import annotations
@@ -43,7 +41,7 @@ from .shared import resolve_exhaustive_member_surface
 from ..dataflow import (
     DataflowHooks,
     Lattice,
-    tracked_locals_passed_as_call_arguments,
+    tracked_locals_named_whole,
     walk_branch_merged_body,
     walk_straight_line_body,
 )
@@ -181,11 +179,13 @@ def _check_procedure(
             push("objectVariableNotSet", _not_set_message(name, "With member access"), span)
 
     def touches(stmt: LeafStatementNode) -> Iterable[str]:
+        # A local passed whole may have been Set by the callee, inside an If arm
+        # as much as outside one, so the branch merge counts it as touched.
+        touched = set(_locals_passed_whole(source, stmt.span, locals_))
         target = set_assignment_target(source, stmt.span)
-        if target is None:
-            return ()
-        lower = target[0].lower()
-        return (lower,) if lower in locals_ else ()
+        if target is not None and target[0].lower() in locals_:
+            touched.add(target[0].lower())
+        return touched
 
     def demote(lower: str) -> None:
         if state.get(lower) == "unset":
@@ -221,7 +221,14 @@ def _check_statement(
     member_ctx: MemberCompletionContext,
     push: PushFn,
 ) -> None:
+    passed_whole = _locals_passed_whole(source, stmt.span, locals_)
     for name, span in _unset_object_member_accesses(source, stmt.span, locals_, state, member_ctx):
+        # An access after a whole pass in the same statement, as in
+        # `If TryGet(obj) Then obj.Name`, runs after the callee had its chance
+        # to Set it. One before the pass, as in `Load(obj.Name)`, does not.
+        pass_at = passed_whole.get(name.lower())
+        if pass_at is not None and span.start > pass_at:
+            continue
         push("objectVariableNotSet", _not_set_message(name, "member access"), span)
     target = set_assignment_target(source, stmt.span)
     if target is not None:
@@ -229,10 +236,24 @@ def _check_statement(
         if lower in locals_:
             state[lower] = "unset" if _set_value_is_nothing(target[2]) else "set"
             return
-    toks = statement_tokens_after_leading_label(source, stmt.span)
-    for lower in tracked_locals_passed_as_call_arguments(toks, lambda name: name in locals_):
+    for lower in passed_whole:
         if state.get(lower) == "unset":
             state[lower] = "unknown"
+
+
+# Intrinsics that read an object argument and never Set it.
+_OBJECT_READ_ONLY_INTRINSICS: frozenset[str] = frozenset(
+    {"typename", "vartype", "isobject", "isnull", "isempty", "ismissing", "objptr"}
+)
+
+
+def _locals_passed_whole(source: str, span: Span, locals_: set[str]) -> dict[str, int]:
+    return tracked_locals_named_whole(
+        statement_tokens_after_leading_label(source, span),
+        span.start,
+        lambda name: name in locals_,
+        _OBJECT_READ_ONLY_INTRINSICS,
+    )
 
 
 def _unset_object_member_accesses(
@@ -313,6 +334,10 @@ def _local_object_variables_for(
             child.kind is VbaSymbolKind.LOCAL_VARIABLE
             and child.visibility is not SymbolVisibility.STATIC
             and not child.is_array
+            # `Dim x As New Invoice` is instantiated on ANY access, including the
+            # first one and including after `Set x = Nothing`, so it can never be
+            # Nothing when a member is touched (XLIDE issue #16).
+            and not child.is_auto_instantiated
             and child.as_type
             and is_known_object_assignment_type(child.as_type, member_ctx)
         ):

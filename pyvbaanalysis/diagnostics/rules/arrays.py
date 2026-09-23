@@ -42,7 +42,7 @@ from ..context import PushFn, statement_tokens
 from ..dataflow import (
     DataflowHooks,
     Lattice,
-    tracked_locals_passed_as_call_arguments,
+    tracked_locals_named_whole,
     walk_branch_merged_body,
     walk_straight_line_body,
 )
@@ -822,11 +822,27 @@ def _check_unallocated_statement(
                 state[lower] = "unallocated"
         return
     conditional_redims = _single_line_if_redim_targets(source, stmt.span)
+    passed_whole = tracked_locals_named_whole(
+        statement_tokens_after_leading_label(source, stmt.span),
+        stmt.span.start,
+        lambda name: name in arrays,
+        _ARRAY_READ_ONLY_INTRINSICS,
+    )
+
+    def follows_pass(name: str, hit_span: Span) -> bool:
+        # An access that follows a whole-array pass in the same statement, as in
+        # `If Load(a) Then Debug.Print a(0)`, runs after the callee had its chance
+        # to allocate. One that precedes it, as in `Load(a(0))`, does not.
+        pass_at = passed_whole.get(name.lower())
+        return pass_at is not None and hit_span.start > pass_at
+
     for name, hit_span in _unallocated_index_accesses(source, stmt.span, arrays, state):
         # The "access" may be the target of a ReDim embedded in a single-line
         # If...Then - the allocation itself, not a read. Suppress exactly that
         # target's name-token span; bounds expressions still report.
         if any(t.span == hit_span for t in conditional_redims):
+            continue
+        if follows_pass(name, hit_span):
             continue
         push(
             "unallocatedDynamicArrayAccess",
@@ -835,6 +851,8 @@ def _check_unallocated_statement(
             hit_span,
         )
     for function_name, name, hit_span in _unallocated_bound_calls(source, stmt.span, arrays, state):
+        if follows_pass(name, hit_span):
+            continue
         push(
             "unallocatedDynamicArrayAccess",
             f"Dynamic array '{name}' is not allocated before {function_name}. "
@@ -844,8 +862,7 @@ def _check_unallocated_statement(
     assignment = bare_assignment_target(source, stmt.span)
     if assignment is not None and assignment[0].lower() in arrays:
         state[assignment[0].lower()] = "unknown"
-    toks = statement_tokens_after_leading_label(source, stmt.span)
-    for lower in tracked_locals_passed_as_call_arguments(toks, lambda name: name in arrays):
+    for lower in passed_whole:
         if state.get(lower) == "unallocated":
             state[lower] = "unknown"
     # A conditional (single-line If) ReDim allocates only on one path, so move
@@ -965,9 +982,19 @@ def _dynamic_array_touches_in_statement(
     assignment = bare_assignment_target(source, stmt.span)
     if assignment is not None and assignment[0].lower() in arrays:
         out.add(assignment[0].lower())
-    toks = statement_tokens_after_leading_label(source, stmt.span)
-    out.update(tracked_locals_passed_as_call_arguments(toks, lambda name: name in arrays))
+    out.update(
+        tracked_locals_named_whole(
+            statement_tokens_after_leading_label(source, stmt.span),
+            stmt.span.start,
+            lambda name: name in arrays,
+            _ARRAY_READ_ONLY_INTRINSICS,
+        )
+    )
     return out
+
+
+# Intrinsics that read an array argument and allocate nothing.
+_ARRAY_READ_ONLY_INTRINSICS: frozenset[str] = frozenset({"lbound", "ubound", "isarray"})
 
 
 # -- checkArrayBoundIntrinsicArguments -------------------------------------

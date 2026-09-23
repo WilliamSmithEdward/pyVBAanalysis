@@ -202,6 +202,9 @@ def test_cli_inline_suppression(tmp_path: Path, capsys: pytest.CaptureFixture[st
     src = (
         'Attribute VB_Name = "Mod1"\r\nOption Explicit\r\nSub S()\r\n'
         "    Dim a(10 To 1) As Long  '@pyvba-ignore: array-declaration-impossible-bounds\r\n"
+        # Read, so the unused-variable rule has nothing to say and the run's exit
+        # code turns on the suppressed finding alone.
+        "    Debug.Print LBound(a)\r\n"
         "End Sub\r\n"
     )
     path = _write(tmp_path / "Mod1.bas", src)
@@ -263,7 +266,7 @@ def test_cli_unreadable_workbook_solo_exits_one(
     def _boom(_path: object) -> object:
         raise WorkbookReadError("cannot read broken.xlsm")
 
-    monkeypatch.setattr(cli_mod, "read_office_modules", _boom)
+    monkeypatch.setattr(cli_mod, "read_office_project", _boom)
     code = main([str(bad)])
     assert code == 1
     assert "cannot read broken.xlsm" in capsys.readouterr().err

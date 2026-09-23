@@ -265,21 +265,32 @@ def test_mismatched_end_keyword_is_warning_and_closes() -> None:
 
 
 def test_mismatched_end_keyword_property_get_end_function() -> None:
-    # The oracle-verified case: Property Get ... End Function compiles.
-    module = parse_module("Property Get P() As Long\n    P = 1\nEnd Function")
+    # The oracle-verified case: Property Get ... End Function compiles, and the
+    # line after it is at module level (XLIDE issue #81).
+    source = "Public Property Get P() As Long\n    P = 1\nEnd Function\nPrivate m As Long\n"
+    module = parse_module(source)
     proc = module.members[0]
     assert isinstance(proc, ProcedureNode)
     assert proc.proc_kind is ProcKind.PROPERTY_GET
     assert proc.closed
+    assert source[proc.span.start : proc.span.end].endswith("End Function")
+    assert len(module.members) == 2
+    assert isinstance(module.members[1], VariableGroupNode)
     assert [d.severity.value for d in module.diagnostics] == ["warning"]
 
 
-def test_mismatched_end_keyword_does_not_swallow_nested_blocks() -> None:
-    # A wrong procedure closer while an inner block is open is still the
-    # unmatched-closer error path, not the interchangeable-closer warning.
-    module = parse_module("Sub S()\n    If x Then\nEnd Function\nEnd Sub")
-    messages = [d.message for d in module.diagnostics]
-    assert any("Unexpected 'End Function'" in m for m in messages)
+def test_a_wrong_closer_ends_the_procedure_from_inside_an_open_block() -> None:
+    # Upstream 10.6.0 closes the procedure here too; the If block left open in
+    # it is the only error. Before, the closer read as unmatched and the
+    # procedure stayed open (XLIDE issue #81).
+    module = parse_module("Sub F()\n    If x Then\nEnd Function\nSub G()\nEnd Sub\n")
+    procs = [member for member in module.members if isinstance(member, ProcedureNode)]
+    assert [(proc.name, proc.closed) for proc in procs] == [("F", True), ("G", True)]
+    errors = [d.message for d in module.diagnostics if d.severity.value == "error"]
+    assert errors == ["Block is missing End If."]
+    # The port's own mismatch warning, which upstream reports from its
+    # structural scanner instead of the parser.
+    assert [d.severity.value for d in module.diagnostics] == ["error", "warning"]
 
 
 def test_raw_statement_fallback() -> None:

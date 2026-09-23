@@ -15,6 +15,7 @@ touch detection.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from ..lexer.token_helpers import token_name, token_word
@@ -197,30 +198,64 @@ def _collect_nested_touches(
     return out
 
 
-def tracked_locals_passed_as_call_arguments(
+def tracked_locals_named_whole(
     toks: Sequence[VbaToken],
+    span_start: int,
     is_tracked: Callable[[str], bool],
-) -> set[str]:
-    """Lowercased tracked locals passed as bare arguments of a call statement.
+    read_only_intrinsics: AbstractSet[str],
+) -> dict[str, int]:
+    """Every tracked local the statement names whole, bare rather than as a member
+    access or indexed, in an argument position: a call statement's argument, an
+    argument to a function inside an expression, or an argument to a qualified
+    member call.
 
-    Covers `Helper x` and `Call Helper(x)`, where ByRef passing may rebind them.
-    `toks` are the statement's significant tokens after any leading label.
+    VBA passes by reference by default, so the callee may have assigned or
+    allocated the caller's variable, and its state is unknown from that point on
+    (XLIDE issue #70). A mention the callee provably only reads is left out: the
+    operand of `Is`, and the argument of an intrinsic in `read_only_intrinsics`.
+    Each name maps to its first such mention's absolute offset, so a rule can tell
+    an access before the pass from one after it within the same statement. `toks`
+    are the statement's significant tokens after any leading label, with offsets
+    relative to `span_start`.
     """
-    if len(toks) < 2 or _has_top_level_assignment(toks):
-        return set()
-    start = 1 if token_word(toks[0]) == "call" else 0
-    after = _at(toks, start + 1)
-    if token_name(_at(toks, start)) is None or (after is not None and after.raw_text == "."):
-        return set()
-    out: set[str] = set()
-    for i in range(start + 1, len(toks)):
-        prev = _at(toks, i - 1)
-        nxt = _at(toks, i + 1)
-        if (prev is not None and prev.raw_text == ".") or (nxt is not None and nxt.raw_text == "."):
+    out: dict[str, int] = {}
+    if len(toks) < 2:
+        return out
+    # A bare mention at the top level is an argument only in a call statement:
+    # `Foo x`, `Call Foo(x)`, `obj.Method x`, or `.Method x` inside With. In
+    # `Set a = b`, `Dim a As T`, or `If a Is Nothing` it is not.
+    head = _at(toks, 1 if token_word(toks[0]) == "call" else 0)
+    is_call_statement = (
+        token_name(head) is not None or (head is not None and head.raw_text == ".")
+    ) and not _has_top_level_assignment(toks)
+    depth = 0
+    for i in range(1, len(toks)):
+        raw = toks[i].raw_text
+        if raw in ("(", "["):
+            depth += 1
+            continue
+        if raw in (")", "]"):
+            depth -= 1
             continue
         name = token_name(toks[i])
-        if name is not None and is_tracked(name.lower()):
-            out.add(name.lower())
+        lower = name.lower() if name else None
+        if not lower or not is_tracked(lower) or lower in out:
+            continue
+        if depth == 0 and not is_call_statement:
+            continue
+        prev = _at(toks, i - 1)
+        nxt = _at(toks, i + 1)
+        if (prev is not None and prev.raw_text in (".", "!")) or (
+            nxt is not None and nxt.raw_text in ("(", ".", "!")
+        ):
+            continue
+        if token_word(nxt) == "is":
+            continue
+        if prev is not None and prev.raw_text == "(":
+            callee = token_name(_at(toks, i - 2))
+            if (callee.lower() if callee else "") in read_only_intrinsics:
+                continue
+        out[lower] = span_start + toks[i].start
     return out
 
 

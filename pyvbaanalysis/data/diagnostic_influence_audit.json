@@ -506,11 +506,22 @@
         "class_public_field_assignment_compile",
         "workbook_event_member_call_compile",
         "late_bound_object_unknown_member_compile",
-        "late_bound_variant_unknown_member_compile"
+        "late_bound_variant_unknown_member_compile",
+        "worksheet_unknown_member_compile",
+        "chart_unknown_member_compile",
+        "worksheets_unknown_member_compile",
+        "workbook_unknown_member_compile",
+        "application_worksheet_function_member_compile",
+        "application_unknown_member_compile",
+        "application_unknown_member_assignment_compile",
+        "range_unknown_member_compile",
+        "range_typed_unknown_member_compile",
+        "workbook_typed_unknown_member_compile",
+        "font_unknown_member_compile"
       ],
       "observeOnlyOracleCases": [],
       "pendingLegacyCorpusFiles": [],
-      "notes": "This is a VBE compile-equivalent error for workbook class receivers whose source-backed member surface is known and unambiguous. Public fields are valid members. Deterministic parenthesized receivers and leading-dot receivers inside simple or nested With stacks use the same resolver as ordinary member chains. Source declarations resolve before runtime objects, host globals, workbook code names, or standard-module qualifier fallbacks, so typed or untyped local declarations named like Excel globals use the source binding. Host/object-model and ambiguous receiver cases remain silent unless the receiver surface is exhaustive. Host events are not callable object members, so event names are excluded from object-member surfaces and can be reported absent when the receiver surface is exhaustive. Object and Variant receivers remain silent even when completion can refine them from simple Set assignments because VBE leaves those calls late-bound.",
+      "notes": "This is a VBE compile-equivalent error for workbook class receivers whose source-backed member surface is known and unambiguous, and for HOST types only where the type library marks the interface NONEXTENSIBLE. A complete member list is not enough on its own: most of Excel's object model is extensible, so VBA compiles a name that is on no interface and asks IDispatch for it at run time. Application.Match is the case that showed it - a worksheet function on no interface at all, which compiles and runs, and which XLIDE reported as absent until 10.4.2. Of the 35 Excel types the reference dump covers exhaustively, four are closed: Worksheet, Chart, Sheets and Workbooks. The VBE agreed with the flag on every receiver tried, Application, Range (called for and declared), Workbook (declared) and Font accepted, Worksheet, Chart and a bare Worksheets (a Sheets) refused. Public fields are valid members.",
       "diagnosticKind": "compile-error"
     },
     {
@@ -1598,6 +1609,28 @@
       "diagnosticKind": "compile-error"
     },
     {
+      "code": "invalid-option-statement",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE oracle: each malformed form compiled and its dialog read (option_explicit_empty_parens_compile \"Expected: end of statement\", option_unknown_directive_compile \"Expected: Base or Compare or Explicit or Private\", option_base_out_of_range_compile \"Expected: 0 or 1\", option_compare_unknown_argument_compile \"Expected: Text or Binary\", option_private_without_module_compile \"Expected: Module\"), with Option Base 1 / Compare Text / Private Module compiled as accepted controls, plus MS-VBAL 5.2.1.",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "option_explicit_empty_parens_compile",
+        "option_explicit_trailing_word_compile",
+        "option_unknown_directive_compile",
+        "option_base_out_of_range_compile",
+        "option_compare_unknown_argument_compile",
+        "option_private_without_module_compile",
+        "option_compare_database_excel_compile",
+        "option_base_one_compile",
+        "option_compare_text_compile",
+        "option_private_module_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "An Option statement must name Base, Compare, Explicit or Private, take that directive's argument, and end there; the parser kept whatever followed Option without reading it, so Option Explicit() analyzed clean (issue #74). Option Compare Database is host-decided: Access writes it into every module it creates and Excel rejects it (option_compare_database_excel_compile), so it is reported only when the project names a host that is not Access, and never for a file no project claims. This supersedes the OPT_007 / managed-backlog note that listed Option Compare Database as won't-implement, which predates Access support.",
+      "diagnosticKind": "compile-error"
+    },
+    {
       "code": "duplicate-option",
       "status": "vbe-oracle-verified",
       "sourceOfTruth": "Excel/VBE oracle (duplicate_option_explicit_compile: compile rejected, 'Duplicate Option statement') plus MS-VBAL 5.2.1",
@@ -1865,6 +1898,130 @@
       "pendingLegacyCorpusFiles": [],
       "notes": "The procedure is still treated as closed (VBE-lenient); the quick-fix swaps the End keyword to match the opener. Distinct from missing-block-closer (a genuinely unclosed procedure) and unmatched-block-closer (a stray closer).",
       "diagnosticKind": "style-policy"
+    },
+    {
+      "code": "unused-variable",
+      "status": "spec-derived",
+      "diagnosticKind": "style-policy",
+      "sourceOfTruth": "MS-VBAL 5.2.3 / 5.4.3.1 declaration scope plus XLIDE dead-code policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Information-only: a local, or a module-private variable or constant, that no token in its scope names. Not a compile-equivalent diagnostic; VBA compiles an unused declaration. Mentions inside inactive #If arms, ByRef passes, indexing and member access all count as uses."
+    },
+    {
+      "code": "variable-never-read",
+      "status": "spec-derived",
+      "diagnosticKind": "style-policy",
+      "sourceOfTruth": "MS-VBAL 5.4.3 assignment semantics plus XLIDE dead-code policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Information-only: a variable whose every mention is a plain assignment to it. Read/write classification follows the reference-kind rules of textDocument/references; a For counter, ReDim Preserve, Mid statement target and ByRef pass are reads."
+    },
+    {
+      "code": "unused-procedure",
+      "status": "spec-derived",
+      "diagnosticKind": "style-policy",
+      "sourceOfTruth": "MS-VBAL 5.3.1.1 Private procedure visibility plus XLIDE dead-code policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Information-only, Private procedures only: a Public one may be wired to a button, shape, ribbon, hotkey, OnTime or Application.Run that XLIDE cannot see. Event handlers, interface members, Auto_ macros and attributed procedures are never reported; every string literal in the project is searched for the name."
+    },
+    {
+      "code": "unreachable-code",
+      "status": "spec-derived",
+      "diagnosticKind": "style-policy",
+      "sourceOfTruth": "MS-VBAL 5.4.1.3 Exit, 5.4.1.4 GoTo, 5.4.4 Resume, End and Return statement semantics plus XLIDE dead-code policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Information-only: statements after an unconditional exit in the same block, until a label, line number, Case arm or #If gives control somewhere to land. A single-line If carrying an Exit is conditional and never a terminator."
+    },
+    {
+      "code": "doc-param-missing",
+      "status": "spec-derived",
+      "diagnosticKind": "style-policy",
+      "sourceOfTruth": "user_guides/vba-doc-comments.md doc comment vocabulary plus XLIDE documentation policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Warning, style only: a Sub, Function, Property, Declare or Event whose XML doc comment has no <param> for one of its parameters, or an empty one. A Property Let or Set value parameter is described by the summary and needs none. Plain-text notes are not XML and are not checked."
+    },
+    {
+      "code": "doc-param-unknown",
+      "status": "spec-derived",
+      "diagnosticKind": "style-policy",
+      "sourceOfTruth": "user_guides/vba-doc-comments.md doc comment vocabulary plus XLIDE documentation policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Warning, style only: a <param> in an XML doc comment that names no parameter of its declaration, or has no name attribute. Names match case-insensitively, as the call tip matches them."
+    },
+    {
+      "code": "doc-returns-missing",
+      "status": "spec-derived",
+      "diagnosticKind": "style-policy",
+      "sourceOfTruth": "user_guides/vba-doc-comments.md doc comment vocabulary plus XLIDE documentation policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Warning, style only: a Function or Declare Function whose XML doc comment has no <returns>, or an empty one. A Property Get is described by its summary and needs none."
+    },
+    {
+      "code": "doc-returns-unexpected",
+      "status": "spec-derived",
+      "diagnosticKind": "style-policy",
+      "sourceOfTruth": "user_guides/vba-doc-comments.md doc comment vocabulary plus XLIDE documentation policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Warning, style only: a <returns> in the XML doc comment of a Sub, Property Let, Property Set, Declare Sub or Event, none of which returns a value."
+    },
+    {
+      "code": "doc-tag-duplicate",
+      "status": "spec-derived",
+      "diagnosticKind": "style-policy",
+      "sourceOfTruth": "user_guides/vba-doc-comments.md doc comment vocabulary plus XLIDE documentation policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Warning, style only: a second <param> for the same parameter, or a second <summary>, <returns>, <remarks>, <example> or <signature>; the parser reads the first."
+    },
+    {
+      "code": "doc-tag-unclosed",
+      "status": "spec-derived",
+      "diagnosticKind": "style-policy",
+      "sourceOfTruth": "user_guides/vba-doc-comments.md doc comment vocabulary plus XLIDE documentation policy",
+      "corpusInfluence": "none",
+      "assertedOracleCases": [],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "notes": "Warning, style only: a vocabulary tag with no closing tag before the next tag of the same name, which the parser drops or runs into the next one."
+    },
+    {
+      "code": "missing-library-reference",
+      "status": "vbe-oracle-verified",
+      "sourceOfTruth": "Excel/VBE compile oracle: a type named from an unreferenced library",
+      "corpusInfluence": "oracle-backed",
+      "assertedOracleCases": [
+        "cross_application_early_binding_without_reference_compile",
+        "cross_application_late_binding_compile"
+      ],
+      "observeOnlyOracleCases": [],
+      "pendingLegacyCorpusFiles": [],
+      "diagnosticKind": "compile-error",
+      "notes": "The VBE refuses `Dim doc As Word.Document` in a workbook that does not reference the Word library with \"User-defined type not defined\", and the whole project stops compiling. The same code late bound through CreateObject compiles, because it names nothing from the library, so the rule fires only on the qualified spelling in an As clause, after New, or on a qualified constant. Only libraries XLIDE can add a reference to are reported, so the finding always carries a fix."
     }
   ]
 }

@@ -27,15 +27,15 @@ _STRUCTURAL_ONLY_CODES = {
 }
 
 
-def test_catalogue_loads_119_rules() -> None:
+def test_catalogue_loads_131_rules() -> None:
     rules = load_rule_metadata()
-    assert len(rules) == 119
+    assert len(rules) == 131
     assert rules == DIAGNOSTIC_RULES  # the eager catalogue matches a fresh load
 
 
 def test_codes_are_unique() -> None:
     codes = [meta.code for meta in DIAGNOSTIC_RULES.values()]
-    assert len(codes) == len(set(codes)) == 119
+    assert len(codes) == len(set(codes)) == 131
 
 
 def test_fields_are_typed_enums() -> None:
@@ -51,7 +51,7 @@ def test_fields_are_typed_enums() -> None:
 
 def test_rule_metadata_by_code() -> None:
     by_code = rule_metadata_by_code()
-    assert len(by_code) == 119
+    assert len(by_code) == 131
     assert by_code["unterminated-string"].rule_name == "unterminatedString"
     assert by_code["unterminated-string"].default_severity is DiagnosticSeverity.ERROR
 
@@ -65,7 +65,7 @@ def test_codes_align_with_audit() -> None:
 
 def test_manifest_records_rule_metadata() -> None:
     manifest = load_manifest()
-    assert manifest["ruleCount"] == 119
+    assert manifest["ruleCount"] == 131
     assert "rule_metadata.json" in manifest["files"]
     assert sorted(manifest["ruleNames"]) == sorted(DIAGNOSTIC_RULES.keys())
 
@@ -101,6 +101,16 @@ def test_sample_rule_metadata() -> None:
     assert meta.diagnostic_kind is DiagnosticEvidenceKind.COMPILE_ERROR
     assert meta.vbe_compile_equivalent is True
     assert meta.spec_reference == "MS-VBAL 5.3"
+
+
+def test_public_strings_name_no_internal_source() -> None:
+    """Titles and spec references reach the API, the CLI's JSON and the catalogue,
+    so they must not name the upstream tool, its evidence harness, or a document
+    path inside its repository. A sync that brings in a new one fails here."""
+    for meta in DIAGNOSTIC_RULES.values():
+        for text in (meta.title, meta.spec_reference or ""):
+            assert "XLIDE" not in text and "oracle" not in text, (meta.code, text)
+            assert not text.endswith(".md"), (meta.code, text)
 
 
 def test_vba_diagnostic_shape() -> None:

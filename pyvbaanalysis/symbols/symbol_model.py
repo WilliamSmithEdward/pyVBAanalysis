@@ -101,6 +101,9 @@ class VbaSymbol:
     by_val: bool | None = None
     by_ref: bool | None = None
     is_array: bool | None = None
+    # Declared `As New`. VBA instantiates such a variable on ANY access, even after
+    # `Set x = Nothing`, so it can never be Nothing when a member is touched.
+    is_auto_instantiated: bool | None = None
     array_bounds: str | None = None
     # External Declare statements are Function or Sub callables.
     declare_kind: str | None = None
@@ -180,12 +183,21 @@ class VbaProjectClassMember:
     attributes: list[VbaSymbolAttribute] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ImplicitMember:
+    """A member a module has that its own text never declares: a UserForm's
+    designer-declared control, with the type a member lookup resolves it against."""
+
+    name: str
+    type: str
+
+
 @dataclass(slots=True)
 class VbaProjectClassMembers:
     """Public member surface for an object type, standard module, or user Type."""
 
     name: str
-    # "class" | "document" | "userform" | "userType" | "standardModule"
+    # "class" | "document" | "userform" | "userType" | "standardModule" | "enum"
     kind: str
     module_name: str
     members: list[VbaProjectClassMember] = field(default_factory=list)
@@ -193,6 +205,13 @@ class VbaProjectClassMembers:
     implements: list[str] | None = None
     # True when the member list is complete enough to prove absence.
     exhaustive: bool | None = None
+    # Whether the module has a default instance (`Attribute VB_PredeclaredId =
+    # True`). Documents and forms always do; for a class, None means the header
+    # was not seen, which is unknown rather than no.
+    predeclared_id: bool | None = None
+    # The host class the module's designer makes it: an Access form's
+    # `Access.Form`. None for a UserForm, which is always an MSForms.UserForm.
+    designer_class: str | None = None
 
 
 @dataclass(slots=True)
@@ -263,6 +282,16 @@ def procedure_declaration_signature(procedure: VbaProcedureSignature) -> str:
         )
         return f"Declare {ptr_safe}{keyword} {procedure.name}{external_target}({params}){returns}"
     return f"{procedure_kind_keyword(procedure.kind)} {procedure_signature_label(procedure)}"
+
+
+def is_data_bound_designer_class(designer_class: str | None) -> bool:
+    """True for an Access form or report. Beside its sections and controls, Access
+    gives one a member for every field of its record source, and only the running
+    database knows those. So where a UserForm's control list proves a name absent,
+    an Access design's never does: a bare `CustomerID` in a bound form is a field,
+    not a missing declaration."""
+    lower = designer_class.lower() if designer_class else None
+    return lower in ("access.form", "access.report")
 
 
 def qualified_procedure_key(module_name: str, name: str) -> str:

@@ -1,4 +1,4 @@
-"""Excel event-handler catalogue (port of completion/eventHandlers.ts).
+"""Office event-handler catalogue (port of completion/eventHandlers.ts).
 
 Only the seams the ``eventHandlerModuleScope`` diagnostic consumes are ported:
 ``event_handler_procedure_for_name`` (name -> owning document type) and
@@ -22,17 +22,17 @@ from ..symbols.symbol_model import ModuleSymbolKind
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 # Document types an event can be wired for; mirrors EventHandlerDocumentType.
-EventHandlerDocumentType = str  # 'workbook' | 'worksheet' | 'chart'
+EventHandlerDocumentType = str  # 'workbook' | 'worksheet' | 'chart' | 'document' | 'userform'
 
 _CHART_NAME_RE = re.compile(r"^chart\d*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
 class EventHandlerProcedureMatch:
-    """A procedure name that matches a known Excel event handler."""
+    """A procedure name that matches a known Office event handler."""
 
     name: str
-    owner: str  # 'Workbook' | 'Worksheet' | 'Chart'
+    owner: str  # 'Workbook' | 'Worksheet' | 'Chart' | 'Document'
     document_type: EventHandlerDocumentType
 
 
@@ -48,7 +48,7 @@ def _event_definitions_by_lower_name() -> dict[str, EventHandlerProcedureMatch]:
 
 
 def event_handler_procedure_for_name(name: str) -> EventHandlerProcedureMatch | None:
-    """The Excel event a procedure name matches (case-insensitive), or None.
+    """The Office event a procedure name matches (case-insensitive), or None.
 
     Port of eventHandlerProcedureForName. Every catalogue owner maps to a document
     type, so a name match always yields a populated match.
@@ -57,10 +57,13 @@ def event_handler_procedure_for_name(name: str) -> EventHandlerProcedureMatch | 
 
 
 def _infer_document_type(module_name: str | None) -> EventHandlerDocumentType:
-    """Port of inferDocumentType: name-based fallback when documentType is unset."""
+    """Port of inferDocumentType: name-based fallback when documentType is unset.
+    Word's document module is ThisDocument, which wires the Document events."""
     lower = (module_name or "").lower()
     if lower == "thisworkbook":
         return "workbook"
+    if lower == "thisdocument":
+        return "document"
     if _CHART_NAME_RE.match(module_name or ""):
         return "chart"
     return "worksheet"
@@ -73,10 +76,13 @@ def event_handler_document_type_for_context(
 ) -> EventHandlerDocumentType | None:
     """Port of eventHandlerDocumentTypeForContext.
 
-    Only document modules wire events; for those the caller-supplied document type
-    wins, falling back to a name heuristic (ThisWorkbook -> workbook, Chart* ->
+    A UserForm wires its own events. Among the other modules only document modules
+    wire events; for those the caller-supplied document type wins, falling back to
+    a name heuristic (ThisWorkbook -> workbook, ThisDocument -> document, Chart* ->
     chart, otherwise worksheet).
     """
+    if module_kind is ModuleSymbolKind.USERFORM:
+        return "userform"
     if module_kind is not ModuleSymbolKind.DOCUMENT:
         return None
     return document_type if document_type is not None else _infer_document_type(module_name)

@@ -57,11 +57,7 @@ from ...parser.nodes import (
 )
 from ...parser.type_declaration_suffix import is_type_declaration_suffix
 from ...runtime import resolve_runtime_function
-from ...types.type_names import (
-    is_known_object_assignment_type,
-    is_known_scalar_type,
-    normalize_type,
-)
+from ...types.type_names import is_known_scalar_type, normalize_type
 from ..const_expr import (
     collect_body_literal_integer_constants,
     collect_module_literal_integer_constants,
@@ -91,11 +87,12 @@ from .shared import (
     leading_declaration_modifier_count,
     module_declaration_statement_in_procedure,
     name_token_hit,
+    report_repeated_keys,
     scan_conditional_compilation_branch_order,
 )
-# resolveKnownObjectAssignmentType lives in XLIDE's shared typeInference.ts; the
-# port keeps it next to its other consumer (typeOfIs) and shares it from there.
-from .type_of_is import _resolve_known_object_assignment_type
+# resolveKnownObjectAssignmentType lives in XLIDE's typeInference.ts; the port
+# keeps it with the member-access resolver, whose project and host lookups it uses.
+from ...completion.member_access import resolve_known_object_assignment_type
 
 # Access/storage modifiers that may lead a procedure declaration.
 _PROC_MODIFIERS: frozenset[str] = frozenset({"public", "private", "friend", "global", "static"})
@@ -416,7 +413,7 @@ def check_reserved_declaration_names(source: str, mod: ModuleNode, activity: Con
 # -- checkPropertySetterValueParameters ------------------------------------
 
 # The object-value branch (propertyLetObjectValue) resolves the final value
-# parameter's type through _resolve_known_object_assignment_type (host/project
+# parameter's type through resolve_known_object_assignment_type (host/project
 # class resolution) and reports an object-typed Property Let value. The other three
 # branches are pure signature/structure checks that need no type surface.
 
@@ -489,7 +486,7 @@ def check_property_setter_value_parameters(source: str, mod: ModuleNode, activit
                         declared_name_span(source, value_param.span, value_param.name),
                     )
             else:
-                object_type = _resolve_known_object_assignment_type(
+                object_type = resolve_known_object_assignment_type(
                     value_param.as_type, member_ctx
                 )
                 if object_type is not None:
@@ -720,7 +717,7 @@ def _collect_type_name_references(source: str, mod: ModuleNode) -> list[_TypeNam
 _TYPE_KIND_LABEL_FOR_NEW: dict[TypeCompletionKind, str] = {
     "primitive": "a VBA primitive type",
     "external": "an external interface type",
-    "host": "an Excel object-model type",
+    "host": "a host object-model type",
     "document": "a document module type",
     "enum": "an Enum type",
     "userType": "a user-defined Type",
@@ -1099,25 +1096,132 @@ def check_empty_type(source: str, mod: ModuleNode, activity: ConditionalActivity
 
 
 def check_duplicate_options(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
-    seen: set[str] = set()
+    """A module may declare each Option only once (MS-VBAL 5.2.1; oracle-verified
+    `duplicate_option_explicit_compile`). Keyed by category, so two `Option Compare`
+    collide even with different arguments. Two Options in different arms of one
+    `#If` chain are alternatives, so only the arm matters, not whether the branch
+    can be decided: skipping every undecidable branch went blind to a real repeat
+    inside one arm."""
+    options = [member for member in active_module_members(mod, activity) if isinstance(member, OptionNode)]
+
+    def key_of(member: OptionNode) -> str | None:
+        if activity is not None and activity.is_inactive(member.span):
+            return None
+        return _option_category(member).lower() or None
+
+    def report(repeat: OptionNode, earlier: OptionNode) -> None:
+        push(
+            "duplicateOption",
+            f"Duplicate Option statement; only one 'Option {_option_category(repeat)}' is allowed per module.",
+            first_token_span(source, repeat.span),
+        )
+
+    report_repeated_keys(options, activity, key_of, lambda member: member.span, report)
+
+
+def _option_category(member: OptionNode) -> str:
+    """The word after `Option`, which is what may appear at most once."""
+    parts = member.option_text.strip().split()
+    return parts[0] if parts else ""
+
+
+# -- checkOptionStatementForm ----------------------------------------------
+
+
+def check_option_statement_form(
+    source: str,
+    mod: ModuleNode,
+    opts: AnalyzeModuleOptions,
+    activity: ConditionalActivityTracker | None,
+    push: PushFn,
+) -> None:
+    """An Option statement names one of the four directives VBA has, takes the
+    argument that one takes, and ends there. The parser kept whatever followed
+    `Option` without reading it, so `Option Explicit()` analyzed clean while the
+    module would not compile (XLIDE issue #74).
+
+    The forms follow the live VBE's compile dialog for each malformed shape (Excel
+    oracle probes, 2026-09-13): a bare `Option` or an unknown word expects Base,
+    Compare, Explicit or Private; `Option Base` takes 0 or 1; `Option Compare` takes
+    Text or Binary; `Option Private` is written `Option Private Module`; and anything
+    after a complete form expects the statement to end.
+
+    `Option Compare Database` is the one the host decides. Access writes it into
+    every module it creates, and Excel refuses it with the same "Text or Binary" as
+    any other unknown argument, so it is reported only where the project names a
+    host that is not Access. A file no project claims names no host and is left
+    alone.
+    """
+    host = opts.host.lower() if opts.host else None
     for member in active_module_members(mod, activity):
         if not isinstance(member, OptionNode):
             continue
-        if activity is not None and activity.activity_for_span(member.span) is not ConditionalActivity.ACTIVE:
-            continue
-        parts = member.option_text.strip().split()
-        first_word = parts[0] if parts else ""
-        category = first_word.lower()
-        if not category:
-            continue
-        if category in seen:
+        # A trailing comment is not trailing junk, and a line continuation is
+        # trivia the lexer already attached to the token that follows it.
+        toks = [
+            tok
+            for tok in statement_tokens(source, member.span)
+            if tok.kind is not TokenKind.COMMENT and tok.kind is not TokenKind.NEWLINE
+        ]
+
+        def report(index: int, message: str, _toks: list[VbaToken] = toks, _span: Span = member.span) -> None:
+            tok = _toks[index] if index < len(_toks) else None
             push(
-                "duplicateOption",
-                f"Duplicate Option statement; only one 'Option {first_word}' is allowed per module.",
-                first_token_span(source, member.span),
+                "invalidOptionStatement",
+                message,
+                absolute_span(_span, tok) if tok is not None else first_token_span(source, _span),
             )
+
+        def ends_here(index: int, form: str, _toks: list[VbaToken] = toks) -> None:
+            """Report trailing tokens after a directive whose form is complete."""
+            if len(_toks) > index:
+                report(index, f"'{form}' is complete here; VBA expects the statement to end.")
+
+        def argument(index: int, _toks: list[VbaToken] = toks) -> str | None:
+            return token_text(_toks[index]) if index < len(_toks) else None
+
+        # toks[0] is `Option` itself; the directive it names follows it.
+        directive = argument(1)
+        if directive is None:
+            report(0, "'Option' names no directive; VBA expects Base, Compare, Explicit or Private.")
+            continue
+        if directive == "explicit":
+            ends_here(2, "Option Explicit")
+        elif directive == "base":
+            arg = argument(2)
+            if arg not in ("0", "1"):
+                report(1 if arg is None else 2, "'Option Base' takes 0 or 1.")
+                continue
+            ends_here(3, "Option Base")
+        elif directive == "compare":
+            arg = argument(2)
+            if arg == "database":
+                if host is not None and host != "access":
+                    report(
+                        2,
+                        "'Option Compare Database' is an Access directive; this project's host "
+                        "takes Binary or Text.",
+                    )
+                    continue
+            elif arg not in ("binary", "text"):
+                report(1 if arg is None else 2, "'Option Compare' takes Binary or Text.")
+                continue
+            ends_here(3, "Option Compare")
+        elif directive == "private":
+            if argument(2) != "module":
+                report(
+                    1 if argument(2) is None else 2,
+                    "'Option Private' is written 'Option Private Module'.",
+                )
+                continue
+            ends_here(3, "Option Private Module")
         else:
-            seen.add(category)
+            written = toks[1].canonical_text or toks[1].raw_text
+            report(
+                1,
+                f"'Option {written}' is not an Option statement; "
+                "VBA expects Base, Compare, Explicit or Private.",
+            )
 
 
 # -- checkTooManyParameters ------------------------------------------------
@@ -1400,20 +1504,25 @@ def _value_tokens_after_equals(source: str, span: Span) -> list[VbaToken] | None
 
 
 def check_non_constant_parameter_defaults(
-    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
+    source: str,
+    mod: ModuleNode,
+    activity: ConditionalActivityTracker | None,
+    member_ctx: MemberCompletionContext,
+    push: PushFn,
 ) -> None:
     """An Optional parameter default must be a constant expression (no call/New/AddressOf).
 
-    Object-typed parameters are skipped: their defaults are owned by the
-    parameter-default-type-mismatch rule (\"must be Nothing\"). Host-class object
-    typing resolves to None here by design, so those parameters are still scanned -
-    sound, since a non-constant default is invalid regardless of the object type.
+    Object-typed parameters, host and project classes included, are skipped: their
+    defaults are owned by the parameter-default-type-mismatch rule ("must be
+    Nothing"), which avoids a double diagnostic.
     """
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
         for param in member.params:
-            if not param.default_raw or is_known_object_assignment_type(param.as_type):
+            if not param.default_raw:
+                continue
+            if resolve_known_object_assignment_type(param.as_type, member_ctx) is not None:
                 continue
             tokens = _value_tokens_after_equals(source, param.span)
             if tokens is None:

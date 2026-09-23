@@ -5,15 +5,15 @@ both a callable parameter type and an argument type are known, flag high-
 confidence mismatches: ByRef exact-type mismatches, non-numeric string operands
 in a numeric argument, numeric-literal overflow, and scalar/object
 incompatibilities. Unknowns and Variant are accepted, and VBA's normal coercions
-are allowed. The parenthesized object-member call surface needs the member-
-completion context, so it is deliberately not checked here (omitting it only
-drops detections, never adds a false one).
+are allowed. Member calls are checked against the signature the member-completion
+context binds (`ws.Range("A1")`, `p.Save "x"`).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 
+from ...completion.member_access import MemberCompletionContext
 from ...parser.nodes import LeafStatementNode, ProcedureNode
 from ...symbols.symbol_model import ModuleSymbols, VbaProcedureSignature, VbaSymbol
 from ...types.type_inference import (
@@ -23,11 +23,13 @@ from ...types.type_inference import (
     procedure_symbol_for,
     type_environment_for,
 )
-from ..argument_inference import validate_argument_types
+from ..argument_inference import validate_argument_types, validate_argument_types_for_signature
 from ..call_extraction import extract_call, extract_qualified_call
 from ..callable_signatures import (
     callable_type_signatures_for,
     expression_calls,
+    member_expression_calls,
+    member_statement_calls,
     source_name_scope_for,
 )
 from ..context import PushFn
@@ -39,6 +41,7 @@ def check_argument_types(
     symbols: ModuleSymbols,
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None,
     project_visible_symbols: Sequence[VbaSymbol] | None,
+    member_ctx: MemberCompletionContext,
     push: PushFn,
 ) -> ProcedureStatementVisitor:
     module_signatures = callable_type_signatures_for(symbols, project_procedures)
@@ -63,6 +66,17 @@ def check_argument_types(
                 validate_argument_types(
                     call, env, module_signatures, source_names, push,
                     resolve_expression_type, resolve_qualified_expression_type,
+                    source=source, member_ctx=member_ctx,
+                )
+            for member_call in (
+                *member_expression_calls(source, stmt.span, member_ctx),
+                *member_statement_calls(source, stmt.span, member_ctx),
+            ):
+                validate_argument_types_for_signature(
+                    member_call.signature, member_call.call, env, module_signatures,
+                    source_names, push, resolve_expression_type,
+                    resolve_qualified_expression_type,
+                    source=source, member_ctx=member_ctx,
                 )
             statement_call = extract_call(source, stmt.span)
             qualified_statement_call = (
@@ -73,6 +87,7 @@ def check_argument_types(
                 validate_argument_types(
                     effective, env, module_signatures, source_names, push,
                     resolve_expression_type, resolve_qualified_expression_type,
+                    source=source, member_ctx=member_ctx,
                 )
 
         return visitor

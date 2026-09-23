@@ -74,11 +74,47 @@ class VbaCreateProcedureStubData:
 
 
 @dataclass(frozen=True, slots=True)
+class VbaAddLibraryReferenceData:
+    """The library a project would need a reference to, lowercased (`word`)."""
+
+    library: str
+
+
+@dataclass(frozen=True, slots=True)
+class VbaRemoveDeclarationData:
+    """The edit that removes one unused declaration: its whole line when it stands
+    alone there, else its own name (and separator) from a `Dim a, b` list."""
+
+    variable_name: str
+    edit: VbaEdit
+
+
+@dataclass(frozen=True, slots=True)
+class VbaRemoveUnreachableCodeData:
+    """The edit that removes a run of unreachable statements, whole lines."""
+
+    edit: VbaEdit
+
+
+@dataclass(frozen=True, slots=True)
+class VbaDocCommentFix:
+    """One way to bring a doc comment in line with its declaration."""
+
+    title: str
+    edits: tuple[VbaEdit, ...]
+    is_preferred: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class VbaDiagnosticData:
     """Optional structured data for deterministic editor actions."""
 
     missing_required_argument_placeholder: VbaMissingRequiredArgumentPlaceholderData | None = None
     create_procedure_stub: VbaCreateProcedureStubData | None = None
+    add_library_reference: VbaAddLibraryReferenceData | None = None
+    remove_declaration: VbaRemoveDeclarationData | None = None
+    remove_unreachable_code: VbaRemoveUnreachableCodeData | None = None
+    doc_comment_fixes: tuple[VbaDocCommentFix, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

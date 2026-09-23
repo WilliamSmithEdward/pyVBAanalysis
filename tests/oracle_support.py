@@ -5,7 +5,8 @@ Not a test module (no test_ prefix); imported by the rule test files.
 
 from __future__ import annotations
 
-from pyvbaanalysis.diagnostics import AnalyzeModuleOptions, analyze_module
+from pyvbaanalysis import analyze_module_options_for
+from pyvbaanalysis.diagnostics import analyze_module
 from pyvbaanalysis.evidence import OracleCase, load_audit, load_oracle_cases
 from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
 
@@ -29,28 +30,21 @@ def case_codes(case: OracleCase) -> set[str]:
 
     Each module is analyzed with the cross-module project context the real
     analyzer sees (mirrors how XLIDE runs a project): a ProjectIndex is built
-    from every module in the case, and each module's analysis receives the
-    project-visible procedures, integer constants, and identifier symbols. For a
-    single-module case this context is empty, so behavior is unchanged.
+    from every module in the case, and each module's options come from the same
+    builder analyze_project uses. For a single-module case this context is
+    empty, so behavior is unchanged.
+
+    Every case was run in a default Excel workbook, so the host is named as Excel,
+    and the reference list is known to name no other application's library rather
+    than unknown.
     """
     index = ProjectIndex()
     for module in case.modules:
         index.set_module(ModuleInput(module.name, _kind(module.module_type), module.source))
-    project_procedures = index.procedure_signatures()
-    project_class_members = index.project_class_members()
     out: set[str] = set()
     for module in case.modules:
-        opts = AnalyzeModuleOptions(
-            module_name=module.name,
-            module_kind=_kind(module.module_type),
-            project_procedures=project_procedures,
-            project_class_members=project_class_members,
-            project_integer_constants=index.visible_external_integer_constant_expressions(module.name),
-            project_visible_symbols=index.visible_identifier_symbols(module.name),
-            project_types=index.visible_type_names(module.name),
-            known_procedures=index.visible_procedure_names(module.name),
-            known_identifiers=index.visible_identifier_names(module.name),
-            known_non_type_names=index.visible_non_type_names(module.name),
+        opts = analyze_module_options_for(
+            index, module.name, _kind(module.module_type), host="excel", referenced_hosts=[]
         )
         for diag in analyze_module(module.source, opts):
             out.add(diag.code)

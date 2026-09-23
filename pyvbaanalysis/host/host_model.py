@@ -28,6 +28,9 @@ class HostMember(TypedDict, total=False):
     returns: str
     returnsAnyOf: list[str]
     signature: str
+    # Marked hidden in the type library: it resolves like any other member, but
+    # the editor never offers it (XLIDE issue #56).
+    hidden: bool
 
 
 class HostConstant(TypedDict, total=False):
@@ -43,7 +46,7 @@ class HostType(TypedDict, total=False):
     exhaustive: bool
 
 
-class HostObjectModel(TypedDict):
+class _HostObjectModelCore(TypedDict):
     # Mapping rather than dict: a model is read-only data shared across every
     # analysis pass, and the empty model is a frozen singleton, so nothing may
     # mutate one in place.
@@ -53,6 +56,22 @@ class HostObjectModel(TypedDict):
     constants: Mapping[str, HostConstant]
     types: Mapping[str, HostType]
     memberSignatures: Mapping[str, Mapping[str, str]]
+
+
+class HostObjectModel(_HostObjectModelCore, total=False):
+    """A host object model. The optional keys arrived with XLIDE 10.x; inheriting
+    from a total=False subclass keeps them optional on Python 3.10, which has no
+    typing.NotRequired."""
+
+    # The library's own name, which is the qualifier VBA writes (`Excel`, `Word`).
+    # A merged model carries the project's own host here.
+    hostName: str
+    # The library's hidden global interface (`Excel.Global`), whose members VBA
+    # binds bare for anyone who references the library. Access has none.
+    globalType: str | None
+    # Enumerations by name. In a merged model, a referenced library's entries
+    # carry a `library` key naming where they came from.
+    enums: Mapping[str, Mapping[str, object]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +107,13 @@ def get_access_object_model() -> HostObjectModel:
     return _load_host_model("access_host_model.json")
 
 
+def get_vb6_object_model() -> HostObjectModel:
+    """The vendored VB6 object model (data/vb6_host_model.json): the VB runtime's
+    objects and constants, and the VB library of App, Screen, Printer, Form and the
+    intrinsic controls. It offers and describes; it never proves a member absent."""
+    return _load_host_model("vb6_host_model.json")
+
+
 def _default(model: HostObjectModel | None) -> HostObjectModel:
     return model if model is not None else get_excel_object_model()
 
@@ -108,6 +134,8 @@ class _HostModelIndex:
     members_by_type: dict[str, _HostTypeIndex]
     type_keys_by_lower: dict[str, str]
     globals_by_lower: dict[str, str]
+    enums_by_lower: dict[str, Mapping[str, object]]
+    constants_by_enum: dict[str, list[HostConstant]]
 
 
 # Identity-keyed, and deliberately IdentityLru rather than a bare dict[int, ...]:
@@ -149,7 +177,21 @@ def _host_model_index(model: HostObjectModel) -> _HostModelIndex:
         key_lower = key.lower()
         if key_lower not in globals_by_lower:
             globals_by_lower[key_lower] = global_type
-    index = _HostModelIndex(members_by_type, type_keys_by_lower, globals_by_lower)
+    enums_by_lower: dict[str, Mapping[str, object]] = {}
+    for entry in (model.get("enums") or {}).values():
+        lower = str(entry.get("displayName", "")).lower()
+        if lower and lower not in enums_by_lower:
+            enums_by_lower[lower] = entry
+    # An enum's members are the constants that name it, so the two can never
+    # disagree and the generated tables stay a single list.
+    constants_by_enum: dict[str, list[HostConstant]] = {}
+    for constant in (model.get("constants") or {}).values():
+        enum_type = constant.get("type")
+        if enum_type:
+            constants_by_enum.setdefault(enum_type.lower(), []).append(constant)
+    index = _HostModelIndex(
+        members_by_type, type_keys_by_lower, globals_by_lower, enums_by_lower, constants_by_enum
+    )
     return _MODEL_INDEX_CACHE.put(index, model)  # type: ignore[no-any-return]
 
 
@@ -205,6 +247,34 @@ def resolve_host_global(name: str, model: HostObjectModel | None = None) -> str 
 def resolve_host_constant(name: str, model: HostObjectModel | None = None) -> HostConstant | None:
     """A host enum constant such as xlUp or xlCalculationAutomatic (case-insensitive)."""
     return _host_constant_index(_default(model)).get(name.lower())
+
+
+def resolve_host_enum(name: str, model: HostObjectModel | None = None) -> Mapping[str, object] | None:
+    """The enumeration named `name`, case-insensitively. VBA accepts an enum name as
+    a declared type (`Dim k As XlAxisType`) and as a qualifier
+    (`XlAxisType.xlCategory`)."""
+    if not name:
+        return None
+    return _host_model_index(_default(model)).enums_by_lower.get(name.strip().lower())
+
+
+def get_host_enum_members(enum_name: str, model: HostObjectModel | None = None) -> list[HostConstant]:
+    """The constants belonging to one enumeration, in declaration order."""
+    return _host_model_index(_default(model)).constants_by_enum.get(enum_name.lower(), [])
+
+
+def resolve_host_global_member(name: str, model: HostObjectModel | None = None) -> HostMember | None:
+    """A bare identifier as a member of the host's hidden Global interface, the
+    surface VBA calls unqualified: Word's InchesToPoints, Excel's Union (XLIDE issue
+    #34). Object-access members only, never an event; None when the model carries
+    no Global type or the name is not among its members."""
+    resolved = _default(model)
+    global_type = resolved.get("globalType")
+    # A leading underscore marks a hidden dispatch name, never called by name.
+    if not global_type or name.startswith("_"):
+        return None
+    type_index = _host_model_index(resolved).members_by_type.get(global_type)
+    return type_index.by_lower_name.get(name.lower()) if type_index is not None else None
 
 
 def resolve_host_member_signature(
@@ -267,6 +337,15 @@ def application_member_names(model: HostObjectModel | None = None) -> frozenset[
     Keyed per model, so a Word caller gets Word's set and a host with no model
     injects nothing at all. Each vendored model is a cached singleton, so
     identity keying is stable across calls.
+
+    Where the host has a Global interface (Excel, Word, PowerPoint), that is what
+    VBA really calls bare, and resolve_host_global_member answers for it, hidden
+    members and all. Application's documented members stand in for it here because
+    they match it closely; its hidden ones do not, so they stay out. `Save` is a
+    hidden method of Excel's `_Application` and no member of `_Global`, so a bare
+    `Save` is "Sub or Function not defined". Access has no Global: its type library
+    makes Application itself the object VBA binds bare, so there every member of
+    it, hidden or not, is in scope.
     """
     resolved = _default(model)
     cached = _APPLICATION_MEMBER_NAMES.get(resolved)
@@ -274,6 +353,12 @@ def application_member_names(model: HostObjectModel | None = None) -> frozenset[
         return cached  # type: ignore[no-any-return]
     app_type = resolve_host_global("Application", resolved)
     members = get_host_members(app_type, resolved) if app_type is not None else []
+    global_answers = resolved.get("globalType") is not None
     return _APPLICATION_MEMBER_NAMES.put(  # type: ignore[no-any-return]
-        frozenset(member["name"].lower() for member in members), resolved
+        frozenset(
+            member["name"].lower()
+            for member in members
+            if not (global_answers and member.get("hidden"))
+        ),
+        resolved,
     )

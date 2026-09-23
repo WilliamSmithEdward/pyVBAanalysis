@@ -3,18 +3,18 @@
 Ported from checkParameterDefaultValues (declarations.ts): an Optional parameter's
 default value must be type-compatible with its declared type (a string literal for
 a numeric/Boolean parameter is a VBE compile error; an object parameter's default
-must be Nothing; an array parameter's default cannot be scalar). Object typing uses
-the host-free is_known_object_assignment_type (generic Object); host-class object
-parameters resolve to None (M9), which is precision-only.
+must be Nothing; an array parameter's default cannot be scalar). Object typing goes
+through resolve_known_object_assignment_type, so host and project classes count.
 """
 
 from __future__ import annotations
 
+from ...completion.member_access import MemberCompletionContext, resolve_known_object_assignment_type
 from ...conditional import ConditionalActivityTracker
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize
 from ...parser.nodes import ModuleNode, ParameterNode, ProcedureNode, Span
-from ...types.type_names import is_known_object_assignment_type, is_known_scalar_type, normalize_type
+from ...types.type_names import is_known_scalar_type, normalize_type
 from ..argument_inference import incompatibility_reason, infer_argument_type
 from ..call_extraction import InferredArgumentType
 from ..context import PushFn
@@ -25,6 +25,7 @@ def check_parameter_default_values(
     source: str,
     mod: ModuleNode,
     activity: ConditionalActivityTracker | None,
+    member_ctx: MemberCompletionContext,
     push: PushFn,
 ) -> None:
     for member in active_module_members(mod, activity):
@@ -40,7 +41,7 @@ def check_parameter_default_values(
             actual = infer_argument_type(tokens, param.span.start, {}, {})
             if actual is None:
                 continue
-            reason = _parameter_default_incompatibility_reason(param, actual)
+            reason = _parameter_default_incompatibility_reason(param, actual, member_ctx)
             if reason is None:
                 continue
             push(
@@ -65,14 +66,14 @@ def _value_tokens_after_equals(source: str, span: Span) -> tuple[list[VbaToken],
 
 
 def _parameter_default_incompatibility_reason(
-    param: ParameterNode, actual: InferredArgumentType
+    param: ParameterNode, actual: InferredArgumentType, member_ctx: MemberCompletionContext
 ) -> str | None:
     if param.is_array and _is_known_scalar_default_type(actual.type_):
         return "Optional array parameter defaults cannot be scalar values."
     expected_raw = param.as_type
     if not expected_raw:
         return None
-    if is_known_object_assignment_type(expected_raw):
+    if resolve_known_object_assignment_type(expected_raw, member_ctx) is not None:
         if normalize_type(actual.type_) == "nothing":
             return None
         return "Optional object parameter defaults must be Nothing."

@@ -1,12 +1,12 @@
 # Diagnostic catalogue
 
-The diagnostic codes pyVBAanalysis can emit, generated from the rule metadata (`tools/generate_diagnostics_catalogue.py`). This table lists the 119 rule-metadata codes across 6 categories. A further 3 structural block-balance codes (`mismatched-end-keyword`, `missing-block-closer`, `unmatched-block-closer`) are emitted by the parser pass and are not in the metadata table, for a full set of 122 codes.
+The diagnostic codes pyVBAanalysis can emit, generated from the rule metadata (`tools/generate_diagnostics_catalogue.py`). This table lists the 131 rule-metadata codes across 6 categories. A further 3 structural block-balance codes (`mismatched-end-keyword`, `missing-block-closer`, `unmatched-block-closer`) are emitted by the parser pass and are not in the metadata table, for a full set of 134 codes.
 
 Each code is reported only when it is provably correct; anything unknown or ambiguous stays quiet (the no-false-positive discipline). The **kind** column says what a code means: a *compile error* is rejected by the VBE compiler, a *runtime error* is a deterministic Run-time error, a *runtime risk* is a likely fault, and *style* is advisory.
 
 Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or the `severity_overrides` argument of `analyze_project` / the reader functions), keyed by code. Use `"off"`, `"information"`, `"warning"`, or `"error"`; the allowed values per code are constrained by policy (some codes can be downgraded but not disabled). See [docs/usage.md](usage.md).
 
-## Declaration (41)
+## Declaration (42)
 
 | Code | Title | Default | Kind | Spec reference |
 | --- | --- | --- | --- | --- |
@@ -29,6 +29,7 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `invalid-identifier-character` | Invalid character in identifier | error | compile error | MS-VBAL 3.3.5 (identifier) / VBE compiler |
 | `invalid-identifier-start` | Invalid identifier start | error | compile error | MS-VBAL 3.3.5 |
 | `invalid-new-type-name` | Type cannot be created with New | error | compile error | MS-VBAL 5.2.3.1 / 5.6.9 |
+| `invalid-option-statement` | Malformed Option statement | error | compile error | MS-VBAL 5.2.1 (module options) / VBE compiler |
 | `invalid-proc-header` | Invalid procedure declaration | error | compile error | MS-VBAL 5.3.1 |
 | `module-declaration-after-procedure` | Module-level declaration after procedure | error | compile error | MS-VBAL 5.2 / 5.3 |
 | `module-declaration-in-procedure` | Module-level declaration inside procedure | error | compile error | MS-VBAL 5.2 / 5.3 |
@@ -57,7 +58,7 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | Code | Title | Default | Kind | Spec reference |
 | --- | --- | --- | --- | --- |
 | `event-declaration-module-kind` | Event declaration is not valid in this module | error | compile error | MS-VBAL 5.2.5: Event declarations belong to object modules |
-| `event-handler-module-scope` | Event handler is not wired in this module | information | style-policy | Excel document-module event binding |
+| `event-handler-module-scope` | Event handler is not wired in this module | information | style-policy | Office document-module event binding |
 | `friend-declaration` | Invalid Friend declaration | error | compile error | MS-VBAL Friend procedure visibility: object-module procedures only |
 | `implements-statement-placement` | Invalid Implements statement | error | compile error | MS-VBAL Implements statement: module-level object-module declaration |
 | `withevents-declaration` | Invalid WithEvents declaration | error | compile error | MS-VBAL 5.2.3: WithEvents object variable declarations |
@@ -69,7 +70,7 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `undeclared-variable` | Variable not defined | error | compile error | MS-VBAL 5.2.4.1.1 |
 | `unknown-call` | Sub or Function not defined | error | compile error | MS-VBAL 5.4.2.1 |
 
-## Semantic (51)
+## Semantic (52)
 
 | Code | Title | Default | Kind | Spec reference |
 | --- | --- | --- | --- | --- |
@@ -105,6 +106,7 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `member-access-outside-with` | Leading member access outside With block | error | compile error | MS-VBAL 5.4.2.6 |
 | `member-not-found` | Object member not found | error | compile error | VBE compiler: Method or data member not found |
 | `mid-statement-literal-target` | Mid statement target must be a writable String variable | error | compile error | MS-VBAL 5.4.3.4 (Mid/MidB statement) |
+| `missing-library-reference` | Type library not referenced | error | compile error | VBE compiler: User-defined type not defined |
 | `missing-return-assignment` | Function has no return assignment | warning | runtime risk | VBA Function return variable semantics |
 | `next-variable-mismatch` | Next variable does not match active For loop | error | compile error | MS-VBAL 5.4.2.5 |
 | `non-callable-call` | Identifier is not callable | error | compile error | MS-VBAL 5.4.2.1 |
@@ -125,12 +127,22 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `unallocated-dynamic-array-access` | Dynamic array is not allocated | error | runtime error | VBE runtime error 9: Subscript out of range |
 | `undefined-label` | Label not defined | error | compile error | MS-VBAL 5.4.1 / VBE compiler: Label not defined |
 
-## Style (3)
+## Style (13)
 
 | Code | Title | Default | Kind | Spec reference |
 | --- | --- | --- | --- | --- |
 | `analysis-suppression-directive` | Invalid analysis suppression directive | warning | style-policy | Analysis suppression directive comment syntax |
+| `doc-param-missing` | Doc comment does not describe a parameter | warning | style-policy | Doc comment syntax |
+| `doc-param-unknown` | Doc comment describes a parameter the declaration does not have | warning | style-policy | Doc comment syntax |
+| `doc-returns-missing` | Doc comment does not describe the return value | warning | style-policy | Doc comment syntax |
+| `doc-returns-unexpected` | Doc comment describes a return value the declaration does not have | warning | style-policy | Doc comment syntax |
+| `doc-tag-duplicate` | Doc comment repeats a tag | warning | style-policy | Doc comment syntax |
+| `doc-tag-unclosed` | Doc comment tag is not closed | warning | style-policy | Doc comment syntax |
 | `option-explicit-missing` | Option Explicit is not specified | warning | style-policy | MS-VBAL 5.2.4.1.1 |
+| `unreachable-code` | Code is never reached | information | style-policy | MS-VBAL 5.4.1.3 (Exit), 5.4.1.4 (GoTo), 5.4.4 (Resume) plus dead-code policy |
+| `unused-procedure` | Private procedure is never called | information | style-policy | MS-VBAL 5.3.1.1 (Private procedure visibility) plus dead-code policy |
+| `unused-variable` | Variable or constant is never used | information | style-policy | MS-VBAL 5.2.3 / 5.4.3.1 (declaration scope) plus dead-code policy |
+| `variable-never-read` | Variable is assigned but never read | information | style-policy | MS-VBAL 5.4.3 (assignment) plus dead-code policy |
 | `vba-test-directive` | Invalid VBA test directive | warning | style-policy | VBA test directive comment syntax |
 
 ## Syntax (17)

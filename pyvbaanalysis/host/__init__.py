@@ -16,6 +16,7 @@ from .host_model import (
     get_host_members,
     get_host_type,
     get_powerpoint_object_model,
+    get_vb6_object_model,
     get_word_object_model,
     is_host_member_name,
     resolve_host_alias,
@@ -24,10 +25,12 @@ from .host_model import (
     resolve_host_member_signature,
     resolve_member_return_type,
 )
+from .host_libraries import host_token_for_libid, host_tokens_for_project, referenced_host_tokens
 from .host_registry import (
     EMPTY_HOST_MODEL,
     VBA_HOST_TOKENS,
     host_object_model_for_token,
+    host_object_model_for_tokens,
     host_token_for_file_name,
 )
 
@@ -47,10 +50,15 @@ __all__ = [
     "get_host_members",
     "get_host_type",
     "get_powerpoint_object_model",
+    "get_vb6_object_model",
     "get_word_object_model",
     "host_object_model_for_token",
+    "host_object_model_for_tokens",
     "host_token_for_file_name",
+    "host_token_for_libid",
+    "host_tokens_for_project",
     "is_host_member_name",
+    "referenced_host_tokens",
     "resolve_host_alias",
     "resolve_host_constant",
     "resolve_host_global",

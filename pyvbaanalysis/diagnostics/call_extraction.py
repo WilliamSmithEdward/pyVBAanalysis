@@ -2,9 +2,9 @@
 
 Ported from xlide_vscode/src/analyzer/diagnostics/callExtraction.ts. Owns the
 value model for a call (CallArguments, the callable-signature shapes, inferred
-argument types) and the argument-slot splitter that the call/argument rules
-share. The statement-level call extractors (extract_call / extract_qualified_call)
-and arity validation land with their consumer rules.
+argument types), the argument-slot splitter that the call/argument rules share,
+the statement-level call extractors (extract_call / extract_qualified_call), and
+arity validation.
 """
 
 from __future__ import annotations
@@ -120,10 +120,14 @@ def _argument_slot_span(
 
 
 def is_named_slot(slot: Sequence[VbaToken]) -> bool:
-    """True if a slot is a named argument (`name := value`)."""
+    """True if a slot is a named argument (`name := value`).
+
+    `:=` has one meaning in VBA, so the word before it is a parameter name whatever
+    it spells. `Type` lexes as a keyword, and reading `Type:=xlLinkTypeExcelLinks`
+    as positional reported correct calls (XLIDE 4.1.2)."""
     return (
         len(slot) >= 2
-        and slot[0].kind in (TokenKind.IDENTIFIER, TokenKind.BRACKETED_IDENTIFIER)
+        and slot[0].kind in (TokenKind.IDENTIFIER, TokenKind.BRACKETED_IDENTIFIER, TokenKind.KEYWORD)
         and slot[1].kind is TokenKind.OPERATOR
         and slot[1].raw_text == ":="
     )

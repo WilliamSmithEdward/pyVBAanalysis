@@ -1,4 +1,4 @@
-"""VBA type model: pure type-name helpers now; the inference engine (M8) later."""
+"""VBA type model: the pure type-name helpers (expression typing is in diagnostics)."""
 
 from .type_names import (
     NumericBounds,

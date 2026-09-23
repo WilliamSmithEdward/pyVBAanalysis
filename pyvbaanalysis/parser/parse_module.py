@@ -896,7 +896,13 @@ class _Parser:
     def _parse_body_item(self, stmt: LogicalStatement) -> BodyNode | None:
         ck = self._closer_kind(stmt)
         if ck:
-            if ck in self._open_stack:
+            # Any procedure closer ends the open procedure, even from inside a
+            # block left open in it: the VBE takes End Sub, End Function and End
+            # Property for one another (XLIDE #81).
+            closes_open_procedure = ck in _PROCEDURE_CLOSERS and any(
+                open_closer in _PROCEDURE_CLOSERS for open_closer in self._open_stack
+            )
+            if ck in self._open_stack or closes_open_procedure:
                 # Belongs to an ancestor block; stop and let it close.
                 return None
             self._diag(

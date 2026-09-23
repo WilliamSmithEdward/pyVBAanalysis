@@ -136,6 +136,7 @@ def _collect_locals(
                         fixed_length=decl.fixed_length,
                         default_raw=decl.default_raw,
                         is_array=decl.is_array,
+                        is_auto_instantiated=decl.is_new,
                         array_bounds=decl.array_bounds,
                     )
                 )
@@ -312,6 +313,7 @@ def _build_module_variables(
             fixed_length=decl.fixed_length,
             default_raw=decl.default_raw,
             is_array=decl.is_array,
+            is_auto_instantiated=decl.is_new,
             array_bounds=decl.array_bounds,
         )
         root_children.append(symbol)

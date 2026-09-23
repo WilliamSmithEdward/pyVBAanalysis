@@ -1,8 +1,10 @@
 """Rule family: assignment-statement rules.
 
-Ported from xlide_vscode/src/analyzer/diagnostics/rules/assignments.ts. Only the
-Mid-statement literal-target rule is ported in M7; the type-coupled assignment
-rules (assignment type mismatch, Set object types) land in M8.
+Ported from xlide_vscode/src/analyzer/diagnostics/rules/assignments.ts: constant
+targets, scalar and member-access assignment types, Set targets and their object
+types, missing return assignments, and the Mid-statement literal target. The
+rules that read a statement structurally also read the statements a single-line
+`If` carries.
 """
 
 from __future__ import annotations
@@ -62,6 +64,7 @@ from ..callable_signatures import (
     build_module_type_signatures,
     callable_signature_for_call,
     callable_type_signatures_for,
+    is_member_statement_chain_through,
     source_name_scope_for,
 )
 from ..context import PushFn
@@ -94,7 +97,11 @@ def check_const_assignment(
         proc_sym = procedure_symbol_for(symbols, member)
 
         def visitor(stmt: LeafStatementNode) -> None:
-            hit = bare_assignment_target(source, stmt.span)
+            for span in statement_and_branch_spans(stmt):
+                check_span(span)
+
+        def check_span(span: Span) -> None:
+            hit = bare_assignment_target(source, span)
             if hit is None:
                 return
             binding = resolve_bare_identifier_binding(
@@ -159,7 +166,11 @@ def check_assignment_types(
             )
 
         def visit(stmt: LeafStatementNode) -> None:
-            assignment = bare_assignment_target(source, stmt.span)
+            for span in statement_and_branch_spans(stmt):
+                check_assignment_span(span)
+
+        def check_assignment_span(span: Span) -> None:
+            assignment = bare_assignment_target(source, span)
             if assignment is None:
                 return
             name, name_span, value_tokens = assignment
@@ -177,7 +188,7 @@ def check_assignment_types(
                 )
                 return
             array_source = _array_assignment_to_scalar_source(
-                name, value_tokens, stmt.span.start, expected, shapes,
+                name, value_tokens, span.start, expected, shapes,
                 resolve_target_shape, resolve_source_shape,
             )
             if array_source is not None:
@@ -190,7 +201,7 @@ def check_assignment_types(
                 )
                 return
             string_arithmetic = nonnumeric_string_arithmetic_operand(
-                expected, value_tokens, stmt.span.start
+                expected, value_tokens, span.start
             )
             if string_arithmetic is not None:
                 push(
@@ -202,8 +213,9 @@ def check_assignment_types(
                 )
                 return
             actual = infer_argument_type(
-                value_tokens, stmt.span.start, env, module_signatures, source_names,
+                value_tokens, span.start, env, module_signatures, source_names,
                 resolve_expression_type, resolve_qualified_expression_type,
+                source=source, member_ctx=member_ctx,
             )
             if actual is None:
                 return
@@ -253,6 +265,14 @@ def _member_assignment_target(source: str, span: Span) -> _MemberAssignmentTarge
     member_name = token_name(member_tok)
     if not member_name or lhs[-2].raw_text != ".":
         return None
+    # A target is one receiver chain ending in the member. Anything else before
+    # the `=` is another statement comparing the member: an ElseIf or Case
+    # header, a single-line If's condition, a call given the comparison
+    # (`Debug.Print w.Part = "a"`). ReDim's `ElseIf ReDimUI.SenderPart = "plus"
+    # Then` compiles, and was reported as assigning to 'ElseIf
+    # ReDimUI.SenderPart' (XLIDE #78).
+    if not is_member_statement_chain_through(lhs, 0, len(lhs) - 1):
+        return None
     if any(t.kind is TokenKind.OPERATOR and t.raw_text == "=" for t in lhs):
         return None
     return _MemberAssignmentTarget(
@@ -285,8 +305,8 @@ def check_member_assignment_types(
     if not member_ctx.project_class_members:
         return
 
-    def visit(stmt: LeafStatementNode) -> None:
-        assignment = _member_assignment_target(source, stmt.span)
+    def check_statement(span: Span) -> None:
+        assignment = _member_assignment_target(source, span)
         if assignment is None:
             return
         target = resolve_exact_member_completion(
@@ -312,8 +332,9 @@ def check_member_assignment_types(
                 )
                 return
             actual = infer_argument_type(
-                assignment.value_tokens, stmt.span.start, env, module_signatures, source_names,
+                assignment.value_tokens, span.start, env, module_signatures, source_names,
                 resolve_expression_type, resolve_qualified_expression_type,
+                source=source, member_ctx=member_ctx,
             )
             reason = object_assignment_incompatibility_reason(expected, actual, member_ctx)
             if reason:
@@ -334,7 +355,7 @@ def check_member_assignment_types(
         if not expected or normalize_type(expected) == "object":
             return
         string_arithmetic = nonnumeric_string_arithmetic_operand(
-            expected, assignment.value_tokens, stmt.span.start
+            expected, assignment.value_tokens, span.start
         )
         if string_arithmetic is not None:
             push(
@@ -346,8 +367,9 @@ def check_member_assignment_types(
             )
             return
         actual = infer_argument_type(
-            assignment.value_tokens, stmt.span.start, env, module_signatures, source_names,
+            assignment.value_tokens, span.start, env, module_signatures, source_names,
             resolve_expression_type, resolve_qualified_expression_type,
+            source=source, member_ctx=member_ctx,
         )
         if actual is None:
             return
@@ -359,6 +381,14 @@ def check_member_assignment_types(
             f"Assignment to '{assignment.label}' expects {expected}, but got {actual.label}. {reason}",
             actual.span,
         )
+
+    # This rule reads a statement structurally - what precedes its first `=` is
+    # the target - so it takes a single-line If's branches as statements of their
+    # own. Read whole, `If ok Then w.Part = 1` had the target `If ok Then w.Part`,
+    # and `If w.Part = 1 Then Exit Sub`, which assigns nothing, had `If w.Part`.
+    def visit(stmt: LeafStatementNode) -> None:
+        for span in statement_and_branch_spans(stmt):
+            check_statement(span)
 
     for_each_statement(member.body, visit, activity)
 
@@ -436,7 +466,11 @@ def check_set_assignments(
             )
 
         def visitor(stmt: LeafStatementNode) -> None:
-            target = set_assignment_target(source, stmt.span)
+            for branch in statement_and_branch_spans(stmt):
+                check_set_span(branch)
+
+        def check_set_span(branch: Span) -> None:
+            target = set_assignment_target(source, branch)
             if target is None:
                 return
             name, span, value_tokens = target
@@ -449,8 +483,9 @@ def check_set_assignments(
                 if not is_known_object_assignment_type_ctx(expected, member_ctx):
                     return
                 actual = infer_argument_type(
-                    value_tokens, stmt.span.start, env, module_signatures, source_names,
+                    value_tokens, branch.start, env, module_signatures, source_names,
                     resolve_expression_type, resolve_qualified_expression_type,
+                    source=source, member_ctx=member_ctx,
                 )
                 reason = object_assignment_incompatibility_reason(expected, actual, member_ctx)
                 if reason:

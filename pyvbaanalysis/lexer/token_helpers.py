@@ -9,12 +9,12 @@ numbers, paren matching) from drifting between surfaces. VBA is case-insensitive
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Sequence
 
 from .token_kinds import TokenKind, VbaToken
 from .tokenize import tokenize, tokenize_cached
 
-IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DECIMAL_RE = re.compile(r"^\d+$")
 
 
@@ -22,7 +22,7 @@ def is_ident_like(token: VbaToken) -> bool:
     """True when the token reads as a bare identifier (identifier or keyword)."""
     return (
         token.kind in (TokenKind.IDENTIFIER, TokenKind.KEYWORD)
-        and IDENT_RE.match(token.raw_text) is not None
+        and is_identifier(token.raw_text)
     )
 
 
@@ -146,6 +146,47 @@ def _derive_statement_tokens(
             )
         )
     return out
+
+
+def _identifier_start(ch: str) -> bool:
+    return ch == "_" or unicodedata.category(ch).startswith("L")
+
+
+def _identifier_part(ch: str) -> bool:
+    return ch == "_" or unicodedata.category(ch)[0] in ("L", "M", "N")
+
+
+def is_identifier(text: str) -> bool:
+    """True when the whole text is one identifier: a letter or underscore, then
+    letters, marks, digits and underscores (XLIDE's IDENT_RE,
+    `^[\\p{L}_][\\p{L}\\p{M}\\p{N}_]*$`). VBA identifiers may use any locale's
+    letters, and an ASCII-only test made `Dim g As Прибор` resolve to no type."""
+    return bool(text) and _identifier_start(text[0]) and all(_identifier_part(ch) for ch in text[1:])
+
+
+def identifiers_in(text: str) -> list[str]:
+    """Every identifier-shaped word in free text: a letter or underscore, then
+    letters, marks, digits and underscores (XLIDE's `[\\p{L}_][\\p{L}\\p{M}\\p{N}_]*`).
+
+    Python's `re` has no Unicode property classes, so this scans by category."""
+    words: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if not _identifier_start(text[i]):
+            i += 1
+            continue
+        start = i
+        i += 1
+        while i < length and _identifier_part(text[i]):
+            i += 1
+        words.append(text[start:i])
+    return words
+
+
+def identifier_words(text: str) -> list[str]:
+    """The same words lower-cased, the way VBA compares names."""
+    return [word.lower() for word in identifiers_in(text)]
 
 
 def token_name(token: VbaToken | None) -> str | None:

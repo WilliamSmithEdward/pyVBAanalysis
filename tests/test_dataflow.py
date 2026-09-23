@@ -11,7 +11,7 @@ from __future__ import annotations
 from pyvbaanalysis.diagnostics.dataflow import (
     DataflowHooks,
     Lattice,
-    tracked_locals_passed_as_call_arguments,
+    tracked_locals_named_whole,
     walk_branch_merged_body,
     walk_straight_line_body,
 )
@@ -102,18 +102,25 @@ def _significant(source: str) -> list:
     return statement_tokens(source, 0, len(source))
 
 
-def test_tracked_locals_passed_as_call_arguments() -> None:
+def test_tracked_locals_named_whole() -> None:
     tracked = {"x", "y"}
 
-    def is_tracked(name: str) -> bool:
-        return name in tracked
+    def named(source: str, read_only: frozenset[str] = frozenset()) -> dict[str, int]:
+        return tracked_locals_named_whole(_significant(source), 0, lambda name: name in tracked, read_only)
 
-    assert tracked_locals_passed_as_call_arguments(_significant("Helper x"), is_tracked) == {"x"}
-    assert tracked_locals_passed_as_call_arguments(
-        _significant("Call Helper(x, y)"), is_tracked
-    ) == {"x", "y"}
-    # A top-level assignment is not a call statement.
-    assert tracked_locals_passed_as_call_arguments(_significant("x = 1"), is_tracked) == set()
-    # Member-call receiver / dotted operands are not bare arguments.
-    assert tracked_locals_passed_as_call_arguments(_significant("obj.Method x"), is_tracked) == set()
-    assert tracked_locals_passed_as_call_arguments(_significant("Helper a.x"), is_tracked) == set()
+    assert named("Helper x") == {"x": 7}
+    assert set(named("Call Helper(x, y)")) == {"x", "y"}
+    # A top-level assignment is not a call statement, but an argument inside it is
+    # still passed by reference (XLIDE issue #70).
+    assert named("x = 1") == {}
+    assert set(named("n = Fill(x)")) == {"x"}
+    # A method call passes its arguments too; a member access or an indexed
+    # element is not the variable itself.
+    assert set(named("obj.Method x")) == {"x"}
+    assert named("Helper a.x") == {}
+    assert named("Helper x(0)") == {}
+    # The operand of Is and the argument of a read-only intrinsic are only read.
+    assert named("If x Is Nothing Then Helper") == {}
+    assert named("n = UBound(x)", frozenset({"ubound"})) == {}
+    # The first mention's offset tells an access before the pass from one after it.
+    assert named("If Load(x) Then Debug.Print x(0)") == {"x": 8}

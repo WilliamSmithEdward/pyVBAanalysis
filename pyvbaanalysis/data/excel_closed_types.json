@@ -1,0 +1,31 @@
+{
+  "excelClosedTypes": [
+    "Adjustments",
+    "CalloutFormat",
+    "Chart",
+    "ColorFormat",
+    "CubeField",
+    "CubeFields",
+    "DefaultWebOptions",
+    "DiagramNode",
+    "DiagramNodeChildren",
+    "DiagramNodes",
+    "FillFormat",
+    "Global",
+    "LineFormat",
+    "Model3DFormat",
+    "PictureFormat",
+    "PublishObject",
+    "ShadowFormat",
+    "ShapeNode",
+    "ShapeNodes",
+    "Sheets",
+    "TextEffectFormat",
+    "TextFrame2",
+    "ThreeDFormat",
+    "TreeviewControl",
+    "WebOptions",
+    "Workbooks",
+    "Worksheet"
+  ]
+}

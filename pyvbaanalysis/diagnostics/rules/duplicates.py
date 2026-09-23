@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 
-from ...conditional import ConditionalActivity, ConditionalActivityTracker
+from ...conditional import ConditionalActivityTracker
 from ..call_extraction import extract_call
 from ..walker import ProcedureStatementVisitor
 from ..callable_signatures import (
@@ -21,7 +21,16 @@ from ..callable_signatures import (
 )
 from ...host import application_member_names, resolve_host_global
 from ...host.host_model import HostObjectModel
-from ...parser.nodes import EnumNode, LeafStatementNode, ModuleNode, ProcedureNode, Span, TypeNode
+from ...parser.nodes import (
+    EnumMemberNode,
+    EnumNode,
+    LeafStatementNode,
+    ModuleNode,
+    ProcedureNode,
+    Span,
+    TypeFieldNode,
+    TypeNode,
+)
 from ...runtime import resolve_runtime_function, resolve_runtime_object
 from ...symbols.name_resolution import (
     BareIdentifierContext,
@@ -48,6 +57,7 @@ from ..walker import active_module_members
 from .shared import (
     declaration_name_hit,
     for_each_undeclared_reference_span,
+    report_repeated_keys,
     value_read_references,
 )
 
@@ -165,6 +175,17 @@ def check_duplicate_module_members(
     )
 
 
+def _block_entry_key(
+    entry: EnumMemberNode | TypeFieldNode, activity: ConditionalActivityTracker | None
+) -> str | None:
+    """The repeat key of an Enum member or Type field. Only a provably inactive one
+    drops out: an entry in a branch that cannot be decided still collides with
+    anything the same build would compile beside it, and only the arms of one
+    `#If` chain are alternatives. Skipping every undecidable branch went blind to a
+    genuine repeat inside one arm."""
+    return None if activity is not None and activity.is_inactive(entry.span) else entry.name.lower()
+
+
 def check_duplicate_enum_members(
     source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
 ) -> None:
@@ -172,23 +193,22 @@ def check_duplicate_enum_members(
     for member in active_module_members(mod, activity):
         if not isinstance(member, EnumNode):
             continue
-        seen: set[str] = set()
-        for enum_member in member.members:
-            # Only provably-active members can collide: an inactive or
-            # not-provably-active #If branch member is not guaranteed compiled
-            # alongside another same-named member.
-            if activity is not None and activity.activity_for_span(enum_member.span) is not ConditionalActivity.ACTIVE:
-                continue
-            key = enum_member.name.lower()
-            hit = declaration_name_hit(source, enum_member.span, enum_member.name)
-            if key in seen:
-                push(
-                    "duplicateEnumMember",
-                    f"Duplicate Enum member '{enum_member.name}' in Enum '{member.name}'.",
-                    hit.span if hit is not None else enum_member.span,
-                )
-            else:
-                seen.add(key)
+
+        def report(repeat: EnumMemberNode, earlier: EnumMemberNode, enum_name: str = member.name) -> None:
+            hit = declaration_name_hit(source, repeat.span, repeat.name)
+            push(
+                "duplicateEnumMember",
+                f"Duplicate Enum member '{repeat.name}' in Enum '{enum_name}'.",
+                hit.span if hit is not None else repeat.span,
+            )
+
+        report_repeated_keys(
+            member.members,
+            activity,
+            lambda entry: _block_entry_key(entry, activity),
+            lambda entry: entry.span,
+            report,
+        )
 
 
 def check_duplicate_type_fields(
@@ -198,20 +218,22 @@ def check_duplicate_type_fields(
     for member in active_module_members(mod, activity):
         if not isinstance(member, TypeNode):
             continue
-        seen: set[str] = set()
-        for field_node in member.fields:
-            if activity is not None and activity.activity_for_span(field_node.span) is not ConditionalActivity.ACTIVE:
-                continue
-            key = field_node.name.lower()
-            hit = declaration_name_hit(source, field_node.span, field_node.name)
-            if key in seen:
-                push(
-                    "duplicateTypeField",
-                    f"Duplicate field '{field_node.name}' in Type '{member.name}'.",
-                    hit.span if hit is not None else field_node.span,
-                )
-            else:
-                seen.add(key)
+
+        def report(repeat: TypeFieldNode, earlier: TypeFieldNode, type_name: str = member.name) -> None:
+            hit = declaration_name_hit(source, repeat.span, repeat.name)
+            push(
+                "duplicateTypeField",
+                f"Duplicate field '{repeat.name}' in Type '{type_name}'.",
+                hit.span if hit is not None else repeat.span,
+            )
+
+        report_repeated_keys(
+            member.fields,
+            activity,
+            lambda entry: _block_entry_key(entry, activity),
+            lambda entry: entry.span,
+            report,
+        )
 
 
 def check_ambiguous_enum_member_references(

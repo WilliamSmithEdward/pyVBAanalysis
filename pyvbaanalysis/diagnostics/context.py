@@ -20,6 +20,7 @@ from ..lexer.token_helpers import cached_statement_tokens
 from ..lexer.token_kinds import VbaToken
 from ..parser.nodes import ModuleNode, Span
 from ..symbols.symbol_model import (
+    ImplicitMember,
     ModuleSymbolKind,
     ModuleSymbols,
     VbaProcedureSignature,
@@ -72,6 +73,21 @@ class AnalyzeModuleOptions:
     # `Implements`. A module named here is an interface, so its own members are
     # declarations for an implementer to fill in rather than unfinished code.
     implemented_interfaces: AbstractSet[str] | None = None
+    # Lowercased identifier-shaped words inside every string literal in the project.
+    # A Private procedure named in one may be reached through Application.Run,
+    # OnTime or a control's OnAction, so the unused-procedure rule treats the name
+    # as used. When omitted, the module's own string literals are searched.
+    project_string_literal_words: AbstractSet[str] | None = None
+    # Members the module has that no line of its own text declares: a UserForm's
+    # controls, declared by the designer. Referring to one is correct VBA. Carries
+    # the type as well as the name so a member lookup can resolve it. None for a
+    # form means its control list is unknown, and nothing in its code-behind is
+    # then called undeclared.
+    implicit_members: Sequence[ImplicitMember] | None = None
+    # The host class the module's DESIGNER makes it, when the caller can say: an
+    # Access form's `Access.Form`. Its members belong to the module the way a
+    # control does, so calling one bare or through `Me` is correct code.
+    designer_class: str | None = None
     project_integer_constants: Mapping[str, str | None] | None = None
     host_model: Any = None  # HostObjectModel (from the host package)
     # Which Office host the module belongs to, as a token ("excel", "word",
@@ -79,6 +95,13 @@ class AnalyzeModuleOptions:
     # host_model is not supplied directly: absent means Excel, and a named host
     # with no model means no host knowledge at all rather than Excel's.
     host: str | None = None
+    # The host tokens of the libraries the project references beyond its own host,
+    # in declaration order ("excel", "word", ...). A Word document referencing Excel
+    # is analyzed against both. None means the reference list is UNKNOWN, which is
+    # different from [] (known to reference nothing else): a loose .bas file carries
+    # no reference list, so the rule that reports a missing reference stays silent
+    # there rather than guess at a project it cannot see.
+    referenced_hosts: Sequence[str] | None = None
     conditional_compilation: ConditionalCompilationEnvironment | None = None
     parsed_module: ModuleNode | None = None
 

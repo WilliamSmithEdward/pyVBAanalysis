@@ -1,48 +1,21 @@
 """M9: member-not-found rule (undeclared.ts checkMemberNotFound parity).
 
-The class oracle cases need the project-class member surface, which the shared
-oracle harness does not pass; this file builds its own project-aware harness.
+The oracle sweep runs each case through the shared project-aware harness, which
+threads in the project-class member surface the receiver typing needs.
 """
 
 from __future__ import annotations
 
-from oracle_support import AUDIT, CASES, _kind  # type: ignore[attr-defined]
+import dataclasses
 
+from oracle_support import AUDIT, CASES, _kind, case_codes  # type: ignore[attr-defined]
+
+from pyvbaanalysis import analyze_project
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions, analyze_module
-from pyvbaanalysis.evidence import OracleCase
-from pyvbaanalysis.symbols import ModuleInput, ProjectIndex
+from pyvbaanalysis.evidence import OracleCase, OracleModule
+from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
 
 _CODE = "member-not-found"
-
-
-# -- project-aware oracle harness ------------------------------------------
-
-
-def _case_codes(case: OracleCase) -> set[str]:
-    """Codes analyze_module emits across a case's modules, WITH the project-class
-    member surface threaded in (the member-not-found receiver typing needs it)."""
-    index = ProjectIndex()
-    for module in case.modules:
-        index.set_module(ModuleInput(module.name, _kind(module.module_type), module.source))
-    project_procedures = index.procedure_signatures()
-    project_class_members = index.project_class_members()
-    out: set[str] = set()
-    for module in case.modules:
-        opts = AnalyzeModuleOptions(
-            module_name=module.name,
-            module_kind=_kind(module.module_type),
-            project_procedures=project_procedures,
-            project_class_members=project_class_members,
-            project_integer_constants=index.visible_external_integer_constant_expressions(module.name),
-            project_visible_symbols=index.visible_identifier_symbols(module.name),
-            project_types=index.visible_type_names(module.name),
-            known_procedures=index.visible_procedure_names(module.name),
-            known_identifiers=index.visible_identifier_names(module.name),
-            known_non_type_names=index.visible_non_type_names(module.name),
-        )
-        for diag in analyze_module(module.source, opts):
-            out.add(diag.code)
-    return out
 
 
 # -- direct unit tests -----------------------------------------------------
@@ -52,11 +25,47 @@ def _codes(source: str, opts: AnalyzeModuleOptions | None = None) -> set[str]:
     return {d.code for d in analyze_module(source, opts)}
 
 
-def test_host_workbook_event_member_fires() -> None:
-    # ThisWorkbook -> Excel.Workbook (exhaustive). AfterSave is an event, excluded
-    # from the object surface, so it is reported absent.
+def test_thisworkbook_alone_falls_back_to_the_open_library_type() -> None:
+    """Analyzed with no ThisWorkbook module in sight, ThisWorkbook resolves to
+    the library's Workbook. That interface is extensible (XLIDE 10.x, measured
+    from the type library's TYPEFLAGS): VBA compiles a member it does not carry
+    and asks IDispatch at run time, so nothing is provable there."""
     src = "Public Sub S()\n    ThisWorkbook.AfterSave True\nEnd Sub"
-    assert _CODE in _codes(src)
+    assert _CODE not in _codes(src)
+
+
+def _in_a_workbook(entry: str) -> set[str]:
+    modules = [
+        ModuleInput("ThisWorkbook", ModuleSymbolKind.DOCUMENT, ""),
+        ModuleInput("Module1", ModuleSymbolKind.STANDARD, entry),
+    ]
+    return {d.code for d in analyze_project(modules)["Module1"]}
+
+
+def test_thisworkbook_is_the_projects_own_closed_class() -> None:
+    """In a workbook, ThisWorkbook is the project's document class, and the VBE
+    refuses a member it lacks whatever the library's flags say (oracle cases
+    workbook_unknown_member_compile and workbook_event_member_call_compile). The
+    same typo on a variable declared As Workbook compiles."""
+    assert _CODE in _in_a_workbook("Public Sub S()\n    ThisWorkbook.NoSuchMemberXyz\nEnd Sub\n")
+    assert _CODE in _in_a_workbook("Public Sub S()\n    ThisWorkbook.AfterSave True\nEnd Sub\n")
+    assert _CODE not in _in_a_workbook("Public Sub S()\n    ThisWorkbook.Save\nEnd Sub\n")
+    declared = "Public Sub S()\n    Dim wb As Workbook\n    Set wb = ActiveWorkbook\n    wb.NoSuchMemberXyz\nEnd Sub\n"
+    assert _CODE not in _in_a_workbook(declared)
+
+
+def test_a_closed_host_type_still_reports_an_absent_member() -> None:
+    """Worksheet IS closed, so a typo on a worksheet variable is a compile error,
+    while the same typo on a Range is not."""
+    assert _CODE in _codes("Public Sub S()\n    Dim ws As Worksheet\n    ws.NoSuchThing\nEnd Sub")
+    assert _CODE not in _codes("Public Sub S()\n    Dim r As Range\n    r.NoSuchThing\nEnd Sub")
+
+
+def test_a_worksheet_function_on_application_is_ordinary_vba() -> None:
+    """VBE-oracle verified (application_worksheet_function_member_compile):
+    `Application.Match` is on no interface in the library, and it compiles."""
+    src = 'Public Sub S()\n    Dim v As Variant\n    v = Application.Match("a", Range("A1:A9"), 0)\nEnd Sub'
+    assert _CODE not in _codes(src)
 
 
 def test_host_workbook_known_member_is_silent() -> None:
@@ -141,8 +150,17 @@ def test_project_class_public_field_is_silent() -> None:
 
 # -- oracle sweep ----------------------------------------------------------
 
-# Every asserted member-not-found case resolves with the host model + the
-# project-class member surface this harness builds, so none are skipped.
+# Cases the VBE ran inside a workbook whose ThisWorkbook module the corpus does
+# not list. Only the document module makes ThisWorkbook the project's own closed
+# class; without it, ThisWorkbook falls back to the library's extensible Workbook
+# and nothing is provable.
+_IN_A_WORKBOOK: frozenset[str] = frozenset(
+    {"workbook_event_member_call_compile", "workbook_unknown_member_compile"}
+)
+
+# Asserted cases neither analyzer can meet yet. Empty since XLIDE 10.6.0 closed the
+# model's Worksheets the way the library's Sheets is closed (#79), which met
+# worksheets_unknown_member_compile.
 _SKIP_IDS: frozenset[str] = frozenset()
 
 
@@ -150,12 +168,19 @@ def _asserted_cases() -> list[OracleCase]:
     return [CASES[i] for i in AUDIT[_CODE].asserted_oracle_cases if i in CASES]
 
 
+def _as_run(case: OracleCase) -> OracleCase:
+    if case.id not in _IN_A_WORKBOOK:
+        return case
+    this_workbook = OracleModule("ThisWorkbook", "document", "")
+    return dataclasses.replace(case, modules=(this_workbook, *case.modules))
+
+
 def test_oracle_asserted_cases() -> None:
     checked = 0
     for case in _asserted_cases():
         if case.id in _SKIP_IDS:
             continue
-        emitted = _case_codes(case)
+        emitted = case_codes(_as_run(case))
         if case.expected == "rejected":
             assert _CODE in emitted, f"{case.id}: expected {_CODE} to fire, got {sorted(emitted)}"
         elif case.expected == "accepted":
@@ -170,4 +195,4 @@ def test_no_false_positives_on_accepted_cases() -> None:
     for case in CASES.values():
         if case.expected != "accepted":
             continue
-        assert _CODE not in _case_codes(case), f"{case.id}: {_CODE} false positive"
+        assert _CODE not in case_codes(case), f"{case.id}: {_CODE} false positive"

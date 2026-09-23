@@ -128,7 +128,9 @@ def test_silent_when_the_return_is_assigned(label: str, body: str | None) -> Non
             "Private Type TPoint\n    X As Long\nEnd Type\n\n"
             "Private Function MakePoint() As TPoint\n    MakePoint.X = 1\nEnd Function\n"
         )
-        assert _codes(source) == []
+        # MakePoint is also a Private Function nothing calls, which unused-procedure
+        # reports; the claim here is only about its return assignment.
+        assert "missing-return-assignment" not in _codes(source)
 
 
 def test_a_body_that_raises_owes_no_return() -> None:

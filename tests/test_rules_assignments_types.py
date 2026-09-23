@@ -12,6 +12,7 @@ which threads project_class_members in.
 
 from __future__ import annotations
 
+import pytest
 from oracle_support import (
     accepted_cases,
     assert_oracle_behavior,
@@ -19,7 +20,7 @@ from oracle_support import (
     oracle_false_positives,
 )
 
-from pyvbaanalysis.diagnostics import AnalyzeModuleOptions, analyze_module
+from pyvbaanalysis.diagnostics import AnalyzeModuleOptions, VbaDiagnostic, analyze_module
 from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
 
 # Runtime-error-kind and compile-error-kind codes emitted by these rules.
@@ -39,8 +40,10 @@ def _codes(source: str) -> set[str]:
     return {d.code for d in analyze_module(source)}
 
 
-def _member_codes(modules: list[tuple[str, ModuleSymbolKind, str]], target: str) -> set[str]:
-    """Codes for `target` with the project-class member surface threaded in."""
+def _member_diagnostics(
+    modules: list[tuple[str, ModuleSymbolKind, str]], target: str
+) -> list[VbaDiagnostic]:
+    """Diagnostics for `target` with the project-class member surface threaded in."""
     index = ProjectIndex()
     for name, kind, src in modules:
         index.set_module(ModuleInput(name, kind, src))
@@ -51,7 +54,12 @@ def _member_codes(modules: list[tuple[str, ModuleSymbolKind, str]], target: str)
         project_class_members=index.project_class_members(),
         project_visible_symbols=index.visible_identifier_symbols(target),
     )
-    return {d.code for d in analyze_module(target_src, opts)}
+    return analyze_module(target_src, opts)
+
+
+def _member_codes(modules: list[tuple[str, ModuleSymbolKind, str]], target: str) -> set[str]:
+    """Codes for `target` with the project-class member surface threaded in."""
+    return {d.code for d in _member_diagnostics(modules, target)}
 
 
 def test_assignment_type_mismatch() -> None:
@@ -110,6 +118,62 @@ def test_member_readonly_assignment_fires() -> None:
          "Public Sub S()\n    Dim p As Person\n    Set p = New Person\n    p.Age = 5\nEnd Sub\n"),
     ]
     assert "readonly-member-assignment" in _member_codes(mods, "M")
+
+
+_READONLY_PERSON = (
+    "Person",
+    ModuleSymbolKind.CLASS,
+    "Public Property Get Age() As Integer\n    Age = 1\nEnd Property\n"
+    "Public Property Get Items() As Collection\nEnd Property\n",
+)
+
+
+def test_a_comparison_in_a_condition_is_no_assignment() -> None:
+    # The parser keeps `ElseIf p.Age = 2 Then` as a statement of its If block, and
+    # a single-line If is one statement, so both carry an `=` after `p.Age`. A
+    # keyword stands before the receiver, which makes neither an assignment
+    # (XLIDE issue #78).
+    body = (
+        "Public Sub S()\n    Dim p As Person\n    Set p = New Person\n"
+        "    If p.Age = 1 Then\n        Exit Sub\n    ElseIf p.Age = 2 Or p.Age = 3 Then\n"
+        "        Exit Sub\n    End If\n    If p.Age = 4 Then Exit Sub\nEnd Sub\n"
+    )
+    mods = [_READONLY_PERSON, ("M", ModuleSymbolKind.STANDARD, body)]
+    assert "readonly-member-assignment" not in _member_codes(mods, "M")
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        pytest.param("Select Case True\n    Case p.Age = 2\n    End Select", id="a Case expression"),
+        pytest.param("Do While p.Age = 2\n    Loop", id="a Do While condition"),
+        pytest.param("Debug.Print p.Age = 2", id="a call given the comparison"),
+        pytest.param("MsgBox p.Age = 2", id="a procedure called with the comparison"),
+    ],
+)
+def test_a_comparison_passed_on_or_tested_is_no_assignment(statement: str) -> None:
+    # A target is one receiver chain ending in the member; anything else before
+    # the `=` is another statement comparing it (XLIDE issue #78).
+    body = f"Public Sub S()\n    Dim p As Person\n    Set p = New Person\n    {statement}\nEnd Sub\n"
+    mods = [_READONLY_PERSON, ("M", ModuleSymbolKind.STANDARD, body)]
+    assert "readonly-member-assignment" not in _member_codes(mods, "M")
+
+
+def test_a_readonly_member_assignment_still_fires_through_any_receiver_chain() -> None:
+    for statement in ("p.Age = 5", "With p\n        .Age = 5\n    End With", "Let p.Age = 5"):
+        body = f"Public Sub S()\n    Dim p As Person\n    Set p = New Person\n    {statement}\nEnd Sub\n"
+        mods = [_READONLY_PERSON, ("M", ModuleSymbolKind.STANDARD, body)]
+        assert "readonly-member-assignment" in _member_codes(mods, "M"), statement
+
+
+def test_a_single_line_if_branch_assignment_is_named_by_itself() -> None:
+    # Read whole, the target was 'If True Then p.Age'. The If's branches are
+    # statements of their own, as the other assignment rules read them.
+    body = "Public Sub S()\n    Dim p As Person\n    Set p = New Person\n    If True Then p.Age = 2\nEnd Sub\n"
+    mods = [_READONLY_PERSON, ("M", ModuleSymbolKind.STANDARD, body)]
+    hits = [d for d in _member_diagnostics(mods, "M") if d.code == "readonly-member-assignment"]
+    assert [d.message for d in hits] == ["Cannot assign to read-only property 'p.Age'."]
+    assert [body[d.span.start : d.span.end] for d in hits] == ["Age"]
 
 
 def test_set_object_type_mismatch_fires() -> None:

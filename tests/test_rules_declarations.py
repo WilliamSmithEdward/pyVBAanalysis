@@ -20,6 +20,7 @@ _DECL_CODES = (
     "option-after-declaration",
     "empty-type",
     "duplicate-option",
+    "invalid-option-statement",
     "too-many-parameters",
     "identifier-too-long",
     "optional-udt-parameter",
@@ -109,6 +110,45 @@ def test_option_placement_and_duplication() -> None:
     assert "option-after-declaration" not in _codes("Option Explicit\nPublic X As Long")
     assert "duplicate-option" in _codes("Option Explicit\nOption Explicit")
     assert "duplicate-option" not in _codes("Option Explicit\nOption Base 1")
+
+
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        ("Option\n", "'Option' names no directive; VBA expects Base, Compare, Explicit or Private."),
+        (
+            "Option Nonsense\n",
+            "'Option Nonsense' is not an Option statement; VBA expects Base, Compare, Explicit or Private.",
+        ),
+        ("Option Explicit Foo\n", "'Option Explicit' is complete here; VBA expects the statement to end."),
+        ("Option Explicit()\n", "'Option Explicit' is complete here; VBA expects the statement to end."),
+        ("Option Base\n", "'Option Base' takes 0 or 1."),
+        ("Option Base 2\n", "'Option Base' takes 0 or 1."),
+        ("Option Base 1 Extra\n", "'Option Base' is complete here; VBA expects the statement to end."),
+        ("Option Compare Sideways\n", "'Option Compare' takes Binary or Text."),
+        ("Option Private\n", "'Option Private' is written 'Option Private Module'."),
+    ],
+)
+def test_malformed_option_statements(source: str, message: str) -> None:
+    # XLIDE 10.5.0 reports each of these with the same message.
+    found = [d.message for d in analyze_module(source) if d.code == "invalid-option-statement"]
+    assert found == [message]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "Option Explicit\n",
+        "Option Explicit ' trailing note\n",
+        "OPTION EXPLICIT\n",
+        "Option _\n    Explicit\n",
+        "Option Base 1\n",
+        "Option Compare Text\n",
+        "Option Private Module\n",
+    ],
+)
+def test_well_formed_option_statements_are_silent(source: str) -> None:
+    assert "invalid-option-statement" not in _codes(source)
 
 
 def test_empty_type() -> None:

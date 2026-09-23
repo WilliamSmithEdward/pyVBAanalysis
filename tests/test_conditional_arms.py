@@ -97,7 +97,9 @@ def test_a_local_per_arm_is_not_a_duplicate_declaration() -> None:
         "Option Explicit\n\nSub Go()\n#If CUSTOMFLAG Then\n    Dim v As Long\n"
         "#Else\n    Dim v As String\n#End If\nEnd Sub\n"
     )
-    assert _codes(source) == []
+    # Each `v` is also never used, which unused-variable reports; the claim here is
+    # only that the two arms are not a duplicate declaration.
+    assert "duplicate-declaration" not in _codes(source)
 
 
 def test_the_same_name_twice_in_one_arm_is_still_a_duplicate() -> None:
