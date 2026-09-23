@@ -5,6 +5,222 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 2.2.0 - 2026-09-22
+
+Sync to XLIDE 10.6.0 (commit 5682c8f), from 6.2.0: twelve new diagnostics, early
+binding checked against the libraries a project references, and member lookups
+that follow the type library's own extensibility flags. The data is now vendored
+from a pinned upstream commit, which the manifest records.
+
+The sync also closes gaps earlier syncs left open. Replaying upstream's own test
+suite through the port found checks that were never ported (member calls, typing
+through the host model, constants from the host and the VBA library), fixes
+older than 6.2.0 that were never taken, and false positives in 2.1.1 from that
+drift. All of it is listed below.
+
+### Added
+
+* `invalid-option-statement` (error): a malformed Option statement, such as
+  `Option Base 2`, `Option Explicit Foo` or a bare `Option Private`.
+  `Option Compare Database` is reported only when a host other than Access is
+  named: it is an Access directive, and a loose file names no host.
+* `missing-library-reference` (error): a type or constant qualified with another
+  Office application's library the project does not reference, such as
+  `Dim doc As Word.Document` in a workbook with no reference to Word. The VBE
+  refuses it with "User-defined type not defined". Late binding through
+  `CreateObject` names nothing and stays silent. Reported once per library per
+  module, and only against a known reference list (see Changed).
+* Four dead-code checks, all `information`: `unused-variable` (a local, or a
+  module-private variable or constant, that nothing uses), `variable-never-read`
+  (one that is only ever assigned), `unused-procedure` (a private procedure
+  nothing calls), and `unreachable-code` (statements after `Exit`, `End`, `GoTo`
+  or `Resume` that no label or `Case` arm reaches). A name in any module's
+  string literal counts as a use of a private procedure, because
+  `Application.Run "Poll"` reaches a private Sub. `unused-variable` and
+  `unreachable-code` findings carry the edit that removes the declaration or the
+  dead run.
+* Six doc-comment checks, all `warning`: `doc-param-missing`,
+  `doc-param-unknown`, `doc-returns-missing`, `doc-returns-unexpected`,
+  `doc-tag-unclosed` and `doc-tag-duplicate` compare the XML tags of a `'''`
+  block with the declaration it documents, each with fixes that add, rename or
+  remove a tag. A `'''` block of plain prose is left alone.
+* `referenced_hosts` on `analyze_project` and `analyze_module_options_for`: the
+  other Office libraries a project references, in declaration order. Their
+  types, constants and globals resolve against their own models, and the
+  project's own host wins a name two libraries share, as VBA resolves it.
+  `None`, the default, means the list is unknown; `[]` means it is known to name
+  nothing else.
+* `read_office_project(path)` in `pyvbaanalysis.reader`, returning an
+  `OfficeProject`: a container's modules, the host its extension implies, and
+  the Office libraries its reference list names. `analyze_office_file` and the
+  CLI pass all three to the analysis.
+* Member calls are checked for arity and argument types against the signature
+  the member resolves to, on host objects and project classes alike:
+  `Application.Calculate(1)`, a bare `Err.Raise`, `Workbooks.Open()`, and
+  `p.Save "bad"` on a class whose `Save` takes a Long. Earlier ports checked
+  calls to procedures only. A keyword before `:=` is a parameter name, so
+  `BreakLink Name:="x", Type:=xlLinkTypeExcelLinks` stays silent. A signature's
+  parameters end at their own closing parenthesis, so a member returning an
+  array, `Function Values() As Long()`, takes an empty argument list.
+* Expressions are typed through the host model, the VBA runtime and the member
+  a chain resolves to, so `Set wb = ActiveSheet.Range("A1")` reports
+  `assignment-object-type-mismatch`, and a constant such as `vbFalse` or
+  `xlAbove` passed or assigned where an object is expected is reported.
+* Constant expressions fold VBA and host constants: `1 / vbFalse` reports
+  `division-by-zero`, and `Left$(s, xlAbove - 1)` a negative length. A constant
+  qualified with a host (`Word.wdMainTextStory`) answers only in that host.
+* A `vb6` host token and the VB6 object model: App, Screen, Printer, Form and
+  the intrinsic controls. It offers and describes, and never proves a member
+  absent.
+* A UserForm's surface carries the MSForms UserForm members and the ones VBA
+  adds (Show, Hide, Name, ...). When the form's control list is authoritative,
+  supplied as `implicit_members` or spelled out by a `.frm` designer header, it
+  proves a member absent: `EntryForm.NoSuchControl` reports `member-not-found`
+  (XLIDE issue #26). A form nobody read the designer of proves nothing.
+* The public pieces behind these: `classify_reference_kinds` in the new
+  `pyvbaanalysis.references`, the doc-comment grammar in `pyvbaanalysis.docs`,
+  `host_object_model_for_tokens`, `get_vb6_object_model` and the libid helpers
+  in `pyvbaanalysis.host`, the forms metadata in `pyvbaanalysis.host.msforms`,
+  `implicit_members`, `predeclared_id` and `designer_class` on `ModuleInput`
+  (with `ImplicitMember`), and the code-action payloads
+  `VbaAddLibraryReferenceData`, `VbaRemoveDeclarationData`,
+  `VbaRemoveUnreachableCodeData` and `VbaDocCommentFix`.
+* `tools/vendor_data.py` vendors every data file from one pinned XLIDE commit,
+  after `tools/pin_analyzer.py` copies that commit out of the sibling checkout
+  (see CONTRIBUTING.md). The manifest gains `xlideCommit`.
+* `tools/differential/harness.py` compares the port with the upstream analyzer
+  of the same pin. It records every `analyzeModule` call of upstream's own test
+  suite and replays each through the port, and it runs the oracle corpus, Office
+  files and folders of exported modules through both analyzers (see
+  CONTRIBUTING.md). It stays out of the published packages.
+
+### Changed
+
+* `member-not-found` reports an absent member only on a closed Excel interface.
+  Upstream now reads each interface's TYPEFLAGS from the type library, and
+  Application, Workbook and Range are extensible: VBA compiles a member they do
+  not list and resolves it at run time. `Application.Match` and the other
+  worksheet functions reached through Application were reported and are now
+  silent. In a workbook, `ThisWorkbook` is the project's own document class,
+  which the VBE closes, so a member it lacks is still reported. Analyzed with no
+  ThisWorkbook module, as the oracle corpus runs its cases, it falls back to the
+  library's open Workbook, and three cases the VBE rejects go unreported by both
+  analyzers. `Worksheets` stays closed: the type library returns the closed
+  `Sheets` from it, so `Worksheets.NoSuchMemberXyz` is still reported and
+  `Worksheets(1)` is still a Worksheet (XLIDE issue #79, found by this sync).
+* The host models carry the members each type library marks hidden, which the
+  reference documentation leaves out: 405 more in Excel's model, 332 in Word's
+  and 200 in PowerPoint's, each with `hidden` set. They resolve like any other
+  member (see Fixed). Where a Global interface answers for bare names, as in
+  Excel, Word and PowerPoint, Application's hidden members stay out of bare
+  scope, so a bare `Save` in Excel is still `unknown-call`.
+* The project's own types outrank the host library's, as they do in VBA: a class
+  named `Font` or `Point` resolves to its own members rather than Excel's
+  (XLIDE issue #11). A project Enum is a value type, never an object receiver.
+* The rules that read a statement's structure also read the statements a
+  single-line `If` carries: `If ok Then K = 2` reports `const-assignment`, and
+  `If ok Then Helper 1, 2, 3` its arity (XLIDE issue #46).
+* The arms of one `#If` chain are alternatives, and a repeat inside one arm is a
+  repeat: two `Case Else`, two `Option Explicit`, or a duplicated Enum member or
+  Type field in the same arm are reported, where every undecidable branch used
+  to be skipped. A call that no arm's declaration accepts reports
+  `argument-count`, where a name declared once per arm used to turn the check
+  off (XLIDE issue #58).
+* A module's own `Type` shadows another module's `Type` of the same name, as it
+  does in the VBE. A class with a private `Type JsonTextBuilder` was resolved
+  against a public one elsewhere, and its fields reported missing (oracle case
+  `private_type_shadows_public_type_compile`).
+* A procedure closer ends the open procedure even from inside a block left open
+  in it, as the VBE does and upstream's parser now does too (XLIDE issue #81,
+  found by this sync). After `If x Then` with no `End If`, an `End Function`
+  reports the If as missing its `End If` and closes the procedure. It used to
+  read as an unmatched closer and leave the procedure open.
+* `analyze_workbook` returns exactly what `analyze_office_file` returns for the
+  same file. It now reads the workbook's reference list and names Excel as the
+  host, so it can report `missing-library-reference` and
+  `Option Compare Database`, which it could not before.
+* `missing-library-reference` is reported only against a known reference list:
+  one read from a container, or passed as `referenced_hosts`. Upstream treats an
+  absent list as "nothing referenced"; a loose `.bas` file has no list, and a
+  missing reference cannot be proven there.
+* The four dead-code checks report at `information`, and the CLI's default
+  `--fail-level information` fails on any diagnostic, so a workbook with one
+  unused variable now exits 1. Pass `--fail-level warning` to gate on warnings
+  and errors only. Each of 16 real workbooks reports at least one of these.
+* The vendored data moves to 10.6.0: 443 oracle cases (from 418), 134 audited
+  codes (from 122) and 131 catalogue rules (from 119). Two data files join it,
+  both extracted from the same commit: the VB6 object model and the Microsoft
+  Forms members.
+
+### Fixed
+
+False positives 2.1.1 reported on code that compiles, each from a fix an earlier
+sync did not carry over:
+
+* `undeclared-variable` on a qualifier that names an enumeration or a VBA module
+  of constants: `XlDirection.xlUp`, `VbMsgBoxResult.vbYes`, `Strings.Left`,
+  `Constants.vbCrLf`.
+* `undeclared-variable` on a UserForm's own controls in its code-behind, on a
+  bracketed name Excel evaluates (`[A1]`), on the field after `!` (`rs!Field`),
+  on `Line` in `Line Input #f, s`, and on a module name used as a qualifier
+  (`Module1.Limit`).
+* `object-variable-not-set` on a variable declared `As New`, which VBA creates
+  on first use.
+* `unallocated-dynamic-array-access` on an array read after a call that received
+  it, and may have allocated it: `If Fill(a) Then Debug.Print a(0)` (XLIDE issue
+  #70).
+* `event-handler-module-scope` on each Document event handler in Word's
+  `ThisDocument`, such as `Document_Open`. The module was taken for a worksheet,
+  where upstream knows it as Word's document.
+
+Three more, fixed upstream in 10.6.0:
+
+* `readonly-member-assignment` on a comparison with a read-only property: in an
+  `ElseIf` or `Case` header, a single-line `If`'s condition, or a call given the
+  comparison, such as `Debug.Print w.Part = "a"`. The target of a member
+  assignment must be one receiver chain, which a keyword or a call before the
+  receiver breaks (XLIDE issue #78, found by this sync). An assignment that a
+  single-line `If` carries is still reported, named `w.Part` rather than
+  `If ok Then w.Part`.
+* `member-not-found` on a member the type library hides, such as
+  `ThisWorkbook.Title` or `ws.OnEntry` on a Worksheet. Both compile, but the
+  models were built from the reference documentation, which leaves such members
+  out.
+* `undeclared-variable` on a hidden global called bare, such as `Assistant` in
+  Word and PowerPoint, or PowerPoint's `Dialogs`.
+
+### Verified
+
+* Upstream's own test suite, recorded: every `analyzeModule` call its 10.6.0
+  tests make, with the options they pass and the modules of any project index
+  behind them, replayed through the port: 1055 standalone calls and 929 with
+  project context, every result identical in code, span and message. With two
+  of the 10.6.0 fixes undone in the port, 7 of them differ, so the replay sees
+  what those fixes change.
+* The oracle corpus, standalone and with project context: all 1818 diagnostics
+  identical in code, span and message. That is with the reference list given as
+  known and empty to both analyzers. Left unknown, the port stays silent on the
+  one case the upstream analyzer reports, the reference-list gate above.
+* The 116 modules of 16 real workbooks: identical diagnostics from both
+  analyzers.
+* 693 further projects, 627 of them the VBA blocks of upstream's syntax corpus
+  and 66 folders of exported modules: identical diagnostics from both analyzers
+  across 948 modules. The seven VB6 projects among them are identical under the
+  `vb6` host too.
+* 195 distinct Office files from the same repositories, from Excel, Word,
+  PowerPoint and Access: identical diagnostics across 965 modules, once the
+  `ThisDocument` fix above was in. That fix is what this comparison found.
+* Each new rule compared case by case with upstream 10.5.0, fix payloads
+  included: option statements 23, library references 11, reference kinds 18,
+  dead code 33 plus 8 removal edits, doc comments 21 with 25 fixes.
+* Against 2.1.1, in interleaved runs measuring CPU time: a real workbook's
+  analysis takes about 3 percent longer, and the largest module (26,721 lines)
+  about 15 percent. The 10.6.0 changes measure under 2 points of that.
+* The differential harness behind the 2.1.0 and 2.1.1 figures read each module's
+  kind from the wrong corpus field, so class and document modules were compared
+  as standard modules. It is corrected, and the figures above come from the
+  corrected harness, now `tools/differential/`.
+
 ## 2.1.1 - 2026-09-05
 
 Follows XLIDE 6.2.0. The vendored data is byte-identical to 6.1.2, so only the

@@ -41,7 +41,7 @@ from .reader import (
 )
 from .symbols import ModuleInput, ModuleSymbolKind, ProjectIndex, ProjectIndexOptions
 
-__version__ = "2.1.1"
+__version__ = "2.2.0"
 
 __all__ = [
     "AnalyzeModuleOptions",
