@@ -60,6 +60,47 @@ host knowledge; pyVBAanalysis reproduces its behavior in Python.
 The build plan, parity inventory, and module-by-module port map are in
 [agent.md](agent.md).
 
+## Checking a sync against upstream
+
+The port's own tests encode the behavior it had, so they stay green while upstream
+widens a rule the port never took. A sync is checked by running both analyzers on
+the same inputs, upstream from the pin of the vendored commit:
+
+```
+python tools/differential/harness.py record
+python tools/differential/harness.py replay
+python tools/differential/harness.py corpus
+python tools/differential/harness.py cases artifacts/differential/cases/mine.json PATH ...
+python tools/differential/harness.py projects artifacts/differential/cases/mine.json
+```
+
+* `record` runs upstream's own test suite with a recorder appended to its
+  `analyzeModule` and `ProjectIndex`, writing every call to
+  `artifacts/differential/<commit>/calls.jsonl`. `replay` runs each call through
+  the port, rebuilding the project index behind a call made with project context,
+  and compares the diagnostics by code, span and message. It finds the gaps
+  nothing else exercises: whole checks never ported, fixes older than the last
+  sync point.
+* `corpus` runs the oracle corpus through both analyzers, each module standalone
+  and with its case's modules as a project.
+* `cases` turns Office files, and folders searched for them and for exported
+  `.bas`/`.cls`/`.frm` modules, into project cases. `--markdown` adds every VBA
+  block of upstream's syntax corpus, and `--host` names a host for the cases no
+  file implies one for. `projects` runs a cases file through both analyzers.
+
+`replay`, `corpus` and `projects` exit 1 when anything differs and print what only
+one side reports. Where the port reports more, the port is wrong. Where upstream
+reports more it may be an upstream false positive, so check before porting it.
+
+The upstream halves (`tools/differential/upstream/*.mjs`) read the pin through
+`tools/xlide_source.mjs`, as the extractors do, and need nothing installed. Only
+`record` runs upstream's vitest suite, which needs the sibling checkout's
+dependencies installed. The pin gets a `node_modules` folder of its own with one
+link per package, so the caches Vite writes stay in the pin, and the run fails if
+the sibling's folder changed. The recorder is removed with `git checkout` when the
+run ends. `harness.py unpatch` restores a pin a run left patched, and
+`tools/pin_analyzer.py` will not reuse a pin with local changes.
+
 ## Adding or changing a rule
 
 * Port the rule from its XLIDE source; match the behavior, not just the shape.

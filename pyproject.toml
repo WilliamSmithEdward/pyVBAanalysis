@@ -65,11 +65,13 @@ exclude = [
 
 [tool.hatch.build.targets.sdist]
 # Keep internal development notes out of the published sdist. The evidence corpus
-# stays in (the test suite needs it); only the agent/working notes are excluded.
+# stays in (the test suite needs it); only the agent/working notes are excluded,
+# with the differential harness, which runs only against an XLIDE checkout.
 exclude = [
     "agent.md",
     "docs/agentic_ai_programming_best_practices.md",
     "docs/AI-Smells-Agents-Avoid.md",
+    "tools/differential/",
 ]
 
 [tool.pytest.ini_options]

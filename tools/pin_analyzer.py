@@ -63,6 +63,16 @@ def pin(ref: str, source: Path, force: bool = False) -> Path:
     pin_root = _PIN_PARENT / short
 
     if (pin_root / _MARKER).is_file() and not force:
+        # A pin is reused as it stands, so it has to still be its commit: the
+        # differential harness patches pins while it records, and a run cut short
+        # would otherwise hand its hooks to the extractors.
+        dirty = _git("status", "--porcelain", cwd=pin_root)
+        if dirty:
+            raise SystemExit(
+                f"The pin at {pin_root} has local changes in {len(dirty.splitlines())} path(s). "
+                "Restore it with `python tools/differential/harness.py unpatch --pin "
+                f"{pin_root}`, or rebuild it with --force."
+            )
         print(f"Pin already at {pin_root} ({short})", file=sys.stderr)
         return pin_root
 
