@@ -928,6 +928,8 @@ class _Parser:
         structured = self._parse_assignment_or_call(stmt, tokens)
         if structured is not None:
             self._cursor.next()
+            if stmt.single_line_if_tail:
+                structured.single_line_if_tail = True
             return structured
         self._cursor.next()
         return self._make_statement(stmt)
@@ -1235,9 +1237,12 @@ class _Parser:
         tokens = _code_tokens_after_line_number(stmt)
         w0 = token_word(_at(tokens, 0))
         if w0 == "if":
-            # Multi-line If only when Then is the final code token.
+            # Multi-line If only when "Then" ends the line (MS-VBAL 5.4.2.8). A
+            # single-line "If x Then stmt" is not a block, and neither is
+            # "If x Then:", whose colon opens its statement list (MS-VBAL 5.4.2.9,
+            # XLIDE issue #84).
             last = _at(tokens, len(tokens) - 1)
-            return "if" if token_word(last) == "then" else None
+            return "if" if token_word(last) == "then" and not stmt.ended_by_colon else None
         if w0 == "for":
             return "foreach" if token_word(_at(tokens, 1)) == "each" else "for"
         if w0 == "do":
@@ -1259,6 +1264,10 @@ class _Parser:
             return "loop"
         if w0 == "wend":
             return "wend"
+        if w0 == "endif":
+            # MS-VBAL 5.4.2.8 closes a block If with `End If` or the one word
+            # `EndIf`, which the VBE stores as `End If` (XLIDE issue #88).
+            return "endif"
         if w0 == "end":
             # "End" alone (MS-VBAL 5.4.7) is a statement, not a block closer.
             return _END_CLOSERS.get(token_word(_at(tokens, 1)))
@@ -1447,6 +1456,7 @@ class _Parser:
             span=Span(stmt.start, stmt.end),
             raw=self._source[stmt.start : stmt.end],
             single_line_if_branches=branches or None,
+            single_line_if_tail=stmt.single_line_if_tail,
         )
 
     @staticmethod

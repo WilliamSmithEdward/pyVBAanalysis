@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Union
 
-from ..lexer.token_helpers import token_word
+from ..lexer.token_helpers import relational_operator_at, token_word
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..lexer.tokenize import tokenize
 from ..parser.nodes import (
@@ -593,14 +593,15 @@ class _ConditionalExpressionParser:
 
     def _parse_comparison(self) -> ConditionalValue | None:
         left = self._parse_unary()
-        op_token = self._peek()
-        op = op_token.raw_text if op_token is not None else None
         # Relational operators (<, >, <=, >=) join the existing equality (=, <>)
-        # handling so `#If Win64 >= 1 Then` and friends evaluate. Anything else
-        # (Like, etc.) is left to the caller as an unmodeled remainder.
-        if op not in ("=", "<>", "<", ">", "<=", ">="):
+        # handling so `#If Win64 >= 1 Then` and friends evaluate, in any of the
+        # spellings MS-VBAL 5.6.9.5 allows (`=>`, `< >`). Anything else (Like,
+        # etc.) is left to the caller as an unmodeled remainder.
+        relational = relational_operator_at(self._tokens, self._index)
+        if relational is None:
             return left
-        self._index += 1
+        op, length = relational
+        self._index += length
         right = self._parse_unary()
         if left is None or right is None:
             return None

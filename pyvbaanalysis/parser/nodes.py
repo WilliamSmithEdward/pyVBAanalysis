@@ -530,6 +530,12 @@ class AssignmentNode(Node):
     is_let: bool
     lhs: ExprNode
     rhs: ExprNode
+    # True for a statement a single-line If runs after a colon: `b` in
+    # `If x Then a: b`. MS-VBAL 5.4.2.9 puts every statement to the end of the
+    # logical line in the If's statement list, so it runs only when that branch
+    # does, though it has a node of its own. The same on CallNode and
+    # StatementNode.
+    single_line_if_tail: bool = False
 
 
 @dataclass(slots=True)
@@ -544,6 +550,7 @@ class CallNode(Node):
     has_call_keyword: bool
     callee: ExprNode
     args: list[Argument] = field(default_factory=list)
+    single_line_if_tail: bool = False
 
 
 @dataclass(slots=True)
@@ -561,6 +568,7 @@ class StatementNode(Node):
     # disagree about whether they read a statement structurally or scan its text,
     # and a global visit double-reported the text-scanning ones (XLIDE issue #46).
     single_line_if_branches: list[Span] | None = None
+    single_line_if_tail: bool = False
 
 
 @dataclass(slots=True)

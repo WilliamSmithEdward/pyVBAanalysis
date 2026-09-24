@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..lexer.token_helpers import is_ident_like, token_name, token_word
+from ..lexer.token_helpers import is_ident_like, relational_operator_at, token_name, token_word
 from ..lexer.token_kinds import TokenKind, VbaToken
 from .nodes import (
     AddressOfExpr,
@@ -247,13 +247,14 @@ class _ExpressionParser:
             return None
         while True:
             op_token = self._peek()
-            op = self._binary_operator(op_token)
-            if op is None:
+            found = self._binary_operator()
+            if found is None:
                 break
+            op, length = found
             prec = BINARY_PRECEDENCE.get(op)
             if prec is None or prec < min_prec:
                 break
-            self._next()  # consume operator
+            self.index += length  # consume operator
             # Left-associative: the right side binds operators strictly tighter.
             right = self._parse_binary(prec + 1)
             if right is None:
@@ -267,16 +268,22 @@ class _ExpressionParser:
             )
         return left
 
-    def _binary_operator(self, token: VbaToken | None) -> str | None:
-        """Canonical binary operator for a token, or None when it is not one."""
+    def _binary_operator(self) -> tuple[str, int] | None:
+        """The canonical binary operator at the cursor and the tokens it takes: a
+        relational operator can be two (`a < > b`), or None when none starts here."""
+        token = self._peek()
         if token is None:
             return None
         if token.kind is TokenKind.KEYWORD:
-            return WORD_BINARY_OPS.get(token_word(token))
+            operator = WORD_BINARY_OPS.get(token_word(token))
+            return (operator, 1) if operator is not None else None
         if token.kind is TokenKind.OPERATOR:
+            relational = relational_operator_at(self._tokens, self.index, self._to)
+            if relational is not None:
+                return relational
             raw = token.raw_text
             if raw in BINARY_PRECEDENCE:
-                return raw
+                return raw, 1
         return None
 
     # --- unary / exponent ---------------------------------------------------

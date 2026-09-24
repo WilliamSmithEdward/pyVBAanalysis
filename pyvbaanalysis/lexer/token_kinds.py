@@ -24,7 +24,11 @@ class TokenKind(str, enum.Enum):
     """The category of a lexical token (MS-VBAL 3.3)."""
 
     NEWLINE = "newline"
+    # It runs on through any line continuations (MS-VBAL 3.3.1), so its raw_text
+    # can span physical lines.
     COMMENT = "comment"
+    # A reserved identifier, or a contextual keyword inside the statement that
+    # makes it one; outside it the same word is an IDENTIFIER.
     KEYWORD = "keyword"
     IDENTIFIER = "identifier"
     BRACKETED_IDENTIFIER = "bracketedIdentifier"
@@ -43,6 +47,8 @@ class TriviaKind(str, enum.Enum):
     """Insignificant text attached to the following token (MS-VBAL 3.2.2)."""
 
     WHITESPACE = "whitespace"
+    # 1*WSC underscore line-terminator, with any whitespace the VBE also accepts
+    # after the underscore.
     LINE_CONTINUATION = "lineContinuation"
 
 
@@ -70,7 +76,9 @@ class VbaToken:
     end: int
     line: int
     character: int
-    # Canonical capitalization for keyword tokens (MS-VBAL 3.3.5.2); None otherwise.
+    # Canonical capitalization for keyword tokens (MS-VBAL 3.3.5.2), and the
+    # standard spelling of a relational operator written the other way round
+    # (`=>` is `>=`). None for every other token.
     canonical_text: str | None = None
     # Whitespace / line continuations immediately preceding this token.
     leading_trivia: tuple[Trivia, ...] = ()

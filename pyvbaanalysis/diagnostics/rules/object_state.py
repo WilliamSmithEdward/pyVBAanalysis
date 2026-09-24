@@ -51,6 +51,7 @@ from ..walker import (
     block_header_line_span,
     is_inactive_node,
     set_assignment_target,
+    statement_and_branch_spans,
     statement_tokens_after_leading_label,
     token_name,
     token_text,
@@ -182,9 +183,11 @@ def _check_procedure(
         # A local passed whole may have been Set by the callee, inside an If arm
         # as much as outside one, so the branch merge counts it as touched.
         touched = set(_locals_passed_whole(source, stmt.span, locals_))
-        target = set_assignment_target(source, stmt.span)
-        if target is not None and target[0].lower() in locals_:
-            touched.add(target[0].lower())
+        # A single-line If's branches Set too.
+        for span in statement_and_branch_spans(stmt):
+            target = set_assignment_target(source, span)
+            if target is not None and target[0].lower() in locals_:
+                touched.add(target[0].lower())
         return touched
 
     def demote(lower: str) -> None:
@@ -239,6 +242,14 @@ def _check_statement(
     for lower in passed_whole:
         if state.get(lower) == "unset":
             state[lower] = "unknown"
+    # A Set in a single-line If's branch runs on one path only, so it moves an
+    # unset object to 'unknown' the way a block If without Else does, not to
+    # 'set', as unallocated-dynamic-array-access reads a conditional ReDim.
+    for branch in statement_and_branch_spans(stmt)[1:]:
+        branch_target = set_assignment_target(source, branch)
+        branch_lower = branch_target[0].lower() if branch_target is not None else None
+        if branch_lower is not None and branch_lower in locals_ and state.get(branch_lower) == "unset":
+            state[branch_lower] = "unknown"
 
 
 # Intrinsics that read an object argument and never Set it.

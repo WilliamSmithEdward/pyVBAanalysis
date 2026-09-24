@@ -142,7 +142,10 @@ def bare_call_statement_target(source: str, span: Span) -> BareCallStatementTarg
         after_close = toks[close + 1] if 0 <= close and close + 1 < len(toks) else None
         if after_close is None or after_close.raw_text in (".", "("):
             return None
-    elif not explicit_call:
+    elif not explicit_call and r != ",":
+        # A comma cannot continue the callee, so it opens the argument list with
+        # or without a space: the VBE reads `Needs, 2` as `Needs , 2`, a missing
+        # first argument and 2 (XLIDE issue #85).
         gap = source[span.start + callee.end : span.start + next_tok.start]
         if _WHITESPACE.search(gap) is None:
             return None

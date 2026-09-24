@@ -83,10 +83,14 @@ RESERVED_FOR_IMPLEMENTATION_USE: tuple[str, ...] = (
 )
 
 # Contextual keywords: not reserved per MS-VBAL 3.3.5.2, but capitalized by the
-# VBE in their statement context (VBE-convention casing).
+# VBE in their statement context (VBE-convention casing). Outside that statement
+# most of them are names, and contextual_keywords.py turns those tokens back into
+# identifiers.
 CONTEXTUAL_KEYWORDS: tuple[str, ...] = (
     "Explicit", "Base", "Compare", "Binary", "Text",  # Option statements
-    "Lib", "Alias",  # Declare
+    # Declare [PtrSafe] ... Lib "..." Alias "...". PtrSafe is the 64-bit form
+    # every modern Declare carries (XLIDE issue #41).
+    "Lib", "Alias", "PtrSafe",
     "Property",  # Property statement keyword
     "Step",  # For ... Step
     "Error",  # On Error / Error

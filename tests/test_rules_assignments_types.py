@@ -21,6 +21,7 @@ from oracle_support import (
 )
 
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions, VbaDiagnostic, analyze_module
+from pyvbaanalysis.project import analyze_project
 from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
 
 # Runtime-error-kind and compile-error-kind codes emitted by these rules.
@@ -223,6 +224,49 @@ def test_host_member_assignment_silent() -> None:
     # Host members carry no writability proof, so assignment typing stays silent.
     src = 'Public Sub S()\n    ThisWorkbook.Name = "x"\nEnd Sub\n'
     assert not (_codes(src) & set(_CODES))
+
+
+def _excel_project_codes(source: str) -> set[str]:
+    """Codes for one standard module analyzed as a project, which loads the Excel model."""
+    results = analyze_project([ModuleInput("M", ModuleSymbolKind.STANDARD, source)])
+    return {d.code for d in results["M"]}
+
+
+def _host_set_source(declared: str, receiver: str, member: str) -> str:
+    return (
+        f"Public Sub S(ByVal source As {receiver})\n"
+        f"    Dim target As {declared}\n"
+        f"    Set target = source.{member}\n"
+        "End Sub\n"
+    )
+
+
+def test_host_duplicate_of_a_shape_range_stays_silent() -> None:
+    # ShapeRange.Duplicate returns a ShapeRange, and the model says so.
+    src = _host_set_source("ShapeRange", "ShapeRange", "Duplicate")
+    assert "assignment-object-type-mismatch" not in _excel_project_codes(src)
+
+
+# Each Set below compiles and runs in Excel: the type library declares the member
+# As the target type, and TypeName of the value Excel returns is that type (both
+# checked 2026-09-23). The model mistyped all four until XLIDE 10.7.1 (#90): the
+# hand-written excelObjectModel.ts returned a ShapeRange from Shape.Duplicate and
+# a SparkColor from SparklineGroup.SeriesColor, and the model's own Charts and
+# Worksheets where the library returns Sheets.
+@pytest.mark.parametrize(
+    ("declared", "receiver", "member"),
+    [
+        pytest.param("Shape", "Shape", "Duplicate", id="Shape.Duplicate"),
+        pytest.param("FormatColor", "SparklineGroup", "SeriesColor", id="SparklineGroup.SeriesColor"),
+        pytest.param("Sheets", "Application", "Charts", id="Application.Charts"),
+        pytest.param("Sheets", "Workbook", "Worksheets", id="Workbook.Worksheets"),
+    ],
+)
+def test_host_object_assignment_follows_the_type_library(
+    declared: str, receiver: str, member: str
+) -> None:
+    src = _host_set_source(declared, receiver, member)
+    assert "assignment-object-type-mismatch" not in _excel_project_codes(src)
 
 
 def test_oracle_asserted_cases() -> None:

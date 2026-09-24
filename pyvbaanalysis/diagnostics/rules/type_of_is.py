@@ -197,9 +197,22 @@ def object_assignment_incompatibility_reason(
         return None
     if expected.key == actual_object.key:
         return None
+    if actual_object.kind == "host" and _HOST_VALUES_ALSO_OF_TYPE.get(actual_object.key) == expected.key:
+        return None
     if actual_object.kind == "project" and _implements_object_type(actual_object, expected):
         return None
     return f"This object type is not compatible with {expected.display}."
+
+
+# Host types the model returns where the type library returns another, so a value
+# of the model's type is also a value of the library's. Excel's library types the
+# Charts and Worksheets properties of Application and Workbook as Sheets, and a
+# Sheets object is what they return at run time. The model returns its own Charts
+# and Worksheets there, whose members completion offers (XLIDE issue #90).
+_HOST_VALUES_ALSO_OF_TYPE: dict[str, str] = {
+    "excel.charts": "excel.sheets",
+    "excel.worksheets": "excel.sheets",
+}
 
 
 def _is_implemented_by_any_project_class(

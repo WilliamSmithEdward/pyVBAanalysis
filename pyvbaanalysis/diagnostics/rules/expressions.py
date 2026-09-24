@@ -23,7 +23,7 @@ from ...constants.integer_constant_expression import (
     resolve_raw_integer_constants,
 )
 from ...host.host_model import HostObjectModel
-from ...lexer.token_helpers import match_paren_from
+from ...lexer.token_helpers import match_paren_from, relational_operator_at
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import LeafStatementNode, ModuleNode, ProcedureNode, Span
@@ -810,19 +810,24 @@ def _invalid_operator_sequence(source: str, span: Span) -> tuple[str, Span] | No
     head = first_executable_token_index(toks)
     if head < len(toks) and token_text(toks[head]) == "case":
         return None
-    for i in range(len(toks)):
+    i = 0
+    while i < len(toks):
         if not _is_non_unary_binary_operator(toks[i]):
+            i += 1
             continue
-        end = i
+        # `a < > b` is one relational operator written as two tokens (MS-VBAL
+        # 5.6.9.5), and the VBE reads it as `a <> b` (XLIDE issue #87).
+        relational = relational_operator_at(toks, i)
+        operator_end = i + (relational[1] if relational is not None else 1) - 1
+        end = operator_end
         while end + 1 < len(toks) and _is_non_unary_binary_operator(toks[end + 1]):
             end += 1
-        if end > i:
+        if end > operator_end or operator_end == len(toks) - 1:
             first = toks[i]
             last = toks[end]
             return (
                 source[span.start + first.start : span.start + last.end],
                 Span(span.start + first.start, span.start + last.end),
             )
-        if i == len(toks) - 1:
-            return (toks[i].raw_text, absolute_span(span, toks[i]))
+        i = operator_end + 1
     return None

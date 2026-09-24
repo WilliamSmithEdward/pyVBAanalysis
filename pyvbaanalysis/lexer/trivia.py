@@ -33,7 +33,9 @@ def scan_leading_trivia(src: str, pos: int, line: int, character: int) -> Trivia
     terminator, which is a significant newline token, not trivia). A
     line-continuation (1*WSC underscore line-terminator, MS-VBAL 3.2.2) is merged
     into a single lineContinuation trivia so the logical line is preserved while
-    the raw text round-trips.
+    the raw text round-trips. The VBE also continues a line whose underscore has
+    whitespace after it, and drops that whitespace when it stores the line, so the
+    trivia takes it in too (XLIDE issue #83).
     """
     length = len(src)
     # Fast path: most tokens have no leading trivia at all, so answer that
@@ -53,14 +55,9 @@ def scan_leading_trivia(src: str, pos: int, line: int, character: int) -> Trivia
         pos = _WSC_RUN_RE.match(src, pos).end()  # type: ignore[union-attr]
         character += pos - start
         # A line-continuation is whitespace + '_' + line terminator.
-        if (
-            pos < length
-            and src[pos] == "_"
-            and pos + 1 < length
-            and is_line_terminator(src[pos + 1])
-        ):
-            pos += 1  # consume '_'
-            character += 1
+        terminator = continuation_terminator(src, pos)
+        if terminator >= 0:
+            pos = terminator  # consume '_' and any whitespace after it
             # consume the line terminator (CRLF, CR, or LF)
             if src[pos] == "\r" and pos + 1 < length and src[pos + 1] == "\n":
                 pos += 2
@@ -76,3 +73,12 @@ def scan_leading_trivia(src: str, pos: int, line: int, character: int) -> Trivia
                 Trivia(kind=TriviaKind.WHITESPACE, text=src[start:pos], start=start, end=pos)
             )
     return TriviaScan(trivia=trivia, pos=pos, line=line, character=character)
+
+
+def continuation_terminator(src: str, pos: int) -> int:
+    """Where the line terminator starts when ``pos`` holds the underscore of a line
+    continuation, whitespace after the underscore allowed; otherwise -1."""
+    if pos >= len(src) or src[pos] != "_":
+        return -1
+    at = _WSC_RUN_RE.match(src, pos + 1).end()  # type: ignore[union-attr]
+    return at if at < len(src) and is_line_terminator(src[at]) else -1

@@ -14,7 +14,7 @@ touch detection.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
@@ -69,8 +69,9 @@ def walk_straight_line_body(
     (If/For/Do/...) are not entered. Every tracked name touched anywhere inside a
     block is demoted to "unknown" rather than guessing which runtime path runs.
     """
-    for node in body:
-        if is_inactive(node):
+    for node in _active_runs(body, is_inactive):
+        if isinstance(node, tuple):
+            _walk_single_line_if_tail(node, hooks)
             continue
         if is_leaf_statement(node):
             hooks.on_statement(node)
@@ -81,6 +82,47 @@ def walk_straight_line_body(
         if isinstance(child, list):
             for lower in _collect_nested_touches(child, is_inactive, hooks):
                 hooks.demote_to_unknown(lower)
+
+
+def _is_single_line_if_tail(node: BodyNode) -> bool:
+    return is_leaf_statement(node) and bool(getattr(node, "single_line_if_tail", False))
+
+
+def _active_runs(
+    body: Sequence[BodyNode], is_inactive: Callable[[BodyNode], bool]
+) -> Iterator[BodyNode | tuple[LeafStatementNode, ...]]:
+    """Each active node of a body in order. The statements a single-line If runs
+    after a colon come together as one tuple, since they run as one branch."""
+    i = 0
+    while i < len(body):
+        node = body[i]
+        if is_inactive(node):
+            i += 1
+            continue
+        if _is_single_line_if_tail(node):
+            j = i
+            while j < len(body) and _is_single_line_if_tail(body[j]):
+                j += 1
+            yield tuple(stmt for stmt in body[i:j] if is_leaf_statement(stmt))
+            i = j
+            continue
+        yield node
+        i += 1
+
+
+def _walk_single_line_if_tail(tail: Sequence[LeafStatementNode], hooks: DataflowHooks) -> None:
+    """The statements a single-line If runs after a colon, `b` in `If x Then a: b`,
+    run only with its branch (MS-VBAL 5.4.2.9). They are checked on that path, and
+    afterwards the state is what a block If without Else leaves: as it was before
+    them, with every name they touch made unknown."""
+    entry = hooks.snapshot_state() if hooks.snapshot_state is not None else None
+    if entry is not None and hooks.restore_state is not None:
+        for stmt in tail:
+            hooks.on_statement(stmt)
+        hooks.restore_state(entry)
+    for stmt in tail:
+        for lower in hooks.touches_in_statement(stmt):
+            hooks.demote_to_unknown(lower)
 
 
 def walk_branch_merged_body(
@@ -97,8 +139,9 @@ def walk_branch_merged_body(
     sound for procedures WITHOUT unstructured control flow; callers gate on
     procedure_has_unstructured_flow and fall back to walk_straight_line_body.
     """
-    for node in body:
-        if is_inactive(node):
+    for node in _active_runs(body, is_inactive):
+        if isinstance(node, tuple):
+            _walk_single_line_if_tail(node, hooks)
             continue
         if is_leaf_statement(node):
             hooks.on_statement(node)

@@ -6,7 +6,8 @@ v20250520 (3.2.2 logical lines, 3.3.1 separators/special tokens, 3.3.2 numbers,
 
 The token stream is loss-aware and round-trippable: re-joining every token's
 leading trivia and raw_text (and any trailing trivia on the final token)
-reproduces the source exactly.
+reproduces the source exactly. Reserved keywords carry canonical capitalization,
+and so do contextual keywords inside the statement that makes them keywords.
 """
 
 from __future__ import annotations
@@ -15,9 +16,10 @@ import re
 import unicodedata
 from functools import lru_cache
 
+from .contextual_keywords import settle_contextual_keywords
 from .keyword_table import canonical_keyword
 from .token_kinds import TokenKind, VbaToken, is_line_terminator, is_wsc
-from .trivia import scan_leading_trivia
+from .trivia import continuation_terminator, scan_leading_trivia
 
 # Type-suffix chars (MS-VBAL 3.3.2).
 _INTEGER_SUFFIX = frozenset(("%", "&", "^"))
@@ -113,10 +115,8 @@ def tokenize(src: str) -> list[VbaToken]:
             is_newline = True
             at_statement_start = True
         elif ch == "'":
-            # Apostrophe comment to end of physical line (MS-VBAL 3.3.1).
-            pos += 1
-            while pos < length and not is_line_terminator(src[pos]):
-                pos += 1
+            # Apostrophe comment to the end of the logical line (MS-VBAL 3.3.1).
+            pos = _comment_end(src, pos + 1)
             kind = TokenKind.COMMENT
         elif _is_ident_start(ch):
             # Scan the identifier in ASCII runs (one regex step each) instead of
@@ -129,8 +129,7 @@ def tokenize(src: str) -> list[VbaToken]:
             word = src[start_pos:pos]
             if word.lower() == "rem" and at_statement_start:
                 # Rem comment (MS-VBAL 3.3.5.2): rest of line is comment.
-                while pos < length and not is_line_terminator(src[pos]):
-                    pos += 1
+                pos = _comment_end(src, pos)
                 kind = TokenKind.COMMENT
             else:
                 canonical = canonical_keyword(word)
@@ -142,9 +141,12 @@ def tokenize(src: str) -> list[VbaToken]:
             or (
                 ch == "&"
                 and pos + 1 < length
-                and src[pos + 1] in ("h", "H", "o", "O")
+                and (src[pos + 1] in ("h", "H", "o", "O") or _is_octal_digit(src[pos + 1]))
             )
         ):
+            # The O of an octal literal is optional (MS-VBAL 3.3.2), and the VBE
+            # takes `&17` as one wherever it stands: `x = "a" &1` does not
+            # compile, while `x = "a" &9` is a concatenation (XLIDE issue #87).
             kind, pos = _lex_number(src, pos)
             at_statement_start = False
         elif ch == '"':
@@ -200,6 +202,7 @@ def tokenize(src: str) -> list[VbaToken]:
                 at_statement_start = False
         else:
             kind, pos = _lex_symbol(src, ch, pos)
+            canonical = _REVERSED_RELATIONAL_OPERATORS.get(src[start_pos:pos])
             at_statement_start = kind == TokenKind.COLON
 
         token = VbaToken(
@@ -217,10 +220,47 @@ def tokenize(src: str) -> list[VbaToken]:
         if is_newline:
             line += 1
             character = 0
+        elif kind is TokenKind.COMMENT:
+            # A comment may run on through line continuations.
+            raw = token.raw_text
+            last_break = max(raw.rfind("\n"), raw.rfind("\r"))
+            if last_break < 0:
+                character += pos - start_pos
+            else:
+                line += _line_break_count(raw)
+                character = len(raw) - last_break - 1
         else:
             character += pos - start_pos
 
+    settle_contextual_keywords(tokens)
     return tokens
+
+
+def _comment_end(src: str, start: int) -> int:
+    """Where a comment whose body starts at ``start`` ends. A comment-body runs
+    through line-continuations to LINE-END (MS-VBAL 3.3.1), so the VBE takes a
+    comment ending in ` _` on through the next line (XLIDE issue #82)."""
+    length = len(src)
+    pos = start
+    while pos < length and not is_line_terminator(src[pos]):
+        terminator = (
+            continuation_terminator(src, pos) if src[pos] == "_" and pos > 0 and is_wsc(src[pos - 1]) else -1
+        )
+        if terminator >= 0:
+            step = 2 if src[terminator] == "\r" and terminator + 1 < length and src[terminator + 1] == "\n" else 1
+            pos = terminator + step
+            continue
+        pos += 1
+    return pos
+
+
+def _line_break_count(text: str) -> int:
+    """Line breaks in ``text``, a CRLF counting once."""
+    count = 0
+    for i, ch in enumerate(text):
+        if ch == "\n" or (ch == "\r" and (i + 1 >= len(text) or text[i + 1] != "\n")):
+            count += 1
+    return count
 
 
 @lru_cache(maxsize=8)
@@ -235,9 +275,9 @@ def _lex_number(src: str, p: int) -> tuple[TokenKind, int]:
     ch = src[p]
 
     if ch == "&":
-        # Hex (&H) or octal (&O) integer literal.
+        # Hex (&H) or octal (&O, or & with the O left out) integer literal.
         radix = src[p + 1]
-        p += 2  # consume '&' and the radix letter
+        p += 1 if _is_octal_digit(radix) else 2  # consume '&' and any radix letter
         if radix in ("h", "H"):
             while p < length and _is_hex_digit(src[p]):
                 p += 1
@@ -251,11 +291,17 @@ def _lex_number(src: str, p: int) -> tuple[TokenKind, int]:
     is_float = False
     while p < length and _is_digit(src[p]):
         p += 1
-    # Optional decimal point: consume '.' only when followed by a digit or an
-    # exponent (a numeric literal cannot have a member, MS-VBAL 3.3.2).
+    # Optional decimal point, with the fractional digits optional too (MS-VBAL
+    # 3.3.2): the VBE reads `1.` as `1#` (XLIDE issue #87). A letter after the dot
+    # that does not start an exponent leaves it a member-access dot.
     if p < length and src[p] == ".":
         after = src[p + 1] if p + 1 < length else ""
-        if _is_digit(after) or (_is_exponent_letter(after) and _has_exponent_tail(src, p + 1)):
+        if (
+            _is_digit(after)
+            or (_is_exponent_letter(after) and _has_exponent_tail(src, p + 1))
+            or after == ""
+            or not _is_ident_start(after)
+        ):
             is_float = True
             p += 1
             while p < length and _is_digit(src[p]):
@@ -420,13 +466,24 @@ def _skip_wsc(s: str, pos: int) -> int:
     return p
 
 
+# The standard spelling of a relational operator written the other way round.
+# MS-VBAL 5.6.9.5 writes `<>`, `<=` and `>=` as two special tokens in either
+# order, and the VBE stores `=>` as `>=` (XLIDE issue #87).
+_REVERSED_RELATIONAL_OPERATORS: dict[str, str] = {"=>": ">=", "=<": "<=", "><": "<>"}
+
+
 def _lex_symbol(src: str, ch: str, p: int) -> tuple[TokenKind, int]:
     """Lex an operator/punctuation/colon at p; return (kind, new_pos)."""
     length = len(src)
     nxt = src[p + 1] if p + 1 < length else ""
 
-    # Multi-character operators :=, <=, >=, <>.
-    if (ch == ":" and nxt == "=") or (ch == "<" and nxt in ("=", ">")) or (ch == ">" and nxt == "="):
+    # Multi-character operators :=, <=, >=, <>, and the reversed =>, =< and ><.
+    if (
+        (ch == ":" and nxt == "=")
+        or (ch == "<" and nxt in ("=", ">"))
+        or (ch == ">" and nxt == "=")
+        or ch + nxt in _REVERSED_RELATIONAL_OPERATORS
+    ):
         return TokenKind.OPERATOR, p + 2
 
     p += 1

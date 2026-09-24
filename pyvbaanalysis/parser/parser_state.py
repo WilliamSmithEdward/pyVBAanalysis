@@ -36,6 +36,11 @@ class LogicalStatement:
     end: int
     # Zero-based line of the first token.
     line: int
+    # True when a ':' separator, not the end of the line, closed the statement.
+    ended_by_colon: bool = False
+    # True when a single-line If earlier on the same line runs this statement
+    # after a colon, as `b` in `If x Then a: b` (MS-VBAL 5.4.2.9).
+    single_line_if_tail: bool = False
 
 
 def split_logical_statements(tokens: Sequence[VbaToken]) -> list[LogicalStatement]:
@@ -46,25 +51,48 @@ def split_logical_statements(tokens: Sequence[VbaToken]) -> list[LogicalStatemen
     """
     statements: list[LogicalStatement] = []
     current: list[VbaToken] = []
+    # A single-line If earlier on this line runs every statement after it to the
+    # end of the line: `b` and `c` in `If x Then a: b: c`, and `c` in
+    # `If x Then a Else b: c`, all sit in its Then or Else list (MS-VBAL
+    # 5.4.2.9). `If x Then:` opens such a list too.
+    in_single_line_if = False
 
-    def flush() -> None:
-        nonlocal current
+    def flush(ended_by_colon: bool) -> None:
+        nonlocal current, in_single_line_if
         if not current:
             return
         first = current[0]
         last = current[-1]
-        statements.append(
-            LogicalStatement(tokens=current, start=first.start, end=last.end, line=first.line)
+        statement = LogicalStatement(
+            tokens=current,
+            start=first.start,
+            end=last.end,
+            line=first.line,
+            ended_by_colon=ended_by_colon,
+            single_line_if_tail=in_single_line_if,
         )
+        statements.append(statement)
+        in_single_line_if = in_single_line_if or (ended_by_colon and _is_single_line_if(statement))
         current = []
 
     for token in tokens:
         if token.kind is TokenKind.NEWLINE or token.kind is TokenKind.COLON:
-            flush()
+            flush(token.kind is TokenKind.COLON)
+            if token.kind is TokenKind.NEWLINE:
+                in_single_line_if = False
             continue
         current.append(token)
-    flush()
+    flush(False)
     return statements
+
+
+def _is_single_line_if(statement: LogicalStatement) -> bool:
+    """An If statement that is not a block If header, whose Then ends its line."""
+    tokens = code_tokens(statement)
+    head = 1 if tokens and tokens[0].kind is TokenKind.INTEGER_LITERAL and tokens[0].raw_text.isdigit() else 0
+    if head >= len(tokens) or token_word(tokens[head]) != "if":
+        return False
+    return token_word(tokens[-1]) != "then" or statement.ended_by_colon
 
 
 class StatementCursor:

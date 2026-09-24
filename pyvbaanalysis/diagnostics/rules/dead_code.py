@@ -457,6 +457,12 @@ def check_unreachable_code(
             if isinstance(node, ConditionalDirectiveNode):
                 flush()
                 continue
+            if is_leaf_statement(node) and node.single_line_if_tail:
+                # It runs only with its single-line If's branch (MS-VBAL 5.4.2.9):
+                # an Exit there ends nothing, and it is dead when its If is.
+                if terminator is not None:
+                    dead = Span(dead.start if dead is not None else node.span.start, node.span.end)
+                continue
             if is_leaf_statement(node):
                 toks = statement_tokens(source, node.span)
                 if _is_landing_point(source, node, toks):

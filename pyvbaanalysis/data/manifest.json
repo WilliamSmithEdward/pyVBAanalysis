@@ -1,7 +1,7 @@
 {
   "sourceRepo": "WilliamSmithEdward/xlide_vscode",
-  "xlideVersion": "10.6.0",
-  "xlideCommit": "5682c8fa113d4877ade8c13248c11fc6bd289717",
+  "xlideVersion": "10.7.1",
+  "xlideCommit": "6ead73db155709009adaaeb0ce2272ac7955f773",
   "files": {
     "vbe_oracle_cases.json": {
       "sha256": "1c8d4d9c11a02b3b927b50b3bee613361787faebf0494cf669f11880cabca6fe",

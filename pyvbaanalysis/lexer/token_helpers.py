@@ -204,6 +204,39 @@ def token_name(token: VbaToken | None) -> str | None:
     return None
 
 
+_RELATIONAL_OPERATORS = frozenset({"=", "<>", "<", ">", "<=", ">="})
+
+# Two single-character relational tokens that make one operator, in either order.
+_RELATIONAL_PAIRS = {"<>": "<>", "><": "<>", "<=": "<=", "=<": "<=", ">=": ">=", "=>": ">="}
+
+
+def relational_operator_at(
+    tokens: Sequence[VbaToken], index: int, end: int | None = None
+) -> tuple[str, int] | None:
+    """The relational operator ``tokens[index]`` starts, in its standard spelling,
+    and how many tokens it takes (1 or 2).
+
+    MS-VBAL 5.6.9.5 writes `<>`, `<=` and `>=` as two special tokens in either
+    order, so whitespace may stand between them: the VBE reads `a < > b` as
+    `a <> b` and `a = > b` as `a >= b`. The lexer joins the two when they touch.
+    Tokens at or past ``end`` are out of reach.
+    """
+    limit = len(tokens) if end is None else end
+    token = tokens[index] if 0 <= index < limit else None
+    if token is None or token.kind is not TokenKind.OPERATOR:
+        return None
+    text = token.canonical_text if token.canonical_text is not None else token.raw_text
+    if text not in _RELATIONAL_OPERATORS:
+        return None
+    following = tokens[index + 1] if index + 1 < limit else None
+    pair = (
+        _RELATIONAL_PAIRS.get(token.raw_text + following.raw_text)
+        if following is not None and following.kind is TokenKind.OPERATOR
+        else None
+    )
+    return (pair, 2) if pair is not None else (text, 1)
+
+
 def token_word(token: VbaToken | None) -> str:
     """Canonical (case-folded) text of a token, used for keyword matching.
 
