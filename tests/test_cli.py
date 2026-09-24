@@ -12,6 +12,18 @@ from pyvbaanalysis.cli import main
 
 _DIRTY = 'Attribute VB_Name = "Mod1"\r\nPublic Sub S()\r\n    Dim n As Long\r\n    n = "x"\r\nEnd Sub\r\n'
 _CLEAN = 'Attribute VB_Name = "Mod2"\r\nOption Explicit\r\n\r\nPublic Sub T()\r\nEnd Sub\r\n'
+# One module body to put behind each export's designer block. Its only "x" is an
+# assignment-type-mismatch on the body's sixth line, at column 9.
+_BODY = (
+    'Attribute VB_Name = "{name}"\r\nOption Explicit\r\n\r\n'
+    'Public Sub S()\r\n    Dim n As Long\r\n    n = "x"\r\nEnd Sub\r\n'
+)
+_CLASS_BLOCK = "VERSION 1.0 CLASS\r\nBEGIN\r\n  MultiUse = -1  'True\r\nEND\r\n"
+_FORM_BLOCK = (
+    "VERSION 5.00\r\nBegin {C62A69F0-16DC-11CE-9E98-00AA00574A4F} Form1 \r\n"
+    '   Caption = "Form1"\r\n   Begin Forms.CommandButton b\r\n      Caption = "OK"\r\n'
+    "   End\r\nEnd\r\n"
+)
 
 
 def _write(path: Path, content: str) -> Path:
@@ -67,6 +79,54 @@ def test_cli_json_schema_is_stable(tmp_path: Path, capsys: pytest.CaptureFixture
         "column",
         "spec_reference",
     }
+
+
+@pytest.mark.parametrize(
+    ("file_name", "designer_block", "line"),
+    [("Plain.bas", "", 6), ("Widget.cls", _CLASS_BLOCK, 10), ("Form1.frm", _FORM_BLOCK, 13)],
+    ids=["bas", "cls", "frm"],
+)
+def test_cli_positions_are_in_the_file_as_saved(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    file_name: str,
+    designer_block: str,
+    line: int,
+) -> None:
+    # The reader strips a .cls or .frm export's designer block before analysis, and
+    # the report still counts it: lines, columns and offsets are the file's own.
+    text = designer_block + _BODY.format(name=Path(file_name).stem)
+    args = [str(_write(tmp_path / file_name, text)), "--select", "assignment-type-mismatch"]
+    main(args)
+    assert f"    {line}:9 error assignment-type-mismatch" in capsys.readouterr().out
+    main([*args, "--format", "json"])
+    [diagnostic] = json.loads(capsys.readouterr().out)[0]["modules"][0]["diagnostics"]
+    assert (diagnostic["line"], diagnostic["column"]) == (line, 9)
+    assert diagnostic["start"] == text.index('"x"')
+    assert text[diagnostic["start"] : diagnostic["end"]] == '"x"'
+
+
+def test_cli_positions_in_a_container_are_in_its_module_text(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # pyOpenVBA hands over a module's stored text, which starts at its Attribute
+    # lines; the report numbers that text as it numbers a file. A designer block,
+    # were a reader to hand one over, is counted the same way.
+    from pyvbaanalysis import cli as cli_mod
+    from pyvbaanalysis.reader import OfficeProject, loaded_module_from_text
+
+    stored = loaded_module_from_text(_BODY.format(name="Stored"), pyopenvba_standard=True)
+    exported = loaded_module_from_text(
+        _CLASS_BLOCK + _BODY.format(name="Exported"), pyopenvba_standard=False
+    )
+    project = OfficeProject(modules=[stored, exported], host="excel", referenced_hosts=[])
+    monkeypatch.setattr(cli_mod, "read_office_project", lambda _path: project)
+    book = tmp_path / "book.xlsm"
+    book.write_bytes(b"x")
+    main([str(book), "--select", "assignment-type-mismatch", "--format", "json"])
+    modules = json.loads(capsys.readouterr().out)[0]["modules"]
+    lines = {m["module"]: [d["line"] for d in m["diagnostics"]] for m in modules}
+    assert lines == {"Stored": [6], "Exported": [10]}
 
 
 def test_cli_severity_override_silences(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

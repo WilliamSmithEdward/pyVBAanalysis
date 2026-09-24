@@ -15,6 +15,7 @@ from pyvbaanalysis.reader import (
     analyze_workbook,
     classify_module_kind,
     load_loose_module,
+    loaded_module_from_text,
     module_name_from_text,
     read_workbook_modules,
     strip_export_header,
@@ -73,6 +74,25 @@ def test_strip_unbalanced_designer_block_keeps_body() -> None:
         '   Caption = "x"\r\nPrivate Sub b_Click()\r\nEnd Sub\r\n'
     )
     assert strip_export_header(truncated) == truncated
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        _BAS,
+        _CLS,
+        _DOC,
+        _FRM,
+        "VERSION 1.0 CLASS\r\n" + _BAS,
+        "VERSION 5.00\r\nBegin {C62A69F0-16DC-11CE-9E98-00AA00574A4F} F \r\n" + _BAS,
+    ],
+    ids=["bas", "cls", "doc", "frm", "version-without-begin", "begin-never-closed"],
+)
+def test_loaded_module_keeps_the_stripped_designer_block(text: str) -> None:
+    # What the strip removed rides along, so a span in the body maps back to the file.
+    module = loaded_module_from_text(text)
+    assert module.source == strip_export_header(text)
+    assert module.designer_block + module.source == text
 
 
 def test_classify_by_extension() -> None:

@@ -54,6 +54,9 @@ These are re-exported at the package root for convenience:
   `modules`, the `host` its extension implies, and `referenced_hosts`, the other
   Office libraries its project references (`None` when the reference list could
   not be read).
+* A `LoadedModule` carries a module's `name`, `kind`, and `source` (the code body
+  the analyzer reads), plus `designer_block`, the export header the reader stripped
+  ahead of `source` (empty when there was none).
 * Building blocks: `LoadedModule`, `strip_export_header`, `classify_module_kind`,
   `module_name_from_text`, `loaded_module_from_text`, `WorkbookReadError`,
   `LooseFileReadError`, and the extension sets `LOOSE_EXTENSIONS`,

@@ -136,6 +136,11 @@ analyze_loose_files(["Module1.bas", "Widget.cls"])     # several, as one project
 skipped for it (see "Whole project vs a single file" below). Use `analyze_loose_files`
 to analyze several files together with shared cross-module context.
 
+Spans index the code body the analyzer reads, which starts after the stripped header.
+`load_loose_module` returns a `LoadedModule` whose `designer_block` holds that header,
+so `line_col(module.designer_block + module.source, len(module.designer_block) + span.start)`
+places a span in the file. The command line reports positions this way.
+
 ### Office macro containers
 
 The container reader reads VBA directly out of an Office file via pyOpenVBA (the one
@@ -291,6 +296,12 @@ project), or an Office macro container, whose extension selects the host model.
 `pyvbaanalysis --version` prints the version, and `python -m pyvbaanalysis` is
 equivalent to the `pyvbaanalysis` command.
 
+Each diagnostic is placed by line and column in the module text as read. For a loose
+file that is the file itself, so the `VERSION` and `Begin ... End` header of a `.cls`
+or `.frm` export counts and the numbers match an editor. For an Office container it
+is the module's stored text, which begins at its `Attribute` lines; the VBE hides
+those lines, so its line numbers run lower by their count.
+
 Flags:
 
 | Flag | Effect |
@@ -336,7 +347,8 @@ diagnostics are reported or a file cannot be read, and `2` for a usage error.
 ]
 ```
 
-`start` and `end` are character offsets; `line` and `column` are 1-based.
+`start` and `end` are character offsets and `line` and `column` are 1-based, all in
+the module text as read (see above).
 
 ## Use in CI
 

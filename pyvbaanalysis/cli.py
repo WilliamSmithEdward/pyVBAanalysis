@@ -33,6 +33,7 @@ from .project import analyze_project
 from .reader import (
     LOOSE_EXTENSIONS,
     OFFICE_EXTENSIONS,
+    LoadedModule,
     LooseFileReadError,
     WorkbookReadError,
     load_loose_module,
@@ -137,8 +138,7 @@ def _analyze_loose_group(
         whole_project=whole_project,
         inline_suppression=inline_suppression,
     )
-    sources = {m.name: m.source for m in unique}
-    return [_ProjectResult("(loose files)", diagnostics, sources)], warnings, errors
+    return [_ProjectResult("(loose files)", diagnostics, unique)], warnings, errors
 
 
 def _analyze_workbook_group(
@@ -167,8 +167,7 @@ def _analyze_workbook_group(
             host=project.host,
             referenced_hosts=project.referenced_hosts,
         )
-        sources = {m.name: m.source for m in modules}
-        results.append(_ProjectResult(str(path), diagnostics, sources))
+        results.append(_ProjectResult(str(path), diagnostics, modules))
     return results, errors
 
 
@@ -179,11 +178,23 @@ class _ProjectResult:
         self,
         label: str,
         diagnostics: dict[str, list[VbaDiagnostic]],
-        sources: dict[str, str],
+        modules: Sequence[LoadedModule],
     ) -> None:
         self.label = label
         self.diagnostics = diagnostics
-        self.sources = sources
+        self.modules = {module.name: module for module in modules}
+
+
+def _text_as_read(module: LoadedModule | None) -> tuple[str, int]:
+    """A module's text as read, and where the body the analyzer saw starts in it.
+
+    The reader strips a .cls or .frm export's designer block before analysis, so a
+    span indexes the body; shifting it by the block's length places it in the file
+    as saved, which is where a user will look for it.
+    """
+    if module is None:
+        return "", 0
+    return module.designer_block + module.source, len(module.designer_block)
 
 
 def _render_text(results: Sequence[_ProjectResult]) -> str:
@@ -195,10 +206,10 @@ def _render_text(results: Sequence[_ProjectResult]) -> str:
             if not diagnostics:
                 continue
             any_in_project = True
-            source = result.sources.get(module_name, "")
+            text, shift = _text_as_read(result.modules.get(module_name))
             lines.append(f"  {module_name}")
             for diag in diagnostics:
-                line, column = line_col(source, diag.span.start)
+                line, column = line_col(text, shift + diag.span.start)
                 lines.append(
                     f"    {line}:{column} {diag.severity.value} {diag.code}  {diag.message}"
                 )
@@ -207,28 +218,31 @@ def _render_text(results: Sequence[_ProjectResult]) -> str:
     return "\n".join(lines)
 
 
+def _diagnostic_json(diag: VbaDiagnostic, text: str, shift: int) -> dict[str, object]:
+    start = shift + diag.span.start
+    line, column = line_col(text, start)
+    return {
+        "code": diag.code,
+        "severity": diag.severity.value,
+        "message": diag.message,
+        "start": start,
+        "end": shift + diag.span.end,
+        "line": line,
+        "column": column,
+        "spec_reference": diag.spec_reference,
+    }
+
+
 def _render_json(results: Sequence[_ProjectResult]) -> str:
     payload = []
     for result in results:
         modules = []
         for module_name, diagnostics in result.diagnostics.items():
-            source = result.sources.get(module_name, "")
+            text, shift = _text_as_read(result.modules.get(module_name))
             modules.append(
                 {
                     "module": module_name,
-                    "diagnostics": [
-                        {
-                            "code": diag.code,
-                            "severity": diag.severity.value,
-                            "message": diag.message,
-                            "start": diag.span.start,
-                            "end": diag.span.end,
-                            "line": line_col(source, diag.span.start)[0],
-                            "column": line_col(source, diag.span.start)[1],
-                            "spec_reference": diag.spec_reference,
-                        }
-                        for diag in diagnostics
-                    ],
+                    "diagnostics": [_diagnostic_json(diag, text, shift) for diag in diagnostics],
                 }
             )
         payload.append({"project": result.label, "modules": modules})

@@ -66,11 +66,15 @@ class LoadedModule:
 
     ``source`` is the body with any non-VBA designer header removed, so it can be
     passed straight to analyze_module (or wrapped in a ModuleInput for a project pass).
+    ``designer_block`` is the header text removed ahead of it, empty when there was
+    none, so ``designer_block + source`` is the module text as read and a span in
+    ``source`` lies ``len(designer_block)`` characters further into that text.
     """
 
     name: str
     kind: ModuleSymbolKind
     source: str
+    designer_block: str = ""
 
 
 def strip_export_header(text: str) -> str:
@@ -82,16 +86,23 @@ def strip_export_header(text: str) -> str:
     corrupt header whose ``Begin`` block never closes is also returned unchanged
     rather than swallowing the whole body (a corrupt export stays visible).
     """
+    return _split_designer_block(text)[1]
+
+
+def _split_designer_block(text: str) -> tuple[str, str]:
+    """Split ``text`` into the designer block strip_export_header removes and the
+    body it keeps. The two parts join back to ``text``; the block is empty when
+    nothing is removed."""
     lines = text.splitlines(keepends=True)
     if not lines or not lines[0].lstrip().upper().startswith("VERSION"):
-        return text
+        return "", text
     # Skip blank lines after VERSION, then consume a balanced Begin..End designer block.
     j = 1
     while j < len(lines) and lines[j].strip() == "":
         j += 1
     if not (j < len(lines) and lines[j].strip().lower().startswith("begin")):
         # A VERSION line with no designer block: strip just the VERSION line.
-        return "".join(lines[1:])
+        return lines[0], "".join(lines[1:])
     depth = 0
     for k in range(j, len(lines)):
         token = lines[k].strip().lower()
@@ -103,9 +114,9 @@ def strip_export_header(text: str) -> str:
         elif token == "end":
             depth -= 1
             if depth <= 0:
-                return "".join(lines[k + 1 :])
+                return "".join(lines[: k + 1]), "".join(lines[k + 1 :])
     # The Begin block never balanced (truncated/corrupt export): do not strip the body.
-    return text
+    return "", text
 
 
 def classify_module_kind(
@@ -173,4 +184,7 @@ def loaded_module_from_text(
         text, extension=extension, pyopenvba_standard=pyopenvba_standard
     )
     resolved_name = name or module_name_from_text(text, name_fallback or "Module")
-    return LoadedModule(name=resolved_name, kind=kind, source=strip_export_header(text))
+    designer_block, source = _split_designer_block(text)
+    return LoadedModule(
+        name=resolved_name, kind=kind, source=source, designer_block=designer_block
+    )
