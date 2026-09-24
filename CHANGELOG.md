@@ -5,6 +5,74 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 2.2.1 - 2026-09-23
+
+Sync to XLIDE 10.7.1 (commit 6ead73d), from 10.6.0. Upstream fixed how its
+lexer and parser read a handful of lines the VBE compiles (XLIDE issues #82 to
+#90), and the port takes each fix. XLIDE 10.7.0 changed nothing the port reads.
+
+### Added
+
+* `LoadedModule.designer_block`: the export header a reader stripped ahead of
+  `source`, empty when there was none. `designer_block + source` is the module
+  text as read, so a span in the analyzed body can be placed in the file.
+
+### Changed
+
+* A contextual keyword is a `KEYWORD` token only inside the statement that
+  makes it one: `Text` after `Option Compare`, `Step` in a `For` header,
+  `Output` in an `Open` statement. Elsewhere, as in `Dim text As String`, it is
+  an `IDENTIFIER` (XLIDE issue #86). `PtrSafe` joins these words, as it did
+  upstream with issue #41.
+* A comment ending in ` _` runs on through the next line, so its token can span
+  physical lines (#82). A line continuation may have whitespace after its `_`
+  (#83).
+* `1.` lexes as a float and `&17` as an octal literal. `=>`, `=<` and `><` are
+  one operator token, whose `canonical_text` gives the standard spelling (#87).
+
+### Fixed
+
+False positives 2.2.0 reported on code that compiles, and two errors it missed:
+
+* `unreachable-code` on the line after
+  `If conn Is Nothing Then ACCT = CVErr(xlErrNA): Exit Function`. Every
+  statement a one-line `If` runs after a colon belongs to the If (MS-VBAL
+  5.4.2.9). After a `Set x = Nothing` or an `Erase` there, the next line no
+  longer reports an unset object or an unallocated array. A `Set` inside a
+  one-line `If` no longer leaves the object reported as Nothing after it.
+* Findings on the line after a comment ending in ` _` (#82), and a missing
+  `Then` or a call to a variable on the line after a continuation with spaces
+  after its `_` (#83).
+* `If x Then:` read as a block If (#84), and a one-word `EndIf` read as no
+  closer, so the lines after it reported as unreachable (#88).
+* `invalid-expression-syntax` on `1.`, `&17`, `a => b`, `a < > b` and the other
+  spellings the VBE reads (#87). `s = "a" &1`, which the VBE refuses, is now
+  reported, and `s = "a" &9` is still a concatenation.
+* `argument-count` missed on `Needs, 2`: a comma touching the callee opens its
+  argument list, as the VBE reads it (#85).
+* `assignment-object-type-mismatch` on `Shape.Duplicate` assigned to a `Shape`,
+  on `SparklineGroup.SeriesColor` assigned to a `FormatColor`, and on a
+  `Charts` or `Worksheets` collection assigned to a `Sheets` variable (#90).
+* `Err.LastDllError` is spelled the way the VBE writes it (#89).
+* The command line counted lines in a `.cls` or `.frm` export from the end of
+  its designer header (the `VERSION` line and `Begin ... End` block the reader
+  strips before analysis), so a class module's findings printed four lines
+  early and a UserForm's early by the height of its form block. Lines, and the
+  JSON `start` and `end` offsets, now count the file as saved. Modules read
+  from an Office container are numbered as before, since pyOpenVBA reads them
+  without a designer header. The library's spans still index the code body.
+
+### Verified
+
+* Upstream's own 10.7.1 test suite, recorded and replayed through the port:
+  1081 standalone and 936 project calls, every result identical in code, span
+  and message. Before the port changes 24 of them differed, so the replay sees
+  what this release changes.
+* The oracle corpus (1820 diagnostics), 16 real workbooks, 195 Office files of
+  every host, 693 further projects (948 modules) and 7 VB6 projects: identical
+  diagnostics from both analyzers.
+* Against 2.2.0, the largest module (26,721 lines) takes the same CPU time.
+
 ## 2.2.0 - 2026-09-22
 
 Sync to XLIDE 10.6.0 (commit 5682c8f), from 6.2.0: twelve new diagnostics, early
