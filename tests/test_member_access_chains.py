@@ -92,6 +92,68 @@ def test_receivers_continued_from_the_previous_dot_match_resolving_each_afresh(c
     assert "Excel.Range" in continued
 
 
+# -- With scope ---------------------------------------------------------------
+
+# With blocks nested, on one line, behind line numbers and labels, continued over
+# two lines, a leading dot outside any With, and a second procedure.
+WITH_MODULE = """Sub A()
+    Dim ws As Worksheet
+    With ws
+        .Range("A1").Value = 1
+        With .Range("B1")
+            .Font.Bold = True
+            .Offset(1, 0).Value = 2
+        End With
+        .Cells(1, 1).Value = 3
+    End With
+    With ws: .Range("C1").Value = 4: End With
+10  With ws.Range("D1")
+20      .Value = 5
+L1: End With
+    .Range("A1").Value = 6
+End Sub
+Sub B()
+    Dim ws As Worksheet
+    With ws _
+        .Range("E1")
+        .Font.Italic = True
+    End With
+End Sub
+"""
+
+
+def test_with_receivers_match_with_the_scan_cache_without_it_and_without_the_stream() -> None:
+    source = WITH_MODULE
+    dots = [t.end for t in tokenize(source) if t.raw_text == "."]
+    cached = _pass_context(source)
+    cached.with_scan_cache = {}
+    with_cache = [resolve_receiver_type_at(source, end, cached) for end in dots]
+    without_cache = [resolve_receiver_type_at(source, end, _pass_context(source)) for end in dots]
+    relexed = [resolve_receiver_type_at(source, end, MemberCompletionContext()) for end in dots]
+    assert with_cache == without_cache == relexed
+    # `.Font` inside `With .Range("B1")`, and `.Value` inside the numbered block.
+    assert "Excel.Range" in with_cache
+    assert set(cached.with_scan_cache) == {source.index("Sub A"), source.index("Sub B")}
+
+
+def test_a_with_block_is_scanned_once_per_procedure_per_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The With stack at a leading dot was found by re-reading the procedure from
+    # its first line, per dot: a 500-line With block took 18 seconds.
+    scans = 0
+    original = member_access._with_scan_tokens
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        nonlocal scans
+        scans += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(member_access, "_with_scan_tokens", counting)
+    lines = "".join(f"        .Cells({r}, 1).Value = {r}\n" for r in range(1, 301))
+    source = "Sub Fill()\n    With Worksheets(1)\n" + lines + "    End With\nEnd Sub\n"
+    analyze_project([ModuleInput("Module1", ModuleSymbolKind.STANDARD, source)], host="excel")
+    assert scans == 1
+
+
 def test_a_long_chain_resolves_each_member_a_bounded_number_of_times(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

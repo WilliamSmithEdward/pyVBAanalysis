@@ -240,8 +240,10 @@ def diagnostic_member_completion_context(
     Hard diagnostics disable Set-assignment refinement (VBE leaves those receivers
     late-bound). The context is primed with the per-pass AST and the shared
     full-source token stream so member resolution never re-parses or re-lexes per
-    dotted reference. `me_project_type`/`me_type` are derived from the module
-    identity; `code_names` is left unset (the diagnostics pass has no code-name map).
+    dotted reference, and with a With-scan cache so each procedure's `With` stack
+    is scanned once rather than once per leading-dot member. `me_project_type` and
+    `me_type` are derived from the module identity; `code_names` is left unset (the
+    diagnostics pass has no code-name map).
     """
     ctx = MemberCompletionContext(
         project_class_members=opts.project_class_members,
@@ -249,6 +251,10 @@ def diagnostic_member_completion_context(
         model=opts.host_model,
         parsed_module=mod,
         source_tokens=[t for t in tokenize_cached(source) if t.kind is not TokenKind.COMMENT],
+        # Port-only: upstream's diagnostics context passes no With-scan cache, so
+        # it rebuilds a procedure's index for every leading-dot member (XLIDE
+        # issue #134). The context lives for one pass over one source.
+        with_scan_cache={},
     )
     me_project_type = _me_project_type_for(opts.module_name, opts.module_kind)
     if me_project_type:

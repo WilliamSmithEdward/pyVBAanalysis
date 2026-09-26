@@ -18,6 +18,7 @@ host model's ``exhaustive`` flag and project surfaces use
 from __future__ import annotations
 
 import re
+from bisect import bisect_left, bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
@@ -96,6 +97,11 @@ class MemberCompletionContext:
     # Full-source significant tokens (comments removed, newlines kept), used to
     # slice the prefix token stream by offset instead of re-lexing per reference.
     source_tokens: Sequence[VbaToken] | None = None
+    # Per-pass memo of the active `With` stack, keyed by enclosing procedure
+    # start. Callers resolving many references against one unchanging source pass
+    # a fresh dict; the scan is then paid once per procedure rather than once per
+    # leading-dot member. Must be discarded whenever the source changes.
+    with_scan_cache: dict[int, _WithScanIndex] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -747,16 +753,26 @@ def _with_receiver_type_at(
 def _active_with_expressions_at(
     source: str, offset: int, ctx: MemberCompletionContext
 ) -> list[_ActiveWithExpression]:
-    scan_text, scan_slice_start = _active_with_scan_window(source, offset, ctx)
-    stack: list[_ActiveWithExpression] = []
+    scan = _active_with_scan_window(source, offset, ctx)
+    index = _with_scan_index(source, scan, ctx)
+    # Resume from the last complete statement before `offset` rather than from
+    # the top of the procedure, then finish the partial statement the offset
+    # sits in. Same answer, paid once per procedure instead of once per dot.
+    at = _last_boundary_at_or_before(index.boundaries, offset)
+    stack = [] if at < 0 else list(index.stacks[at])
     statement: list[VbaToken] = []
 
     def flush() -> None:
         nonlocal statement
-        _process_with_stack_statement(statement, stack, scan_slice_start)
+        _process_with_stack_statement(statement, stack, index.slice_start)
         statement = []
 
-    for token in tokenize(scan_text):
+    for i in range(0 if at < 0 else index.resume_at[at], len(index.tokens)):
+        token = index.tokens[i]
+        # Boundaries are absolute; the fallback lexer numbers its tokens from the
+        # start of the sliced procedure, so the window's own start is added back.
+        if token.end + index.slice_start > offset:
+            break
         if token.kind is TokenKind.COMMENT:
             continue
         if _is_boundary(token):
@@ -767,15 +783,99 @@ def _active_with_expressions_at(
     return stack
 
 
+@dataclass(frozen=True, slots=True)
+class _WithScanWindow:
+    """The source range a `With` scan reads: the procedure enclosing the offset, or
+    at module level everything before it, which has no procedure to key an index
+    on (procedure_start is then -1)."""
+
+    slice_start: int
+    procedure_start: int
+    window_end: int
+
+
+@dataclass(frozen=True, slots=True)
+class _WithScanIndex:
+    """The active `With` stack after every complete statement of one procedure.
+
+    Walking the procedure from its start for each leading-dot member is quadratic
+    in the procedure's length: a 500-line With block took 18 seconds. Callers that
+    resolve many references against one source pass a `with_scan_cache`, and then
+    each procedure is walked once."""
+
+    tokens: Sequence[VbaToken]
+    slice_start: int
+    # End offset of each complete statement, ascending.
+    boundaries: list[int]
+    # Stack after the statement ending at the same position in `boundaries`.
+    stacks: list[list[_ActiveWithExpression]]
+    # Token index to resume scanning from, per boundary.
+    resume_at: list[int]
+
+
+def _with_scan_index(source: str, scan: _WithScanWindow, ctx: MemberCompletionContext) -> _WithScanIndex:
+    cache = ctx.with_scan_cache if scan.procedure_start >= 0 else None
+    cached = cache.get(scan.procedure_start) if cache is not None else None
+    if cached is not None:
+        return cached
+    tokens, slice_start = _with_scan_tokens(source, scan, ctx)
+    boundaries: list[int] = []
+    stacks: list[list[_ActiveWithExpression]] = []
+    resume_at: list[int] = []
+    stack: list[_ActiveWithExpression] = []
+    statement: list[VbaToken] = []
+    for i, token in enumerate(tokens):
+        if token.kind is TokenKind.COMMENT:
+            continue
+        if not _is_boundary(token):
+            statement.append(token)
+            continue
+        _process_with_stack_statement(statement, stack, slice_start)
+        statement = []
+        boundaries.append(token.end + slice_start)
+        stacks.append(list(stack))
+        resume_at.append(i + 1)
+    index = _WithScanIndex(tokens, slice_start, boundaries, stacks, resume_at)
+    if cache is not None:
+        cache[scan.procedure_start] = index
+    return index
+
+
+def _last_boundary_at_or_before(boundaries: Sequence[int], offset: int) -> int:
+    """Index of the last boundary at or before `offset`, or -1."""
+    return bisect_right(boundaries, offset) - 1
+
+
+def _with_scan_tokens(
+    source: str, scan: _WithScanWindow, ctx: MemberCompletionContext
+) -> tuple[Sequence[VbaToken], int]:
+    """Tokens of the scan window, with the offset their positions count from.
+
+    Re-lexing the enclosing procedure for every leading-dot member is quadratic in
+    the procedure's length. When the caller holds the full-source stream, the
+    window is a slice of it; its tokens are then at absolute offsets, so the
+    slice start the callers add is zero."""
+    shared = ctx.source_tokens
+    if not shared:
+        return tokenize(source[scan.slice_start : scan.window_end]), scan.slice_start
+    first = bisect_left(shared, scan.slice_start, key=lambda token: token.start)
+    last = bisect_right(shared, scan.window_end, lo=first, key=lambda token: token.end)
+    return shared[first:last], 0
+
+
 def _active_with_scan_window(
     source: str, offset: int, ctx: MemberCompletionContext
-) -> tuple[str, int]:
+) -> _WithScanWindow:
     safe_offset = max(0, offset)
     module = ctx.parsed_module if ctx.parsed_module is not None else parse_module(source)
     enclosing = _enclosing_procedure(module, safe_offset)
     if enclosing is None:
-        return (source[:safe_offset], 0)
-    return (source[enclosing.span.start : safe_offset], enclosing.span.start)
+        return _WithScanWindow(slice_start=0, procedure_start=-1, window_end=safe_offset)
+    return _WithScanWindow(
+        slice_start=enclosing.span.start,
+        procedure_start=enclosing.span.start,
+        window_end=enclosing.span.end,
+    )
 
 
 def _process_with_stack_statement(
