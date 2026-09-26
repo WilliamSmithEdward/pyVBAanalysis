@@ -136,6 +136,15 @@ class _ReceiverChain:
 
 
 @dataclass(frozen=True, slots=True)
+class _ChainReceiver:
+    """The explicit receiver chain ending at one dot: whether it collected, and the
+    type _receiver_type_from_chain resolves it to."""
+
+    collected: bool
+    receiver_type: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class _ResolvedMemberReturn:
     type: str
     kind: str
@@ -272,13 +281,28 @@ def _prefix_significant_tokens(
             # prefix per lookup (O(offset) copies dominated big-module passes).
             # Line continuations are trivia, not newline tokens, so a continued
             # statement stays intact.
-            first = found
-            while first > 0 and shared[first - 1].kind is not TokenKind.NEWLINE:
-                first -= 1
-            if first > 0:
-                first -= 1  # keep the newline itself as the explicit boundary
-            return list(shared[first : found + 1])
+            return list(shared[_line_start_indexes(shared)[found] : found + 1])
     return completion_significant_tokens(source, offset)
+
+
+# Where _prefix_significant_tokens starts its slice, for each token of a shared
+# stream: the last newline token before it, kept as the explicit boundary, or 0.
+# Found once per stream rather than by walking back per lookup, which was
+# quadratic in the length of one long statement.
+_LINE_START_INDEX_CACHE = IdentityLru(capacity=4)
+
+
+def _line_start_indexes(shared: Sequence[VbaToken]) -> list[int]:
+    cached = _LINE_START_INDEX_CACHE.get(shared)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    starts: list[int] = []
+    last_newline = 0
+    for i, token in enumerate(shared):
+        starts.append(last_newline)
+        if token.kind is TokenKind.NEWLINE:
+            last_newline = i
+    return _LINE_START_INDEX_CACHE.put(starts, shared)  # type: ignore[no-any-return]
 
 
 # -- receiver-type resolution ----------------------------------------------
@@ -293,8 +317,7 @@ def _receiver_type_from_tokens(
 ) -> str | None:
     """Walk the receiver chain ending at the dot ``tokens[dot_index]`` and resolve
     it to a qualified host/project type, threading return types through each hop."""
-    chain = _collect_receiver_chain(tokens, dot_index - 1)
-    explicit_receiver = _receiver_type_from_chain(chain, source, offset, ctx)
+    explicit_receiver = _explicit_chain_receiver_type(tokens, dot_index, source, offset, ctx)
     if explicit_receiver:
         return explicit_receiver
     grouped = _receiver_type_from_parenthesized_receiver(
@@ -308,6 +331,86 @@ def _receiver_type_from_tokens(
     return _receiver_type_from_implicit_with_chain(
         _with_receiver_type_at(source, tokens[dot_index].end, ctx), implicit_with_chain, ctx
     )
+
+
+# The member rules resolve the receiver at every dot of a chain, and a chain was
+# resolved from its root each time, so `a.b.c ...` cost time quadratic in its
+# length: 3000 members took 16 seconds. Each dot's result is kept for the pass,
+# and a dot whose chain is the previous dot's plus one member takes one step on
+# from that result. The root resolves the same way at every dot of one chain:
+# the offset reaches _resolve_root only through the enclosing procedure and the
+# Set statements that end before it, which are the same anywhere in a statement.
+# Entries are keyed by the dot token's identity and keep the token, so only the
+# pass's shared token stream ever matches, never a prefix lexed for one call.
+_CHAIN_RECEIVER_CACHE = IdentityLru(capacity=4)
+
+
+def _explicit_chain_receiver_type(
+    tokens: Sequence[VbaToken],
+    dot_index: int,
+    source: str,
+    offset: int,
+    ctx: MemberCompletionContext,
+) -> str | None:
+    """_receiver_type_from_chain over the chain collected back from the dot
+    ``tokens[dot_index]``, continued from the previous dot when possible."""
+    if not ctx.source_tokens:
+        # No shared stream, so no pass whose dots could be remembered.
+        return _chain_receiver_from_root(tokens, dot_index, source, offset, ctx).receiver_type
+    memo = _chain_receiver_memo(ctx, source)
+    dot = tokens[dot_index]
+    known = memo.get(id(dot))
+    if known is not None and known[0] is dot:
+        return known[1].receiver_type
+    result: _ChainReceiver | None = None
+    last = _receiver_segment_ending_at(tokens, dot_index - 1)
+    if last is not None:
+        segment, name_index = last
+        previous_dot = tokens[name_index - 1] if name_index > 0 else None
+        if previous_dot is not None and previous_dot.raw_text == ".":
+            prior = memo.get(id(previous_dot))
+            if prior is not None and prior[0] is previous_dot:
+                result = _extend_chain_receiver(prior[1], segment, ctx)
+    if result is None:
+        result = _chain_receiver_from_root(tokens, dot_index, source, offset, ctx)
+    memo[id(dot)] = (dot, result)
+    return result.receiver_type
+
+
+def _chain_receiver_from_root(
+    tokens: Sequence[VbaToken],
+    dot_index: int,
+    source: str,
+    offset: int,
+    ctx: MemberCompletionContext,
+) -> _ChainReceiver:
+    chain = _collect_receiver_chain_with_start(tokens, dot_index - 1)
+    return _ChainReceiver(
+        collected=chain is not None,
+        receiver_type=_receiver_type_from_chain(
+            chain.segments if chain is not None else [], source, offset, ctx
+        ),
+    )
+
+
+def _chain_receiver_memo(
+    ctx: MemberCompletionContext, source: str
+) -> dict[int, tuple[VbaToken, _ChainReceiver]]:
+    memo = _CHAIN_RECEIVER_CACHE.get(ctx, source)
+    if memo is None:
+        memo = _CHAIN_RECEIVER_CACHE.put({}, ctx, source)
+    return memo  # type: ignore[no-any-return]
+
+
+def _extend_chain_receiver(
+    prior: _ChainReceiver, segment: _ReceiverChainSegment, ctx: MemberCompletionContext
+) -> _ChainReceiver:
+    """The receiver one member further along a chain, as _receiver_type_from_chain
+    folds it: a chain that did not collect stays so, and a chain whose type did
+    not resolve keeps that result."""
+    if not prior.collected or not prior.receiver_type:
+        return prior
+    return _ChainReceiver(True, _advance_receiver_type(prior.receiver_type, segment, ctx))
 
 
 def is_explicit_element_accessor(name: str) -> bool:
@@ -328,21 +431,29 @@ def _receiver_type_from_implicit_with_chain(
     for segment in chain:
         if not current_type:
             return None
-        resolved = _resolve_any_member_return_type(current_type, segment.name, ctx)
-        if resolved is None:
-            return None
-        # A member called with arguments indexes into its return type; when that
-        # type is a host collection, _apply_default_member_return_type resolves the
-        # element (and no-ops otherwise). This holds for method-kind accessors too
-        # (e.g. ws.ChartObjects(1).Chart), so it must not be gated on kind. But
-        # Item/_Default/Add already return the resolved element/result, so they are
-        # not re-indexed (avoids over-resolving SparklineGroups.Item(1) one level).
-        current_type = _apply_default_member_return_type(
-            resolved.type,
-            segment.has_arguments and not is_explicit_element_accessor(segment.name),
-            ctx,
-        )
+        current_type = _advance_receiver_type(current_type, segment, ctx)
     return current_type
+
+
+def _advance_receiver_type(
+    current_type: str, segment: _ReceiverChainSegment, ctx: MemberCompletionContext
+) -> str | None:
+    """The type one member further along a receiver chain, or None when the member
+    does not resolve."""
+    resolved = _resolve_any_member_return_type(current_type, segment.name, ctx)
+    if resolved is None:
+        return None
+    # A member called with arguments indexes into its return type; when that
+    # type is a host collection, _apply_default_member_return_type resolves the
+    # element (and no-ops otherwise). This holds for method-kind accessors too
+    # (e.g. ws.ChartObjects(1).Chart), so it must not be gated on kind. But
+    # Item/_Default/Add already return the resolved element/result, so they are
+    # not re-indexed (avoids over-resolving SparklineGroups.Item(1) one level).
+    return _apply_default_member_return_type(
+        resolved.type,
+        segment.has_arguments and not is_explicit_element_accessor(segment.name),
+        ctx,
+    )
 
 
 def _receiver_type_from_expression_tokens(
@@ -398,18 +509,7 @@ def _receiver_type_from_chain(
     )
     s = 1
     while s < len(chain) and current_type:
-        segment = chain[s]
-        resolved = _resolve_any_member_return_type(current_type, segment.name, ctx)
-        if resolved is None:
-            return None
-        # See _receiver_type_from_implicit_with_chain: argument-bearing members
-        # index into their return type unless they are the explicit element
-        # accessors (Item/_Default/Add), which already return the element.
-        current_type = _apply_default_member_return_type(
-            resolved.type,
-            segment.has_arguments and not is_explicit_element_accessor(segment.name),
-            ctx,
-        )
+        current_type = _advance_receiver_type(current_type, chain[s], ctx)
         s += 1
     return current_type
 
@@ -417,20 +517,34 @@ def _receiver_type_from_chain(
 # -- chain collection ------------------------------------------------------
 
 
-def _collect_receiver_chain(
-    tokens: Sequence[VbaToken], end_index: int
-) -> list[_ReceiverChainSegment]:
-    chain = _collect_receiver_chain_with_start(tokens, end_index)
-    return chain.segments if chain is not None else []
-
-
 def _collect_receiver_chain_with_start(
     tokens: Sequence[VbaToken], end_index: int
 ) -> _ReceiverChain | None:
     segments: list[_ReceiverChainSegment] = []
     i = end_index
-    pending_has_arguments = False
     start_index = -1
+    while True:
+        last = _receiver_segment_ending_at(tokens, i)
+        if last is None:
+            return None
+        segment, start_index = last
+        segments.insert(0, segment)
+        i = start_index - 1
+        if i >= 0 and tokens[i].raw_text == ".":
+            i -= 1
+            continue
+        break
+    return _ReceiverChain(segments, start_index)
+
+
+def _receiver_segment_ending_at(
+    tokens: Sequence[VbaToken], end_index: int
+) -> tuple[_ReceiverChainSegment, int] | None:
+    """The receiver-chain segment ending at ``end_index``, a name with any
+    argument lists after it, and the index of the name; None when the tokens
+    there are not one."""
+    i = end_index
+    has_arguments = False
     while True:
         if i >= 0 and _is_boundary(tokens[i]):
             return None
@@ -442,20 +556,12 @@ def _collect_receiver_chain_with_start(
             # only a non-empty argument list resolves to an element (matches the
             # assignment-inference path's argument_tokens check).
             if open_index < i - 1:
-                pending_has_arguments = True
+                has_arguments = True
             i = open_index - 1
             continue
         if i < 0 or not is_ident_like(tokens[i]):
             return None
-        start_index = i
-        segments.insert(0, _ReceiverChainSegment(_word(tokens[i]), pending_has_arguments))
-        pending_has_arguments = False
-        i -= 1
-        if i >= 0 and tokens[i].raw_text == ".":
-            i -= 1
-            continue
-        break
-    return _ReceiverChain(segments, start_index)
+        return _ReceiverChainSegment(_word(tokens[i]), has_arguments), i
 
 
 # `Me` is the only VBA keyword that can terminate a receiver expression (`Me.`);
