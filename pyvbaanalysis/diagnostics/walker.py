@@ -10,7 +10,7 @@ import re
 from collections.abc import Callable, Sequence
 from typing import Protocol
 
-from ..conditional import ConditionalActivityTracker
+from ..conditional import ConditionalActivityTracker, inactive_node_skip
 from ..lexer.token_helpers import match_paren_from, token_word
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..parser.nodes import (
@@ -22,6 +22,7 @@ from ..parser.nodes import (
     Span,
     VariableGroupNode,
     is_leaf_statement,
+    iter_body_nodes,
 )
 from .context import statement_tokens
 
@@ -86,15 +87,9 @@ def for_each_statement(
     activity: ConditionalActivityTracker | None = None,
 ) -> None:
     """Walk every leaf statement in a body, descending into nested blocks."""
-    for node in body:
-        if is_inactive_node(activity, node):
-            continue
+    for node in iter_body_nodes(body, inactive_node_skip(activity)):
         if is_leaf_statement(node):
             visit(node)
-        else:
-            child = getattr(node, "body", None)
-            if isinstance(child, list):
-                for_each_statement(child, visit, activity)
 
 
 # A per-procedure visitor of the shared statement walk: given a procedure, returns
@@ -139,15 +134,9 @@ def for_each_variable_group(
     activity: ConditionalActivityTracker | None = None,
 ) -> None:
     """Walk every VariableGroupNode in a body, descending into nested blocks."""
-    for node in body:
-        if is_inactive_node(activity, node):
-            continue
+    for node in iter_body_nodes(body, inactive_node_skip(activity)):
         if isinstance(node, VariableGroupNode):
             visit(node)
-        else:
-            child = getattr(node, "body", None)
-            if isinstance(child, list):
-                for_each_variable_group(child, visit, activity)
 
 
 def for_each_body_statement(
@@ -156,15 +145,9 @@ def for_each_body_statement(
     activity: ConditionalActivityTracker | None = None,
 ) -> None:
     """Walk every leaf statement in a procedure body, descending into nested blocks."""
-    for node in body:
-        if is_inactive_node(activity, node):
-            continue
+    for node in iter_body_nodes(body, inactive_node_skip(activity)):
         if is_leaf_statement(node):
             visit(node)
-        else:
-            child = getattr(node, "body", None)
-            if isinstance(child, list):
-                for_each_body_statement(child, visit, activity)
 
 
 def for_each_procedure_body_line(

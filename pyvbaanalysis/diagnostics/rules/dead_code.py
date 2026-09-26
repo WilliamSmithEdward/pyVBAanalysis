@@ -26,7 +26,7 @@ prove it:
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Literal
@@ -426,77 +426,84 @@ def _is_host_called(name: str, module_kind: ModuleSymbolKind) -> bool:
 # ------------------------------------------------------- unreachable code
 
 
+@dataclass(slots=True)
+class _UnreachableRun:
+    """One statement list being walked: the exit that ended its reachable code,
+    and the dead span after that exit not yet reported."""
+
+    nodes: Iterator[BodyNode]
+    terminator: str | None = None
+    dead: Span | None = None
+
+
 def check_unreachable_code(
     source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
 ) -> None:
     """Statements after an unconditional exit in the same block, until a landing
     point."""
 
+    def flush(run: _UnreachableRun) -> None:
+        if run.dead is not None and run.terminator is not None:
+            start, end = whole_line_span(source, run.dead.start, run.dead.end)
+            push(
+                "unreachableCode",
+                f"Unreachable code after '{run.terminator}'.",
+                run.dead,
+                VbaDiagnosticData(
+                    remove_unreachable_code=VbaRemoveUnreachableCodeData(VbaEdit(Span(start, end), ""))
+                ),
+            )
+        run.dead = None
+        run.terminator = None
+
     def walk_body(body: Sequence[BodyNode]) -> None:
-        terminator: str | None = None
-        dead: Span | None = None
-
-        def flush() -> None:
-            nonlocal terminator, dead
-            if dead is not None and terminator is not None:
-                start, end = whole_line_span(source, dead.start, dead.end)
-                push(
-                    "unreachableCode",
-                    f"Unreachable code after '{terminator}'.",
-                    dead,
-                    VbaDiagnosticData(
-                        remove_unreachable_code=VbaRemoveUnreachableCodeData(VbaEdit(Span(start, end), ""))
-                    ),
-                )
-            dead = None
-            terminator = None
-
-        for node in body:
-            if is_inactive_node(activity, node):
-                continue
-            if isinstance(node, ConditionalDirectiveNode):
-                flush()
-                continue
-            if is_leaf_statement(node) and node.single_line_if_tail:
-                # It runs only with its single-line If's branch (MS-VBAL 5.4.2.9):
-                # an Exit there ends nothing, and it is dead when its If is.
-                if terminator is not None:
-                    dead = Span(dead.start if dead is not None else node.span.start, node.span.end)
-                continue
-            if is_leaf_statement(node):
-                toks = statement_tokens(source, node.span)
-                if _is_landing_point(source, node, toks):
-                    flush()
-                    exit_text = _terminal_statement(_tokens_after_line_number(toks))
+        # One run per statement list, kept on a stack rather than in recursive
+        # calls, so nesting depth is not bounded by Python's recursion limit. A
+        # block's lists are walked, in order, when the block is reached, and the
+        # enclosing list resumes after them.
+        runs = [_UnreachableRun(iter(body))]
+        while runs:
+            run = runs[-1]
+            entered_block = False
+            for node in run.nodes:
+                if is_inactive_node(activity, node):
+                    continue
+                if isinstance(node, ConditionalDirectiveNode):
+                    flush(run)
+                    continue
+                if is_leaf_statement(node) and node.single_line_if_tail:
+                    # It runs only with its single-line If's branch (MS-VBAL 5.4.2.9):
+                    # an Exit there ends nothing, and it is dead when its If is.
+                    if run.terminator is not None:
+                        run.dead = Span(run.dead.start if run.dead is not None else node.span.start, node.span.end)
+                    continue
+                if is_leaf_statement(node):
+                    toks = statement_tokens(source, node.span)
+                    if _is_landing_point(source, node, toks):
+                        flush(run)
+                        exit_text = _terminal_statement(_tokens_after_line_number(toks))
+                        if exit_text is not None:
+                            run.terminator = exit_text
+                        continue
+                    if run.terminator is not None:
+                        run.dead = Span(run.dead.start if run.dead is not None else node.span.start, node.span.end)
+                        continue
+                    exit_text = _terminal_statement(toks)
                     if exit_text is not None:
-                        terminator = exit_text
+                        run.terminator = exit_text
                     continue
-                if terminator is not None:
-                    dead = Span(dead.start if dead is not None else node.span.start, node.span.end)
-                    continue
-                exit_text = _terminal_statement(toks)
-                if exit_text is not None:
-                    terminator = exit_text
-                continue
-            # A block node.
-            if terminator is not None:
-                if _block_has_landing_point(source, node):
-                    flush()
-                    walk_block(node)
-                    continue
-                dead = Span(dead.start if dead is not None else node.span.start, node.span.end)
-                continue
-            walk_block(node)
-        flush()
-
-    def walk_block(node: BodyNode) -> None:
-        if isinstance(node, IfBlockNode):
-            for branch in node.branches:
-                walk_body(branch.body)
-            return
-        child = getattr(node, "body", None)
-        if isinstance(child, list):
-            walk_body(child)
+                # A block node.
+                if run.terminator is not None:
+                    if not _block_has_landing_point(source, node):
+                        run.dead = Span(run.dead.start if run.dead is not None else node.span.start, node.span.end)
+                        continue
+                    flush(run)
+                runs.extend(_UnreachableRun(iter(nested)) for nested in reversed(_block_bodies(node)))
+                entered_block = True
+                break
+            if not entered_block:
+                flush(run)
+                runs.pop()
 
     for member in active_module_members(mod, activity):
         if isinstance(member, ProcedureNode):
@@ -545,16 +552,21 @@ def _terminal_statement(toks: Sequence[VbaToken]) -> str | None:
     return None
 
 
-def _block_has_landing_point(source: str, node: BodyNode) -> bool:
-    bodies: list[Sequence[BodyNode]] = []
+def _block_bodies(node: BodyNode) -> list[Sequence[BodyNode]]:
+    """A block's statement lists: an If block's arms, which leave out the
+    Else/ElseIf header lines its flat body keeps, or the block's body."""
     if isinstance(node, IfBlockNode):
-        bodies.extend(branch.body for branch in node.branches)
-    else:
-        child = getattr(node, "body", None)
-        if isinstance(child, list):
-            bodies.append(child)
-    for body in bodies:
-        for child_node in body:
+        return [branch.body for branch in node.branches]
+    child = getattr(node, "body", None)
+    return [child] if isinstance(child, list) else []
+
+
+def _block_has_landing_point(source: str, node: BodyNode) -> bool:
+    # The bodies still to search wait on a stack instead of in recursive calls, so
+    # nesting depth is not bounded by Python's recursion limit.
+    pending = _block_bodies(node)
+    while pending:
+        for child_node in pending.pop():
             if is_leaf_statement(child_node):
                 toks = statement_tokens(source, child_node.span)
                 if toks and toks[0].kind is TokenKind.INTEGER_LITERAL:
@@ -563,6 +575,6 @@ def _block_has_landing_point(source: str, node: BodyNode) -> bool:
                     return True
             elif isinstance(child_node, ConditionalDirectiveNode):
                 return True
-            elif _block_has_landing_point(source, child_node):
-                return True
+            else:
+                pending.extend(_block_bodies(child_node))
     return False

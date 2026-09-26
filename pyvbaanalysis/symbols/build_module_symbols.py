@@ -14,6 +14,7 @@ from ..conditional import (
     ConditionalActivityTracker,
     ConditionalCompilationEnvironment,
     create_conditional_activity_tracker,
+    inactive_node_skip,
 )
 from ..parser.nodes import (
     AttributeNode,
@@ -28,6 +29,7 @@ from ..parser.nodes import (
     Span,
     TypeNode,
     VariableGroupNode,
+    iter_body_nodes,
 )
 from ..parser.parse_module import parse_module
 from .symbol_model import (
@@ -118,9 +120,7 @@ def _collect_locals(
     out: list[VbaSymbol],
     activity: ConditionalActivityTracker | None,
 ) -> None:
-    for node in body:
-        if _is_inactive(activity, node.span):
-            continue
+    for node in iter_body_nodes(body, inactive_node_skip(activity)):
         if isinstance(node, VariableGroupNode):
             for decl in node.declarations:
                 out.append(
@@ -140,10 +140,6 @@ def _collect_locals(
                         array_bounds=decl.array_bounds,
                     )
                 )
-        else:
-            child = getattr(node, "body", None)
-            if isinstance(child, list):
-                _collect_locals(child, module_name, container_name, out, activity)
 
 
 def _build_parameter_symbol(

@@ -12,7 +12,7 @@ from __future__ import annotations
 import enum
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Union
 
@@ -28,6 +28,7 @@ from ..parser.nodes import (
     ProcedureNode,
     Span,
     TypeNode,
+    iter_body_nodes,
 )
 
 # A resolved conditional value. bool is a subtype of int in Python, so any
@@ -204,6 +205,17 @@ class ConditionalActivityTracker:
         return (left.branch if left is not None else None) is (
             right.branch if right is not None else None
         )
+
+
+def inactive_node_skip(
+    activity: ConditionalActivityTracker | None,
+) -> Callable[[BodyNode], bool] | None:
+    """The `skip` test for iter_body_nodes that leaves out the nodes in inactive
+    `#If` arms, or None when every node is active."""
+    if activity is None:
+        return None
+    is_inactive = activity.is_inactive
+    return lambda node: is_inactive(node.span)
 
 
 def create_conditional_activity_tracker(
@@ -395,7 +407,7 @@ def _apply_conditional_directive(
 def _collect_body_directives(
     body: list[BodyNode], procedure: ProcedureNode, out: list[ConditionalDirectiveOccurrence]
 ) -> None:
-    for node in body:
+    for node in iter_body_nodes(body):
         if isinstance(node, ConditionalDirectiveNode):
             out.append(
                 ConditionalDirectiveOccurrence(
@@ -403,20 +415,10 @@ def _collect_body_directives(
                     container=ConditionalContainer(kind="procedure", name=procedure.name, span=procedure.span),
                 )
             )
-        else:
-            child = getattr(node, "body", None)
-            if isinstance(child, list):
-                _collect_body_directives(child, procedure, out)
 
 
 def _body_has_conditional_directives(body: list[BodyNode]) -> bool:
-    for node in body:
-        if isinstance(node, ConditionalDirectiveNode):
-            return True
-        child = getattr(node, "body", None)
-        if isinstance(child, list) and _body_has_conditional_directives(child):
-            return True
-    return False
+    return any(isinstance(node, ConditionalDirectiveNode) for node in iter_body_nodes(body))
 
 
 def _collect_conditional_constants(

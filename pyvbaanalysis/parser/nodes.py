@@ -18,8 +18,9 @@ Design notes (the once-up-front decisions, agent.md Risk 2):
 from __future__ import annotations
 
 import enum
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
-from typing import ClassVar, TypeGuard, Union
+from typing import ClassVar, TypeGuard, TypeVar, Union
 
 
 @dataclass(frozen=True, slots=True)
@@ -733,3 +734,55 @@ ModuleMember = Union[
 def is_leaf_statement(node: object) -> TypeGuard[LeafStatementNode]:
     """True for the leaf statement nodes (Assignment / Call / raw Statement)."""
     return isinstance(node, (AssignmentNode, CallNode, StatementNode))
+
+
+# Body walks run on an explicit stack instead of recursing once per nested block,
+# so they are not bounded by Python's recursion limit (1000 frames by default).
+# The VBE compiles blocks nested a thousand deep; upstream's recursive walks rely
+# on JavaScript's larger stack.
+
+_Context = TypeVar("_Context")
+
+
+def iter_body_nodes(
+    body: Sequence[BodyNode], skip: Callable[[BodyNode], bool] | None = None
+) -> Iterator[BodyNode]:
+    """Every node of a body and of the block bodies nested in it, in the order a
+    recursive walk visits them: a block, then its body, then the node after it.
+    A node that `skip` rejects is neither yielded nor entered."""
+    stack: list[Iterator[BodyNode]] = [iter(body)]
+    while stack:
+        for node in stack[-1]:
+            if skip is not None and skip(node):
+                continue
+            yield node
+            child = getattr(node, "body", None)
+            if isinstance(child, list):
+                stack.append(iter(child))
+                break
+        else:
+            stack.pop()
+
+
+def iter_body_nodes_in_context(
+    body: Sequence[BodyNode],
+    context: _Context,
+    enter: Callable[[BodyNode, _Context], _Context],
+    skip: Callable[[BodyNode], bool] | None = None,
+) -> Iterator[tuple[BodyNode, _Context]]:
+    """iter_body_nodes, with each node paired with the context of the body holding
+    it. `body` has `context`; a block's own body has `enter(block, context)`, which
+    is called after the block is yielded and before its first child is."""
+    stack: list[tuple[Iterator[BodyNode], _Context]] = [(iter(body), context)]
+    while stack:
+        nodes, current = stack[-1]
+        for node in nodes:
+            if skip is not None and skip(node):
+                continue
+            yield node, current
+            child = getattr(node, "body", None)
+            if isinstance(child, list):
+                stack.append((iter(child), enter(node, current)))
+                break
+        else:
+            stack.pop()

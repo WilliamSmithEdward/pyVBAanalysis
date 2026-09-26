@@ -16,6 +16,7 @@ from .conditional_compilation import (
     conditional_compiler_constants,
     create_conditional_activity_tracker,
     evaluate_conditional_expression,
+    inactive_node_skip,
     index_conditional_compilation,
     module_has_conditional_directives,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "conditional_compiler_constants",
     "create_conditional_activity_tracker",
     "evaluate_conditional_expression",
+    "inactive_node_skip",
     "index_conditional_compilation",
     "module_has_conditional_directives",
 ]

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
-from ..conditional import ConditionalActivityTracker
+from ..conditional import ConditionalActivityTracker, inactive_node_skip
 from ..parser.nodes import (
     AssignmentNode,
     BinaryExpr,
@@ -25,8 +25,9 @@ from ..parser.nodes import (
     ProcedureNode,
     TypeOfIsExpr,
     UnaryExpr,
+    iter_body_nodes,
 )
-from .walker import active_module_members, is_inactive_node
+from .walker import active_module_members
 
 # A rule's per-procedure expression visitor: the factory does per-member setup and
 # returns a callback invoked for every expression node in that member's body.
@@ -64,9 +65,7 @@ def for_each_expression_in_body(
     visit: Callable[[ExprNode], None],
 ) -> None:
     """Visit every expression node reachable in a body, skipping inactive regions."""
-    for node in body:
-        if is_inactive_node(activity, node):
-            continue
+    for node in iter_body_nodes(body, inactive_node_skip(activity)):
         if isinstance(node, AssignmentNode):
             for_each_sub_expression(node.lhs, visit)
             for_each_sub_expression(node.rhs, visit)
@@ -76,35 +75,37 @@ def for_each_expression_in_body(
                 if arg.value is not None:
                     for_each_sub_expression(arg.value, visit)
         elif isinstance(node, IfBlockNode):
+            # Arm statements live in the flat body, which the walk enters next.
             for branch in node.branches:
                 if branch.condition is not None:
                     for_each_sub_expression(branch.condition, visit)
-            # Arm statements live in the flat body; recurse it for nested exprs.
-            for_each_expression_in_body(node.body, activity, visit)
-        else:
-            child = getattr(node, "body", None)
-            if isinstance(child, list):
-                for_each_expression_in_body(child, activity, visit)
 
 
 def for_each_sub_expression(expr: ExprNode, visit: Callable[[ExprNode], None]) -> None:
     """Visit expr and every nested sub-expression (pre-order)."""
-    visit(expr)
-    if isinstance(expr, BinaryExpr):
-        for_each_sub_expression(expr.left, visit)
-        for_each_sub_expression(expr.right, visit)
-    elif isinstance(expr, UnaryExpr):
-        for_each_sub_expression(expr.operand, visit)
-    elif isinstance(expr, ParenExpr):
-        for_each_sub_expression(expr.inner, visit)
-    elif isinstance(expr, IndexExpr):
-        for_each_sub_expression(expr.callee, visit)
-        for arg in expr.args:
-            if arg.value is not None:
-                for_each_sub_expression(arg.value, visit)
-    elif isinstance(expr, MemberAccessExpr):
-        if expr.object_ is not None:
-            for_each_sub_expression(expr.object_, visit)
-    elif isinstance(expr, TypeOfIsExpr):
-        for_each_sub_expression(expr.operand, visit)
-    # LiteralExpr / IdentifierExpr / NewExpr / AddressOfExpr: leaves
+    # A stack of the subtrees still to visit, not recursion: a left-deep chain such
+    # as `a + b + c ...` or `a.b.c ...` nests one level per operand, which in one
+    # long statement goes past Python's recursion limit.
+    pending = [expr]
+    while pending:
+        node = pending.pop()
+        visit(node)
+        # Children are pushed last-first so they come off the stack in order.
+        if isinstance(node, BinaryExpr):
+            pending.append(node.right)
+            pending.append(node.left)
+        elif isinstance(node, UnaryExpr):
+            pending.append(node.operand)
+        elif isinstance(node, ParenExpr):
+            pending.append(node.inner)
+        elif isinstance(node, IndexExpr):
+            for arg in reversed(node.args):
+                if arg.value is not None:
+                    pending.append(arg.value)
+            pending.append(node.callee)
+        elif isinstance(node, MemberAccessExpr):
+            if node.object_ is not None:
+                pending.append(node.object_)
+        elif isinstance(node, TypeOfIsExpr):
+            pending.append(node.operand)
+        # LiteralExpr / IdentifierExpr / NewExpr / AddressOfExpr: leaves

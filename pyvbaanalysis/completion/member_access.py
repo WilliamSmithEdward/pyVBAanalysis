@@ -49,6 +49,7 @@ from ..parser.nodes import (
     ProcKind,
     VariableGroupNode,
     is_leaf_statement,
+    iter_body_nodes,
 )
 from ..parser.parse_module import parse_module
 from ..runtime import resolve_runtime_object, resolve_runtime_object_type, resolve_vba_library_qualifier
@@ -1264,20 +1265,15 @@ def _find_set_assigned_object_type(
 def _latest_set_assignment_in_body(
     body: Sequence[BodyNode], source: str, offset: int, lower_name: str
 ) -> _SetAssignment | None:
+    # The last one in source order wins, nested blocks included.
     latest: _SetAssignment | None = None
-    for node in body:
+    for node in iter_body_nodes(body):
         if is_leaf_statement(node):
             if node.span.end > offset:
                 continue
             hit = _set_assignment(source, node)
             if hit is not None and hit.name.lower() == lower_name:
                 latest = hit
-        else:
-            child = getattr(node, "body", None)
-            if isinstance(child, list):
-                hit = _latest_set_assignment_in_body(child, source, offset, lower_name)
-                if hit is not None:
-                    latest = hit
     return latest
 
 
@@ -1392,13 +1388,9 @@ def _body_bindings(proc: ProcedureNode) -> dict[str, _DeclaredBinding]:
 
 
 def _collect_body_bindings(body: Sequence[BodyNode], out: dict[str, _DeclaredBinding]) -> None:
-    for node in body:
+    for node in iter_body_nodes(body):
         if isinstance(node, VariableGroupNode):
             _add_group_bindings(node, out)
-        else:
-            child = getattr(node, "body", None)
-            if isinstance(child, list):
-                _collect_body_bindings(child, out)
 
 
 def _add_group_bindings(group: VariableGroupNode, out: dict[str, _DeclaredBinding]) -> None:

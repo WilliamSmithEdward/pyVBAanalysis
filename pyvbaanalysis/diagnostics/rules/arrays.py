@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-from ...conditional import ConditionalActivityTracker
+from ...conditional import ConditionalActivityTracker, inactive_node_skip
 from ...constants.integer_constant_expression import parse_vba_integer_literal, safe_integer
 from ...flow.procedure_unstructured import procedure_has_unstructured_flow
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
@@ -28,6 +28,7 @@ from ...parser.nodes import (
     StatementNode,
     VariableDeclNode,
     VariableGroupNode,
+    iter_body_nodes_in_context,
 )
 from ...symbols.name_resolution import BareIdentifierContext
 from ...symbols.symbol_model import ModuleSymbols, VbaSymbol
@@ -605,11 +606,11 @@ def _check_redim_preserve_dimensions_in_body(
     push: PushFn,
 ) -> None:
     # Copy-down, no-leak-up: a shape learned inside a nested block is visible
-    # deeper in that block but does not propagate back to the enclosing body.
-    shapes = dict(initial_shapes)
-    for node in body:
-        if is_inactive_node(activity, node):
-            continue
+    # deeper in that block but does not propagate back to the enclosing body. A
+    # block's body starts from a copy of the shapes learned before the block.
+    for node, shapes in iter_body_nodes_in_context(
+        body, dict(initial_shapes), lambda _block, outer: dict(outer), inactive_node_skip(activity)
+    ):
         if isinstance(node, StatementNode):
             for target in _redim_statement_targets(source, node.span):
                 if target.preserve:
@@ -628,10 +629,6 @@ def _check_redim_preserve_dimensions_in_body(
                         )
                 if target.dimensions:
                     shapes[target.name.lower()] = target
-            continue
-        child = getattr(node, "body", None)
-        if isinstance(child, list):
-            _check_redim_preserve_dimensions_in_body(source, child, shapes, activity, push)
 
 
 def _redim_preserve_dimension_mismatch(

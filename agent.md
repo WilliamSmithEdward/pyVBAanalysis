@@ -137,7 +137,7 @@ pyvbaanalysis/
   conditional/
     conditional_compilation.py # ConditionalActivity (Enum), stack-replay tracker, evaluator
   parser/
-    nodes.py                   # all Node/Expr dataclasses; NodeKind/ExprKind Enums; Span
+    nodes.py                   # all Node/Expr dataclasses; NodeKind/ExprKind Enums; Span; body walks
     parse_module.py            # parse_module() entry + LRU
     parse_expression.py        # ExpressionParser (precedence climbing)
     parser_state.py            # LogicalStatement, StatementCursor, split_logical_statements

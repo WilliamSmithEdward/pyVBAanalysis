@@ -14,7 +14,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from ...completion.type_completion import resolve_type_name
-from ...conditional import ConditionalActivityTracker
+from ...conditional import ConditionalActivityTracker, inactive_node_skip
 from ...host.host_model import HostObjectModel
 from ...flow.procedure_labels import (
     collect_procedure_label_declarations,
@@ -38,9 +38,10 @@ from ...parser.nodes import (
     SelectBlockNode,
     Span,
     StatementNode,
-    WhileBlockNode,
     WithBlockNode,
     is_leaf_statement,
+    iter_body_nodes,
+    iter_body_nodes_in_context,
 )
 from ...symbols.name_resolution import BareIdentifierContext
 from ...symbols.symbol_model import ModuleSymbols, VbaProjectTypeName, VbaSymbol
@@ -67,15 +68,6 @@ from ..walker import (
 from .shared import report_repeated_keys, scan_conditional_compilation_branch_order
 
 # -- checkForEachLoopTypes -------------------------------------------------
-
-_BLOCK_NODES = (
-    ForBlockNode,
-    IfBlockNode,
-    DoBlockNode,
-    WhileBlockNode,
-    WithBlockNode,
-    SelectBlockNode,
-)
 
 _ShapeResolver = Callable[[str, BareIdentifierContext], SourceDeclaredShape]
 
@@ -121,19 +113,13 @@ def _check_for_each_loop_types_in_body(
     push: PushFn,
     resolve_shape: _ShapeResolver,
 ) -> None:
-    for node in body:
-        if is_inactive_node(activity, node):
-            continue
-        if isinstance(node, _BLOCK_NODES):
-            if isinstance(node, ForBlockNode):
-                _check_for_each_control_variable_type(
-                    node, shapes, project_types, model, push, resolve_shape
-                )
-                _check_for_each_source_type(
-                    node, shapes, project_types, model, push, resolve_shape
-                )
-            _check_for_each_loop_types_in_body(
-                node.body, shapes, project_types, model, activity, push, resolve_shape
+    for node in iter_body_nodes(body, inactive_node_skip(activity)):
+        if isinstance(node, ForBlockNode):
+            _check_for_each_control_variable_type(
+                node, shapes, project_types, model, push, resolve_shape
+            )
+            _check_for_each_source_type(
+                node, shapes, project_types, model, push, resolve_shape
             )
 
 
@@ -406,26 +392,30 @@ def _check_context_body(
     activity: ConditionalActivityTracker | None,
     push: PushFn,
 ) -> None:
-    for node in body:
-        if is_inactive_node(activity, node):
-            continue
+    for node, node_ctx in iter_body_nodes_in_context(
+        body, ctx, _block_body_context, inactive_node_skip(activity)
+    ):
         if isinstance(node, (StatementNode, AssignmentNode, CallNode)):
-            _check_context_statement(source, node, ctx, push)
+            _check_context_statement(source, node, node_ctx, push)
         elif isinstance(node, ForBlockNode):
             _check_for_next_control_variable(node, activity, push)
-            _check_context_body(source, node.body, replace(ctx, for_depth=ctx.for_depth + 1), activity, push)
-        elif isinstance(node, DoBlockNode):
-            _check_context_body(source, node.body, replace(ctx, do_depth=ctx.do_depth + 1), activity, push)
-        elif isinstance(node, WithBlockNode):
-            _check_context_body(source, node.body, replace(ctx, with_depth=ctx.with_depth + 1), activity, push)
-        elif isinstance(node, SelectBlockNode):
-            _check_context_body(source, node.body, replace(ctx, select_depth=ctx.select_depth + 1), activity, push)
         elif isinstance(node, IfBlockNode):
             _check_malformed_if_headers(source, node, push)
-            _check_context_body(source, node.body, ctx, activity, push)
-        elif isinstance(node, WhileBlockNode):
-            _check_context_body(source, node.body, ctx, activity, push)
         # ConditionalDirective / VariableGroup: no context check.
+
+
+def _block_body_context(block: BodyNode, ctx: _StatementContext) -> _StatementContext:
+    """The statement context inside a block's body. If and While bodies keep the
+    enclosing context."""
+    if isinstance(block, ForBlockNode):
+        return replace(ctx, for_depth=ctx.for_depth + 1)
+    if isinstance(block, DoBlockNode):
+        return replace(ctx, do_depth=ctx.do_depth + 1)
+    if isinstance(block, WithBlockNode):
+        return replace(ctx, with_depth=ctx.with_depth + 1)
+    if isinstance(block, SelectBlockNode):
+        return replace(ctx, select_depth=ctx.select_depth + 1)
+    return ctx
 
 
 # Reserved keywords that can never appear inside a value expression, so finding
@@ -571,14 +561,9 @@ def _check_if_block_else_branch_order(
 def _check_if_block_else_branch_order_in_body(
     source: str, body: list[BodyNode], activity: ConditionalActivityTracker | None, push: PushFn
 ) -> None:
-    for node in body:
-        if is_inactive_node(activity, node):
-            continue
+    for node in iter_body_nodes(body, inactive_node_skip(activity)):
         if isinstance(node, IfBlockNode):
             _check_single_if_block_else_branch_order(source, node, activity, push)
-        child = getattr(node, "body", None)
-        if isinstance(child, list):
-            _check_if_block_else_branch_order_in_body(source, child, activity, push)
 
 
 def _check_single_if_block_else_branch_order(
@@ -646,14 +631,9 @@ def _for_each_select_block(
     activity: ConditionalActivityTracker | None,
     visit: Callable[[SelectBlockNode], None],
 ) -> None:
-    for node in body:
-        if is_inactive_node(activity, node):
-            continue
+    for node in iter_body_nodes(body, inactive_node_skip(activity)):
         if isinstance(node, SelectBlockNode):
             visit(node)
-        child = getattr(node, "body", None)
-        if isinstance(child, list):
-            _for_each_select_block(child, activity, visit)
 
 
 def check_duplicate_case_else(
@@ -702,30 +682,26 @@ def _case_else_tokens(source: str, span: Span) -> tuple[VbaToken, VbaToken] | No
 def check_else_without_if(
     source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
 ) -> None:
-    def visit(body: list[BodyNode], inside_if_block: bool) -> None:
-        for node in body:
-            if is_inactive_node(activity, node):
+    def visit(body: list[BodyNode]) -> None:
+        # Each node comes with whether the body holding it is an If block's.
+        for node, inside_if_block in iter_body_nodes_in_context(
+            body, False, lambda block, _: isinstance(block, IfBlockNode), inactive_node_skip(activity)
+        ):
+            if not is_leaf_statement(node) or inside_if_block:
                 continue
-            if is_leaf_statement(node):
-                if inside_if_block:
-                    continue
-                toks = statement_tokens_after_leading_label(source, node.span)
-                first = toks[0] if toks else None
-                word = token_text(first) if first is not None else ""
-                if first is not None and (word == "else" or word == "elseif"):
-                    push(
-                        "elseWithoutIf",
-                        f"'{first.raw_text}' can only appear inside an 'If' block.",
-                        absolute_span(node.span, first),
-                    )
-                continue
-            child = getattr(node, "body", None)
-            if isinstance(child, list):
-                visit(child, isinstance(node, IfBlockNode))
+            toks = statement_tokens_after_leading_label(source, node.span)
+            first = toks[0] if toks else None
+            word = token_text(first) if first is not None else ""
+            if first is not None and (word == "else" or word == "elseif"):
+                push(
+                    "elseWithoutIf",
+                    f"'{first.raw_text}' can only appear inside an 'If' block.",
+                    absolute_span(node.span, first),
+                )
 
     for member in active_module_members(mod, activity):
         if isinstance(member, ProcedureNode):
-            visit(member.body, False)
+            visit(member.body)
 
 
 # -- checkMalformedStatements ----------------------------------------------

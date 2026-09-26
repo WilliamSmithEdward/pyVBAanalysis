@@ -92,6 +92,21 @@ class _IfBranchBuilder:
     condition_span: Span | None = None
 
 
+@dataclass(slots=True)
+class _BlockFrame:
+    """A block _parse_block has opened and not yet closed."""
+
+    opener: str
+    head: LogicalStatement
+    expected: str
+    # If blocks accumulate structured arms; the flat body is kept for generic
+    # body walkers and block-balance diagnostics.
+    branches: list[_IfBranchBuilder] | None
+    body: list[BodyNode] = field(default_factory=list)
+    closed: bool = False
+    end_stmt: LogicalStatement | None = None
+
+
 # Visibility / sharing modifiers that may lead a declaration (MS-VBAL 5.2.3).
 _LEADING_MODIFIERS: frozenset[str] = frozenset({"public", "private", "friend", "global", "static"})
 
@@ -894,6 +909,14 @@ class _Parser:
     # -- Procedure body items / block statements ---------------------------
 
     def _parse_body_item(self, stmt: LogicalStatement) -> BodyNode | None:
+        item = self._parse_statement_or_block_opener(stmt)
+        if isinstance(item, str):
+            return self._parse_block(item)
+        return item
+
+    def _parse_statement_or_block_opener(self, stmt: LogicalStatement) -> BodyNode | str | None:
+        """One body item, or, when `stmt` opens a block, the opener kind for the
+        caller to parse, so _parse_block can nest blocks without recursing."""
         ck = self._closer_kind(stmt)
         if ck:
             # Any procedure closer ends the open procedure, even from inside a
@@ -915,7 +938,7 @@ class _Parser:
             return self._make_statement(stmt)
         opener = self._opener_kind(stmt)
         if opener is not None:
-            return self._parse_block(opener)
+            return opener
         tokens = _code_tokens_after_line_number(stmt)
         if self._is_conditional_directive(tokens):
             self._cursor.next()
@@ -1033,60 +1056,86 @@ class _Parser:
         return StatementNode(span=Span(head.start, end), raw=self._source[head.start : end])
 
     def _parse_block(self, opener: str) -> BodyNode:
+        # The blocks nested in this one are frames on an explicit stack rather than
+        # recursive calls, so nesting depth is not bounded by Python's recursion
+        # limit: the VBE compiles blocks nested a thousand deep. Upstream recurses
+        # through parseBodyItem, which JavaScript's larger stack absorbs.
+        frames = [self._open_block(opener)]
+        while True:
+            frame = frames[-1]
+            nested_opener = self._fill_block(frame)
+            if nested_opener is not None:
+                frames.append(self._open_block(nested_opener))
+                continue
+            node = self._close_block(frame)
+            frames.pop()
+            if not frames:
+                return node
+            self._append_block_item(frames[-1], node)
+
+    def _open_block(self, opener: str) -> _BlockFrame:
         head = self._cursor.next()
         assert head is not None
         expected = self._block_closer(opener)
         self._open_stack.append(expected)
-        body: list[BodyNode] = []
-        # If blocks accumulate structured arms; the flat body is kept for generic
-        # body walkers and block-balance diagnostics.
-        branches: list[_IfBranchBuilder] | None = (
-            [self._start_if_branch(IfBranchKind.IF, head)] if opener == "if" else None
-        )
-        closed = False
-        end_stmt: LogicalStatement | None = None
+        branches = [self._start_if_branch(IfBranchKind.IF, head)] if opener == "if" else None
+        return _BlockFrame(opener=opener, head=head, expected=expected, branches=branches)
+
+    def _fill_block(self, frame: _BlockFrame) -> str | None:
+        """Parse the frame's statements until the block ends, or until one opens a
+        nested block, whose opener kind is returned so it is parsed first. Called
+        again once that block closes, it resumes at the statement after it."""
         while not self._cursor.at_end():
             stmt = self._cursor.peek()
             assert stmt is not None
             ck = self._closer_kind(stmt)
-            if ck == expected:
-                end_stmt = self._cursor.next()
-                closed = True
-                break
+            if ck == frame.expected:
+                frame.end_stmt = self._cursor.next()
+                frame.closed = True
+                return None
             nested = self._nested_type_or_enum_block_kind(stmt)
             if nested is not None:
-                node = self._parse_invalid_nested_module_block_statement(nested, [expected])
-                body.append(node)
-                if branches is not None:
-                    branches[len(branches) - 1].body.append(node)
+                self._append_block_item(
+                    frame, self._parse_invalid_nested_module_block_statement(nested, [frame.expected])
+                )
                 continue
             if self._is_module_level_starter(stmt):
-                break
-            if branches is not None:
+                return None
+            if frame.branches is not None:
                 marker = self._if_branch_marker(stmt)
                 if marker is not None:
                     self._cursor.next()
-                    body.append(self._make_statement(stmt))  # keep header line in flat body
-                    branches.append(self._start_if_branch(marker, stmt))
+                    frame.body.append(self._make_statement(stmt))  # keep header line in flat body
+                    frame.branches.append(self._start_if_branch(marker, stmt))
                     continue
-            item = self._parse_body_item(stmt)
+            item = self._parse_statement_or_block_opener(stmt)
             if item is None:
-                break
-            body.append(item)
-            if branches is not None:
-                branches[len(branches) - 1].body.append(item)
+                return None
+            if isinstance(item, str):
+                return item
+            self._append_block_item(frame, item)
+        return None
+
+    def _close_block(self, frame: _BlockFrame) -> BodyNode:
         self._open_stack.pop()
-        if not closed:
-            self._diag(head, f"Block is missing {_CLOSER_LABELS[expected]}.", ParseSeverity.ERROR, "MS-VBAL 5.4")
-        span = Span(head.start, (end_stmt if end_stmt is not None else head).end)
-        if opener == "if":
+        head = frame.head
+        if not frame.closed:
+            self._diag(head, f"Block is missing {_CLOSER_LABELS[frame.expected]}.", ParseSeverity.ERROR, "MS-VBAL 5.4")
+        span = Span(head.start, (frame.end_stmt if frame.end_stmt is not None else head).end)
+        if frame.opener == "if":
             return self._finish_if_block(
-                branches if branches is not None else [self._start_if_branch(IfBranchKind.IF, head)],
-                body,
-                closed,
+                frame.branches if frame.branches is not None else [self._start_if_branch(IfBranchKind.IF, head)],
+                frame.body,
+                frame.closed,
                 span,
             )
-        return self._make_block_node(opener, body, closed, span, head, end_stmt)
+        return self._make_block_node(frame.opener, frame.body, frame.closed, span, head, frame.end_stmt)
+
+    @staticmethod
+    def _append_block_item(frame: _BlockFrame, item: BodyNode) -> None:
+        frame.body.append(item)
+        if frame.branches is not None:
+            frame.branches[len(frame.branches) - 1].body.append(item)
 
     def _make_block_node(
         self,

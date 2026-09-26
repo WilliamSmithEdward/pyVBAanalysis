@@ -17,7 +17,7 @@ from ...completion import (
     MemberCompletionEntry,
     resolve_member_surface_at,
 )
-from ...conditional import ConditionalActivityTracker, collect_conditional_directives
+from ...conditional import ConditionalActivityTracker, collect_conditional_directives, inactive_node_skip
 from ...lexer.keyword_table import is_reserved_identifier
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import (
@@ -28,6 +28,7 @@ from ...parser.nodes import (
     ModuleNode,
     Span,
     is_leaf_statement,
+    iter_body_nodes,
 )
 from ...symbols.symbol_model import VbaProjectClassMembers, qualified_procedure_key
 from ..call_extraction import CallableTypeSignature
@@ -37,7 +38,6 @@ from ..walker import (
     block_footer_line_span,
     block_header_line_span,
     first_executable_token_index,
-    is_inactive_node,
     statement_tokens_after_leading_label,
     token_name,
     token_text,
@@ -220,20 +220,17 @@ def for_each_undeclared_reference_span(
     activity: ConditionalActivityTracker | None = None,
 ) -> None:
     """Visit one span per executable statement / block-header / Do-footer line."""
-    for node in body:
-        if is_inactive_node(activity, node):
-            continue
+    for node in iter_body_nodes(body, inactive_node_skip(activity)):
         if is_leaf_statement(node):
             visit(node.span)
             continue
-        child = getattr(node, "body", None)
-        if isinstance(child, list):
+        # A block: its header and footer lines here, its body next in the walk.
+        if isinstance(getattr(node, "body", None), list):
             visit(block_header_line_span(source, node.span))
             if isinstance(node, DoBlockNode):
                 footer = block_footer_line_span(source, node.span)
                 if footer.start > node.span.start:
                     visit(footer)
-            for_each_undeclared_reference_span(source, child, visit, activity)
 
 
 def value_read_references(

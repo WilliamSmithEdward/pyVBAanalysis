@@ -20,7 +20,15 @@ from dataclasses import dataclass
 
 from ..lexer.token_helpers import token_name, token_word
 from ..lexer.token_kinds import TokenKind, VbaToken
-from ..parser.nodes import BodyNode, IfBlockNode, IfBranchKind, LeafStatementNode, is_leaf_statement
+from ..parser.nodes import (
+    BodyNode,
+    IfBlockNode,
+    IfBranchKind,
+    IfBranchNode,
+    LeafStatementNode,
+    is_leaf_statement,
+    iter_body_nodes,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,41 +147,77 @@ def walk_branch_merged_body(
     sound for procedures WITHOUT unstructured control flow; callers gate on
     procedure_has_unstructured_flow and fall back to walk_straight_line_body.
     """
-    for node in _active_runs(body, is_inactive):
-        if isinstance(node, tuple):
-            _walk_single_line_if_tail(node, hooks)
+    # The bodies being walked and the If blocks being merged are frames on a
+    # stack, not recursive calls, so nesting depth is not bounded by Python's
+    # recursion limit. A merge frame walks its arms one at a time: each arm body
+    # goes on top of it and, when that body is done, the merge takes the arm's
+    # state and starts the next.
+    frames: list[_BodyWalk | _IfMerge] = [_BodyWalk(_active_runs(body, is_inactive))]
+    while frames:
+        frame = frames[-1]
+        if isinstance(frame, _IfMerge):
+            nested = _next_if_merge_arm(frame, is_inactive, hooks)
+            if nested is None:
+                frames.pop()
+            else:
+                frames.append(nested)
             continue
-        if is_leaf_statement(node):
-            hooks.on_statement(node)
-            continue
-        if hooks.on_block is not None:
-            hooks.on_block(node)
-        if (
-            isinstance(node, IfBlockNode)
-            and hooks.snapshot_state is not None
-            and hooks.restore_state is not None
-            and hooks.set_state is not None
-            and hooks.lattice is not None
-        ):
-            _merge_if_block(node, is_inactive, hooks)
-            continue
-        child = getattr(node, "body", None)
-        if isinstance(child, list):
-            for lower in _collect_nested_touches(child, is_inactive, hooks):
-                hooks.demote_to_unknown(lower)
+        for node in frame.runs:
+            if isinstance(node, tuple):
+                _walk_single_line_if_tail(node, hooks)
+                continue
+            if is_leaf_statement(node):
+                hooks.on_statement(node)
+                continue
+            if hooks.on_block is not None:
+                hooks.on_block(node)
+            if (
+                isinstance(node, IfBlockNode)
+                and hooks.snapshot_state is not None
+                and hooks.restore_state is not None
+                and hooks.set_state is not None
+                and hooks.lattice is not None
+            ):
+                merge = _start_if_merge(node, is_inactive, hooks)
+                if merge is not None:
+                    frames.append(merge)
+                    break
+                continue
+            child = getattr(node, "body", None)
+            if isinstance(child, list):
+                for lower in _collect_nested_touches(child, is_inactive, hooks):
+                    hooks.demote_to_unknown(lower)
+        else:
+            frames.pop()
 
 
-def _merge_if_block(
+@dataclass(slots=True)
+class _BodyWalk:
+    """A body walk_branch_merged_body is part way through."""
+
+    runs: Iterator[BodyNode | tuple[LeafStatementNode, ...]]
+
+
+@dataclass(slots=True)
+class _IfMerge:
+    """An If block whose arms walk_branch_merged_body is walking one at a time."""
+
+    touched: set[str]
+    entry: dict[str, str]
+    arms: Iterator[IfBranchNode]
+    arm_states: list[dict[str, str]]
+    walking_arm: bool = False
+
+
+def _start_if_merge(
     if_block: IfBlockNode,
     is_inactive: Callable[[BodyNode], bool],
     hooks: DataflowHooks,
-) -> None:
-    """Intersect the per-arm state of one If block (see walk_branch_merged_body)."""
+) -> _IfMerge | None:
+    """Begin intersecting the per-arm state of one If block (see
+    walk_branch_merged_body), or settle it at once when it has no else arm."""
     snapshot = hooks.snapshot_state
-    restore = hooks.restore_state
-    set_state = hooks.set_state
-    lattice = hooks.lattice
-    assert snapshot is not None and restore is not None and set_state is not None and lattice is not None
+    assert snapshot is not None
 
     touched = _collect_nested_touches(if_block.body, is_inactive, hooks)
     has_else = any(branch.branch_kind is IfBranchKind.ELSE for branch in if_block.branches)
@@ -183,17 +227,32 @@ def _merge_if_block(
         # conservative behavior by demoting every touched name.
         for lower in touched:
             hooks.demote_to_unknown(lower)
-        return
-    entry = snapshot()
-    arm_states: list[dict[str, str]] = []
-    for branch in if_block.branches:
-        restore(entry)
-        walk_branch_merged_body(branch.body, is_inactive, hooks)
-        arm_states.append(snapshot())
-    restore(entry)
-    for lower in touched:
-        fallback = entry.get(lower, lattice.unknown)
-        set_state(lower, _join_branch_states(arm_states, lower, fallback, lattice))
+        return None
+    return _IfMerge(touched=touched, entry=snapshot(), arms=iter(if_block.branches), arm_states=[])
+
+
+def _next_if_merge_arm(
+    merge: _IfMerge, is_inactive: Callable[[BodyNode], bool], hooks: DataflowHooks
+) -> _BodyWalk | None:
+    """Take the state the arm just walked left, then return the next arm's body to
+    walk from the entry state, or join the arms and return None after the last."""
+    snapshot = hooks.snapshot_state
+    restore = hooks.restore_state
+    set_state = hooks.set_state
+    lattice = hooks.lattice
+    assert snapshot is not None and restore is not None and set_state is not None and lattice is not None
+
+    if merge.walking_arm:
+        merge.arm_states.append(snapshot())
+    branch = next(merge.arms, None)
+    restore(merge.entry)
+    if branch is not None:
+        merge.walking_arm = True
+        return _BodyWalk(_active_runs(branch.body, is_inactive))
+    for lower in merge.touched:
+        fallback = merge.entry.get(lower, lattice.unknown)
+        set_state(lower, _join_branch_states(merge.arm_states, lower, fallback, lattice))
+    return None
 
 
 def _join_branch_states(
@@ -227,17 +286,11 @@ def _collect_nested_touches(
     is_inactive: Callable[[BodyNode], bool],
     hooks: DataflowHooks,
 ) -> set[str]:
-    """Recursively collect tracked names touched anywhere inside nested bodies."""
+    """Collect tracked names touched anywhere inside nested bodies."""
     out: set[str] = set()
-    for node in body:
-        if is_inactive(node):
-            continue
+    for node in iter_body_nodes(body, is_inactive):
         if is_leaf_statement(node):
             out.update(hooks.touches_in_statement(node))
-            continue
-        child = getattr(node, "body", None)
-        if isinstance(child, list):
-            out.update(_collect_nested_touches(child, is_inactive, hooks))
     return out
 
 

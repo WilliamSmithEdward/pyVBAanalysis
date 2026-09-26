@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from ..conditional import ConditionalActivityTracker
+from ..conditional import ConditionalActivityTracker, inactive_node_skip
 from ..lexer.token_helpers import (
     cached_statement_tokens,
     token_word,
     tokens_without_leading_line_number,
 )
-from ..parser.nodes import BodyNode, ProcedureNode, Span, is_leaf_statement
+from ..parser.nodes import BodyNode, ProcedureNode, Span, is_leaf_statement, iter_body_nodes
 from .procedure_labels import (
     collect_procedure_label_declarations,
     collect_procedure_label_references,
@@ -46,17 +46,10 @@ def procedure_has_unstructured_flow(
 def _has_on_error_or_resume_statement(
     body: Sequence[BodyNode], source: str, activity: ConditionalActivityTracker | None
 ) -> bool:
-    for node in body:
-        if activity is not None and activity.is_inactive(node.span):
-            continue
-        if is_leaf_statement(node):
-            if _is_on_error_or_resume(source, node.span):
-                return True
-        else:
-            child = getattr(node, "body", None)
-            if isinstance(child, list) and _has_on_error_or_resume_statement(child, source, activity):
-                return True
-    return False
+    return any(
+        is_leaf_statement(node) and _is_on_error_or_resume(source, node.span)
+        for node in iter_body_nodes(body, inactive_node_skip(activity))
+    )
 
 
 def _is_on_error_or_resume(source: str, span: Span) -> bool:

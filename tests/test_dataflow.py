@@ -72,6 +72,22 @@ def test_straight_line_set() -> None:
     assert _track_x(src, merged=True) == "set"
 
 
+def test_branch_merge_of_if_blocks_nested_past_the_recursion_limit() -> None:
+    # If blocks nested in each other's Else arms, 600 deep, with x set on every
+    # arm. The merge used to recurse twice per level and raise RecursionError
+    # near 490; its arms now wait on a stack.
+    depth = 600
+    src = (
+        "Sub S\n"
+        + "    If c Then\n        x = 1\n    Else\n" * depth
+        + "        x = 1\n"
+        + "    End If\n" * depth
+        + "End Sub"
+    )
+    assert _track_x(src, merged=True) == "set"
+    assert _track_x(src, merged=False) == "unknown"
+
+
 def test_if_without_else_demotes_on_both_walks() -> None:
     src = "Sub S\n    If c Then\n        x = 1\n    End If\nEnd Sub"
     assert _track_x(src, merged=False) == "unknown"

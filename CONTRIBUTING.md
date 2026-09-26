@@ -104,6 +104,11 @@ run ends. `harness.py unpatch` restores a pin a run left patched, and
 ## Adding or changing a rule
 
 * Port the rule from its XLIDE source; match the behavior, not just the shape.
+* Walk a procedure body with `iter_body_nodes` or `iter_body_nodes_in_context`
+  (`pyvbaanalysis/parser/nodes.py`), not with a function that calls itself for
+  each nested block. XLIDE's walks recurse, which JavaScript's stack absorbs;
+  Python stops at 1,000 frames, and the VBE compiles blocks nested a thousand
+  deep. `tests/test_deep_nesting.py` fails on a walk that recurses per block.
 * A rule ships only with oracle backing. Validate it against the vendored corpus
   and add direct tests for the positive and the no-false-positive control cases.
 * The diagnostic rule registry order is a contract: it is the diagnostic

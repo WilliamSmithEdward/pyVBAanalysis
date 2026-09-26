@@ -14,7 +14,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from ..conditional import ConditionalActivityTracker
+from ..conditional import ConditionalActivityTracker, inactive_node_skip
 from ..lexer.token_helpers import (
     split_top_level_token_groups,
     cached_statement_tokens,
@@ -23,7 +23,14 @@ from ..lexer.token_helpers import (
     tokens_without_leading_line_number,
 )
 from ..lexer.token_kinds import TokenKind, VbaToken
-from ..parser.nodes import BodyNode, LeafStatementNode, ProcedureNode, Span, is_leaf_statement
+from ..parser.nodes import (
+    BodyNode,
+    LeafStatementNode,
+    ProcedureNode,
+    Span,
+    is_leaf_statement,
+    iter_body_nodes,
+)
 
 _DECIMAL_LABEL_RE = re.compile(r"^\d+$")
 
@@ -255,15 +262,9 @@ def _for_each_procedure_statement(
     visit: Callable[[LeafStatementNode], None],
     activity: ConditionalActivityTracker | None,
 ) -> None:
-    for node in body:
-        if activity is not None and activity.is_inactive(node.span):
-            continue
+    for node in iter_body_nodes(body, inactive_node_skip(activity)):
         if is_leaf_statement(node):
             visit(node)
-        else:
-            child = getattr(node, "body", None)
-            if isinstance(child, list):
-                _for_each_procedure_statement(child, visit, activity)
 
 
 def _absolute_span(base: Span, token: VbaToken) -> Span:
