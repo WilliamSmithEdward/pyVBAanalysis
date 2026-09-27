@@ -5,6 +5,134 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 2.3.0 - 2026-09-26
+
+Sync to XLIDE 10.14.0 (commit 110c76e), from 10.7.1. Upstream measured the
+analyzer against Excel, Word and PowerPoint 16.0 (build 20326) through
+pyVBAharness and answered each finding (XLIDE issues #96 to #148): 34 new
+diagnostics, 19 of them runtime errors in code the VBE compiles, and false
+positives removed on code that compiles and runs. XLIDE 10.7.2, 10.8.0, 10.11.0
+and 10.12.0 changed nothing the port reads.
+
+The port now returns what XLIDE shows, not its raw rule list, and it analyzes
+procedures nested past Python's recursion limit and long With blocks and member
+chains in linear time.
+
+### Added
+
+* Nineteen runtime errors in code the VBE compiles, each reported as "This will
+  raise Run-time error ...":
+  * Overflow (#116): `arithmetic-overflow` for Integer arithmetic such as
+    `60 * 60 * 24`, an assignment that rounds past its target, and conversions
+    out of range; `for-counter-overflow` for `For i = 1 To 32767` on an Integer.
+  * Control flow (#117): `handler-fall-through` into an error handler that
+    re-raises, `resume-without-error`, `return-without-gosub`, and
+    `recursive-property-accessor`.
+  * Collections and Variants (#121): `collection-index-out-of-range`,
+    `collection-key-not-found`, `collection-key-in-use`, `variant-value-misuse`
+    and `runtime-member-not-found` (438 on a late-bound object).
+  * Host arguments (#122): `host-argument-out-of-range` for index 0 into a
+    1-based Office collection, `Cells(0, 1)` or an Offset off the sheet;
+    `multi-cell-range-as-scalar`; `sheet-name-invalid`.
+  * File statements (#123): `file-number-zero`, `file-used-after-close`,
+    `file-mode-mismatch`, `file-already-open` and `file-record-zero`.
+* Fifteen compile errors: `const-overflow` (#116); `array-parameter-form`,
+  `bracketed-variable-name` and `duplicate-deftype` (#124);
+  `collection-operand`, `sub-used-as-value`, `implements-member-missing`,
+  `implements-member-signature` and `rem-after-then` (#125);
+  `directive-trailing-statement` and `duplicate-const-directive` (#130);
+  `stray-character` for characters VBA does not use and a no-break space
+  (#132); `line-too-long`, `date-literal-invalid` and `float-literal-overflow`
+  (#133).
+* Existing rules report more of what the code states (#118 to #120, #124 to
+  #126): `Asc("")`, `Sqr(-1)`, `Log(0)`, `CLng("abc")`, `"abc" + 1` into a
+  Variant, a divisor local that holds 0, array bounds known from `Split`,
+  `Array` or a Range literal's `Value`, `ReDim a(-1)`, `Next i, j` out of
+  order, and the line continuations the VBE refuses.
+* `AnalyzeModuleOptions.raw_rule_output`: the rules' own list, as upstream's
+  `analyzeModule` returns it, without the two steps below.
+* `resolve_host_member` in `pyvbaanalysis.host`, and `declaredType` on a host
+  model member: the type its library declares, where the model's `returns`
+  is repaired from the reference documentation.
+
+### Changed
+
+* `analyze_module`, and everything built on it, returns what XLIDE shows. A
+  runtime-error finding under `On Error Resume Next`, from that statement to the
+  next `On Error` or the end of the procedure, is dropped, since the error is
+  raised and handled there (`n = UBound(a)` is the usual allocated-array
+  test, XLIDE issue #106). Findings with one code and span are merged, the later
+  one kept. `diagnostics/module_analysis.py` ports both from XLIDE's
+  `analyzeVbaModuleSource`.
+* `member-not-found` works in Word, PowerPoint and Access: their models carry
+  the type libraries' hidden members and prove a member absent where the
+  library marks the interface NONEXTENSIBLE (#127). Document, Form, Report and
+  Control stay open. The data file `excel_closed_types.json` is replaced by
+  `host_closed_types.json`, which covers all four hosts.
+* A host member the type library declares `As Object`, such as `ActiveSheet`
+  or a `Worksheets(1)` item, is late bound (#114).
+* A hex or octal literal is the signed value of its bits: `&H8000` is -32768
+  and `&H80000000` is -2147483648 (#141). `parse_vba_integer_literal` returns
+  that value.
+* The parser opens and closes a block written in a one-line If's tail (#128),
+  reads `Else:` as the If's Else (#129), counts a block keyword restated in both
+  arms of an `#If` once (#130), and reads a numbered one-line If with an `=`
+  condition as an If (#131).
+* An Enum value or Optional default keeps its leading number, so `= 300 - 100`
+  is not the literal -100, and a module's Consts fold once with a procedure's
+  own Consts layered on top (XLIDE 10.13.0).
+
+### Fixed
+
+* False positives on code the VBE compiles and runs (#96 to #115): `Choose` and
+  `Switch` arity, `Open path` without `For`, `On Local Error`, a ReDim that
+  declares its array, `total&+1`, a library qualifier such as `Excel.`, a
+  `#Const` never defined, DAO constants in Access, `Left(Null, 1)`, a string
+  into a Byte array, a division the code guards, the Let and Set pairings of a
+  property, Nothing tracking past a GoSub or an early `Exit For`, two project
+  types sharing an instance, a Public Enum in a class, a Const or parenthesized
+  ByRef argument, `Len` in an Enum value, Option placement after a Deftype, and
+  a Function's return assigned by For, ReDim, `Line Input #` or `Get #`.
+* False positives found by this port's own hunt and fixed upstream in 10.14.0
+  (#140 to #147): `If c Is Nothing Then Set c = New Collection`, `Set a(i) = c`
+  and `AddressOf` a Sub reported as compile errors; Win32 flag Enums such as
+  `GENERIC_READ = &H80000000` as Overflow; `Err.Raise vbObjectError + 513` as
+  error 5; the `;` of `If x Then Debug.Print a; b`; a string default holding a
+  comma in an Implements signature; `32000 \ 2 * 4` folded at the wrong
+  precedence; a For counter in a loop that leaves through `Exit For`; a file
+  reopened after `Reset` or a closing helper, an error handler's `Print #`,
+  and hex file numbers; and an item added through `Set o = c`.
+* Misses from the same issues: `1 Mod 200 * 200` (error 6), `Resume Next`
+  after `On Error GoTo -1` (20), a `Print #` after `Reset` (52), a duplicate
+  key added through an alias (457), and a read-write interface property
+  implemented with its Get alone.
+* `analyze_project` raised RecursionError on a procedure nested about 490 blocks
+  deep, where the VBE compiles a thousand. Every walk over a procedure body now
+  runs on an explicit stack, and `tests/test_deep_nesting.py` fails on one that
+  recurses per block.
+
+### Performance
+
+* A long With block and a long member chain are analyzed in linear time: the
+  pass keeps upstream's With-scan index (XLIDE issue #134) and receiver-chain
+  results (#135). A 500-line With block took 14.2 seconds in 2.2.1 and takes
+  0.19; a 3,000-member chain took 16 seconds and takes 0.56.
+* Expression strings the parser carried on their own are lexed without
+  evicting the module from the token cache, and a test fails if one pass lexes
+  a module twice (#139). On two parts of the differential corpus's Office files
+  (66 modules), 2.3.0 is 12% faster than 2.2.1, new rules included.
+
+### Verified
+
+* Upstream's own 10.14.0 test suite, recorded and replayed through the port:
+  1419 standalone and 992 project calls, identical in code, span and message.
+* The oracle corpus (2155 diagnostics in 1229 modules), 16 real workbooks, 195
+  Office files of every host, 693 further projects (948 modules) and 7 VB6
+  projects: identical findings from both analyzers, compared at what XLIDE
+  shows.
+* Every expectation in the new sync tests was also run through the pinned
+  upstream analyzer.
+
 ## 2.2.1 - 2026-09-23
 
 Sync to XLIDE 10.7.1 (commit 6ead73d), from 10.6.0. Upstream fixed how its
