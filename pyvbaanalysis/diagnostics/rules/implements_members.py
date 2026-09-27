@@ -129,6 +129,26 @@ def check_implements_members(
                     absolute_span(member.span, name_token),
                 )
                 continue
+            # A readable and writable property (a Public variable of the interface,
+            # or a Get with a Let or Set) needs both accessors; Excel refuses the
+            # project with the Get alone (XLIDE issue #144, measured).
+            if required.kind == "property" and required.writable and required.returns:
+                has_get = any(
+                    impl.kind is VbaSymbolKind.PROPERTY_GET for impl in implementations
+                )
+                has_setter = any(
+                    impl.kind is VbaSymbolKind.PROPERTY_LET or impl.kind is VbaSymbolKind.PROPERTY_SET
+                    for impl in implementations
+                )
+                if not has_get or not has_setter:
+                    push(
+                        "implementsMemberMissing",
+                        f"Object module needs to implement '{required.name}' for interface "
+                        f"'{contract.name}': add a Property {'Let or Set' if has_get else 'Get'} "
+                        f"'{contract.name}_{required.name}' beside the Property "
+                        f"{'Get' if has_get else 'Let'}.",
+                        absolute_span(member.span, name_token),
+                    )
             for implementation in implementations:
                 problem = _signature_mismatch(required, implementation)
                 if problem:
@@ -165,20 +185,36 @@ def _parse_signature(signature: str | None) -> _ParsedSignature | None:
     open_index = signature.find("(")
     if open_index < 0:
         return None
+    # Parentheses and commas inside a string default are text: `Optional sep As
+    # String = ", "` is one parameter and `= ")"` does not end the list (XLIDE
+    # issue #144).
     depth = 0
     close = -1
+    in_string = False
+    parts: list[str] = []
+    part_start = open_index + 1
     for i in range(open_index, len(signature)):
-        if signature[i] == "(":
+        ch = signature[i]
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "(":
             depth += 1
-        elif signature[i] == ")":
+        elif ch == ")":
             depth -= 1
             if depth == 0:
                 close = i
                 break
+        elif ch == "," and depth == 1:
+            parts.append(signature[part_start:i])
+            part_start = i + 1
     if close < 0:
         return None
+    parts.append(signature[part_start:close])
     inner = js_trim(signature[open_index + 1 : close])
-    params = [] if len(inner) == 0 else [_parse_param(part) for part in inner.split(",")]
+    params = [] if len(inner) == 0 else [_parse_param(part) for part in parts]
     returns_match = _RETURNS_RE.search(signature[close:])
     return _ParsedSignature(
         params,

@@ -10,7 +10,7 @@ from pyvbaanalysis.evidence import DATA_DIR, load_audit, load_manifest, load_ora
 def test_oracle_cases_load() -> None:
     cases = load_oracle_cases()
     manifest = load_manifest()
-    assert len(cases) == manifest["oracleCaseCount"] == 572
+    assert len(cases) == manifest["oracleCaseCount"] == 596
     assert all(c.modules for c in cases)
     assert all(m.source for c in cases for m in c.modules)
     assert all(c.expected in ("rejected", "accepted", "observe") for c in cases)

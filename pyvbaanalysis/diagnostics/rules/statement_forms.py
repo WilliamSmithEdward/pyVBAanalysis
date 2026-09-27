@@ -20,7 +20,7 @@ from collections.abc import Set as AbstractSet
 
 from ...conditional import ConditionalActivityTracker
 from ...lexer.token_kinds import TokenKind, VbaToken
-from ...parser.nodes import LeafStatementNode, ModuleNode, ProcedureNode, Span
+from ...parser.nodes import LeafStatementNode, ModuleNode, ProcedureNode, Span, StatementNode
 from ...symbols.symbol_model import ModuleSymbols, VbaProcedureSignature, VbaSymbolKind
 from ...types.type_inference import procedure_symbol_for, type_environment_for
 from ...types.type_names import normalize_type
@@ -28,8 +28,8 @@ from ..context import PushFn
 from ..walker import (
     active_module_members,
     bare_assignment_target,
+    first_executable_token_index,
     for_each_statement,
-    set_assignment_target,
     statement_and_branch_spans,
     statement_tokens,
     token_name,
@@ -99,12 +99,29 @@ def _check_statement(
                     _token_span(span, toks[then + 1]),
                 )
         target = bare_assignment_target(source, span)
-        # A Set's `=` is the assignment too: `Set c = New Collection` is no operand.
-        assigns = target is not None or set_assignment_target(source, span) is not None
+        # A Set's `=` is the assignment too: `Set c = New Collection` is no operand,
+        # and neither is `Set cols(1) = c`, whose target is indexed (XLIDE #140).
+        first = first_executable_token_index(toks)
+        assigns = target is not None or token_text(_at(toks, first)) == "set"
         eq = _find_index(toks, lambda tok: tok.raw_text == "=") if assigns else -1
-        for i, tok in enumerate(toks):
+        # A one-line If is judged as its condition here; each branch is its own span
+        # with its own assignment (XLIDE issue #140: `If c Is Nothing Then Set c =
+        # New Collection`).
+        then = (
+            _find_index(toks, lambda tok: token_text(tok) == "then")
+            if token_text(_at(toks, first)) == "if"
+            and isinstance(stmt, StatementNode)
+            and stmt.single_line_if_branches is not None
+            else -1
+        )
+        limit = then if then > 0 else len(toks)
+        for i in range(limit):
+            tok = toks[i]
             name = token_name(tok)
             if not name or _raw_at(toks, i - 1) == "." or _raw_at(toks, i + 1) == ":=" or i == eq - 1:
+                continue
+            # `AddressOf TimerProc` takes the procedure's address, not its value.
+            if token_text(_at(toks, i - 1)) == "addressof":
                 continue
             lower = name.lower()
             following = _raw_at(toks, i + 1)

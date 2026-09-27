@@ -128,8 +128,6 @@ _CONVERSION_NAMES: dict[str, str] = {
 
 _INTEGER_SUFFIX_RE = re.compile(r"[%&^]$")
 _FLOAT_SUFFIX_RE = re.compile(r"[!#@]$")
-_RADIX_PREFIX_RE = re.compile(r"^&[hHoO]")
-_HEX_PREFIX_RE = re.compile(r"^&[hH]")
 _EXPONENT_LETTER_RE = re.compile(r"[dD]")
 _VOWEL_START_RE = re.compile(r"^[AEIOU]")
 
@@ -182,19 +180,9 @@ def _literal_typed(tok: VbaToken) -> _Typed | None:
             return _Typed(value, "long")
         if suffix == "^":
             return None  # LongLong is not modelled here
-        if _RADIX_PREFIX_RE.search(raw) is not None:
-            # A hex or octal literal of four hex digits (or fewer) is an Integer
-            # with 16-bit wraparound: &H8000 is -32768, &HFFFF is -1.
-            digits = _INTEGER_SUFFIX_RE.sub("", _RADIX_PREFIX_RE.sub("", raw, count=1), count=1)
-            is_hex = _HEX_PREFIX_RE.search(raw) is not None
-            fits16 = len(digits) <= 4 if is_hex else value <= 0xFFFF
-            if fits16 and value > 32767:
-                return _Typed(value - 65536, "integer")
-            if fits16:
-                return _Typed(value, "integer")
-            if 2147483647 < value <= 0xFFFFFFFF:
-                return _Typed(value - 4294967296, "long")
-            return _Typed(value, "long")
+        # A hex or octal literal arrives already signed by its width
+        # (parse_vba_integer_literal, XLIDE issue #141): &H8000 is -32768 and an
+        # Integer, &H80000000 is -2147483648 and a Long.
         if _in_range(value, "integer"):
             return _Typed(value, "integer")
         if _in_range(value, "long"):
@@ -261,21 +249,46 @@ class _TypedFolder:
             left = self._combine(left, right, op.raw_text, start, self._index - 1)
         return left
 
-    def _multiplicative(self) -> _Folded:
+    # MS-VBAL 5.6.9 arithmetic precedence, highest first: ^, unary minus, * and /,
+    # \, Mod, + and -. Folding *, /, \, Mod and ^ at one level read `32000 \ 2 * 4`
+    # as 16000 * 4 and reported an overflow on code that runs, and missed
+    # `1 Mod 200 * 200`, which does overflow (XLIDE issue #145).
+    def _left_associative(
+        self,
+        operators: tuple[str, ...],
+        left: Callable[[], _Folded],
+        right: Callable[[], _Folded] | None = None,
+    ) -> _Folded:
+        operand_of = right if right is not None else left
         start = self._index
-        left = self._unary()
-        while isinstance(left, _Typed):
+        value = left()
+        while isinstance(value, _Typed):
             op = self._at(self._index)
-            word = token_text(op) if op is not None else ""
-            if op is None or not (op.raw_text in ("*", "/", "\\", "^") or word == "mod"):
+            if op is None:
+                break
+            word = op.raw_text if op.kind is TokenKind.OPERATOR else token_text(op)
+            if word not in operators:
                 break
             self._index += 1
-            right = self._unary()
-            if not isinstance(right, _Typed):
-                return right
-            symbol = "^" if op.raw_text == "^" else "mod" if word == "mod" else op.raw_text
-            left = self._combine(left, right, symbol, start, self._index - 1)
-        return left
+            operand = operand_of()
+            if not isinstance(operand, _Typed):
+                return operand
+            value = self._combine(value, operand, word, start, self._index - 1)
+        return value
+
+    def _multiplicative(self) -> _Folded:
+        return self._left_associative(("mod",), self._integer_division)
+
+    def _integer_division(self) -> _Folded:
+        return self._left_associative(("\\",), self._product)
+
+    def _product(self) -> _Folded:
+        return self._left_associative(("*", "/"), self._unary)
+
+    def _power(self) -> _Folded:
+        """`a ^ b` binds above unary minus (`-2 ^ 2` is -4); the exponent may carry
+        its own sign."""
+        return self._left_associative(("^",), self._primary, self._unary)
 
     def _unary(self) -> _Folded:
         tok = self._at(self._index)
@@ -295,7 +308,7 @@ class _TypedFolder:
                     f"which does not fit {_label(operand.type)}",
                 )
             return _Typed(value, operand.type)
-        return self._primary()
+        return self._power()
 
     def _primary(self) -> _Folded:
         tok = self._at(self._index)
@@ -831,6 +844,35 @@ def _check_statement(
     return None
 
 
+_LOOP_LEAVING_EXITS = frozenset({"for", "sub", "function", "property"})
+
+
+def _body_may_leave_loop(source: str, body: Sequence[BodyNode]) -> bool:
+    """True when a statement in the loop's body can leave the loop before the
+    counter passes its type: `Exit For` (not one belonging to a nested For),
+    `Exit Sub`/`Function`/`Property`, `GoTo`, or `End` (XLIDE issue #145). Such a
+    loop's overflow is not proved, so it is not reported.
+
+    Upstream recurses into each nested body; the explicit-stack walk visits the
+    same statements, each with whether a nested For holds it.
+    """
+    for node, inside_nested_for in iter_body_nodes_in_context(
+        body, False, lambda block, outer: outer or isinstance(block, ForBlockNode)
+    ):
+        if not is_leaf_statement(node):
+            continue
+        toks = statement_tokens_after_leading_label(source, node.span)
+        for i, tok in enumerate(toks):
+            word = token_text(tok)
+            if word == "goto" or (word == "end" and len(toks) == 1):
+                return True
+            if word == "exit":
+                target = token_text(_token_at(toks, i + 1))
+                if target in _LOOP_LEAVING_EXITS and (target != "for" or not inside_nested_for):
+                    return True
+    return False
+
+
 def _check_for_counter(
     source: str,
     node: ForBlockNode,
@@ -892,7 +934,7 @@ def _check_for_counter(
         overflows = last + step_value.value > bounds.max
     else:
         overflows = last + step_value.value < bounds.min
-    if not overflows:
+    if not overflows or _body_may_leave_loop(source, node.body):
         return
     push(
         "forCounterOverflow",

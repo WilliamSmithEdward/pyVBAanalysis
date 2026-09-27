@@ -60,8 +60,9 @@ from ..walker import (
 # The heads of the plain statements that always leave the place they stand.
 _LEAVING_HEADS = frozenset({"exit", "goto", "return", "resume", "end", "stop", "error"})
 
-# /^0+$/, used with fullmatch.
+# /^0+$/ and /^0*1$/, used with fullmatch.
 _ZEROS_RE = re.compile(r"0+")
+_ONE_RE = re.compile(r"0*1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,15 +246,19 @@ def _check_resume_without_error(
                 and any(token_text(tok) == "error" for tok in toks)
                 and any(token_text(tok) == "goto" for tok in toks)
             ):
-                # `On Error GoTo 0` installs nothing; a label does.
+                # `On Error GoTo 0` and `On Error GoTo -1` install nothing; a label
+                # does. The lexer gives `-1` as two tokens (XLIDE issue #142).
                 target = toks[-1]
-                if (
-                    not (
-                        target.kind is TokenKind.INTEGER_LITERAL
-                        and _ZEROS_RE.fullmatch(target.raw_text) is not None
-                    )
-                    and token_text(target) != "-1"
-                ):
+                zero = (
+                    target.kind is TokenKind.INTEGER_LITERAL
+                    and _ZEROS_RE.fullmatch(target.raw_text) is not None
+                )
+                minus_one = (
+                    target.kind is TokenKind.INTEGER_LITERAL
+                    and _ONE_RE.fullmatch(target.raw_text) is not None
+                    and _raw_at(toks, len(toks) - 2) == "-"
+                )
+                if not zero and not minus_one:
                     installs_handler = True
             if head == "resume":
                 resumes.append(Span(span.start + toks[0].start, span.start + toks[0].end))

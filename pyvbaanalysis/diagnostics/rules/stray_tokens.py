@@ -14,6 +14,8 @@ Excel 16.0 (build 20326, 2026-09-26):
 
 from __future__ import annotations
 
+import re
+
 from ...conditional import ConditionalActivityTracker
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize_cached
@@ -31,6 +33,9 @@ _PRINT_LIKE: frozenset[str] = frozenset({"print", "write", "debug"})
 _TYPE_DECLARATION_CHARACTERS: frozenset[str] = frozenset({"$", "%", "&", "!", "#", "@"})
 
 _NAME_KINDS = (TokenKind.IDENTIFIER, TokenKind.KEYWORD, TokenKind.BRACKETED_IDENTIFIER)
+
+# /^\d+$/: JavaScript's `\d` is ASCII only.
+_DIGITS_RE = re.compile(r"[0-9]+")
 
 # U+00A0, spelled as a code point so the source stays plain ASCII.
 _NO_BREAK_SPACE = chr(0xA0)
@@ -54,9 +59,23 @@ def check_stray_characters(
         prior = previous
         previous = tok
         if statement_head is None:
+            # A line number is not the statement: `10 Debug.Print "a"; "b"` (XLIDE
+            # issue #143). The next token is the head.
+            if (
+                tok.kind is TokenKind.INTEGER_LITERAL
+                and prior is None
+                and _DIGITS_RE.fullmatch(tok.raw_text) is not None
+            ):
+                previous = None
+                continue
             statement_head = tok
             # `#Const`, `#If` lines are directives; `Print #1, x` names a file.
             after_hash = tok.kind is TokenKind.DIRECTIVE
+        elif tok.kind is TokenKind.KEYWORD and token_text(tok) in ("then", "else"):
+            # A one-line If runs a statement after Then and another after Else:
+            # `If x Then Debug.Print a; b` is a Print list (XLIDE issue #143).
+            statement_head = None
+            continue
         span = Span(tok.start, tok.end)
         if tok.kind is TokenKind.UNKNOWN:
             # A run of such characters (four NBSPs as an indent) is one finding.

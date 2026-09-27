@@ -17,10 +17,12 @@ and raises every time it runs.
  - file-record-zero (63, Bad record number): `Seek #f, 0`, `Get #f, 0, x`,
    `Put #f, 0, x` - records and Binary positions start at 1.
 
-A file number is a literal, or a local that FreeFile fills once. The rule
-follows the top-level statements of a procedure in order; a block between two
-statements that could touch the number ends what is known about it, and a
-number named inside a block is never followed.
+A file number is a literal, hex or octal included, or a local that FreeFile
+fills once. The rule follows the top-level statements of a procedure in order; a
+block between two statements that could touch the number ends what is known
+about it, and a number named inside a block is never followed. A label, a GoSub
+or a call to a procedure ends everything known, and Reset or a Close with no
+number closes every open file (XLIDE issue #146).
 """
 
 from __future__ import annotations
@@ -30,7 +32,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, Union
 
+from ...call.call_context import bare_call_statement_target
 from ...conditional import ConditionalActivityTracker, inactive_node_skip
+from ...constants.integer_constant_expression import parse_vba_integer_literal
+from ...flow.procedure_labels import statement_label_declaration
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import (
     BodyNode,
@@ -79,9 +84,6 @@ _FILE_STATEMENTS = frozenset(
 _FILE_NUMBER_FUNCTIONS = frozenset({"lof", "eof", "loc", "fileattr", "seek"})
 
 _ZERO_LITERAL_RE = re.compile(r"0+[%&^]?")
-_LEADING_DIGITS_RE = re.compile(r"[0-9]+")
-# JavaScript's Number.MAX_SAFE_INTEGER: every integer up to it prints exactly.
-_MAX_SAFE_INTEGER = 2**53 - 1
 
 
 def check_file_statements(
@@ -111,6 +113,20 @@ def check_file_statements(
                 # A single-line If runs its statement on one path only.
                 for key in _file_number_keys_in(toks):
                     states.pop(key, None)
+                continue
+            # A label may be reached from anywhere, an error handler's included, so
+            # nothing is known there; and a call to a procedure may open or close any
+            # file (XLIDE issue #146).
+            if (
+                statement_label_declaration(source, node.span) is not None
+                or token_text(toks[0]) == "gosub"
+            ):
+                states.clear()
+            if (
+                not _is_file_statement_head(token_text(toks[0]))
+                and bare_call_statement_target(source, node.span) is not None
+            ):
+                states.clear()
                 continue
             # `f = FreeFile` again names a new file: what was known about f ends.
             # The value may still name a file number: `Main = LOF(0)`.
@@ -170,10 +186,14 @@ def _check_statement(
             )
         states[opened.key] = _OpenFile(opened.mode, base)
         return
-    if head == "close":
-        keys = _file_number_keys_in(toks[1:])
+    if head == "close" or head == "reset":
+        keys = [] if head == "reset" else _file_number_keys_in(toks[1:])
         if len(keys) == 0:
-            states.clear()
+            # `Close` with no number, and `Reset`, close every open file: a later
+            # `Print #1` raises 52 in Excel (XLIDE issue #146).
+            for open_key, known in list(states.items()):
+                if known != "closed":
+                    states[open_key] = "closed"
             return
         for closed in keys:
             states[closed] = "closed"
@@ -288,38 +308,17 @@ def _parse_open(toks: Sequence[VbaToken]) -> _OpenStatement | None:
 def _file_number_key(tok: VbaToken) -> str | None:
     """The key a file number token identifies: its literal value, or the variable's name."""
     if tok.kind is TokenKind.INTEGER_LITERAL:
-        raw = tok.raw_text
-        return f"#{_js_parse_int_text(raw[:-1] if raw.endswith(('%', '&', '^')) else raw)}"
+        # `#&H1` is file 1, not #NaN (XLIDE issue #146).
+        value = parse_vba_integer_literal(tok.raw_text)
+        return None if value is None else f"#{value}"
     name = token_name(tok)
     return name.lower() if name else None
 
 
-def _js_parse_int_text(text: str) -> str:
-    """`${Number.parseInt(text, 10)}` for an integer literal's text, suffix removed.
-
-    parseInt reads only leading decimal digits, so a hex or octal literal
-    (`&H1`, `&O7`) is NaN and keys as `#NaN`, one key for all of them. A value
-    past 2^53 is the nearest double, printed in JavaScript's shortest form.
-    """
-    digits = _LEADING_DIGITS_RE.match(text)
-    if digits is None:
-        return "NaN"
-    value = int(digits.group())
-    if value <= _MAX_SAFE_INTEGER:
-        return str(value)
-    try:
-        number = float(value)
-    except OverflowError:
-        return "Infinity"
-    shortest = repr(number)
-    mantissa, _, exponent = shortest.partition("e")
-    if not exponent:
-        return str(int(number))
-    power = int(exponent)
-    if power >= 21:
-        return shortest
-    significant = mantissa.replace(".", "")
-    return significant + "0" * (power + 1 - len(significant))
+def _is_file_statement_head(head: str) -> bool:
+    """True for the statement words this rule follows: Open, Close, Reset and the
+    file I/O statements."""
+    return head in ("open", "close", "reset") or head in _FILE_STATEMENTS
 
 
 def _describe_key(key: str) -> str:
@@ -379,13 +378,18 @@ def _file_numbers_named_in_blocks(
             continue
         toks = statement_tokens_after_leading_label(source, node.span)
         head = token_text(_token_at(toks, 0))
-        if head == "open" or head == "close" or head in _FILE_STATEMENTS:
+        if (
+            not _is_file_statement_head(head)
+            and bare_call_statement_target(source, node.span) is not None
+        ):
+            out.add("*")  # a procedure called inside the block may close anything
+        if _is_file_statement_head(head):
             for key in _file_number_keys_in(toks):
                 out.add(key)
             opened = _parse_open(toks) if head == "open" else None
             if opened is not None and opened.key:
                 out.add(opened.key)
-            if head == "close" and len(_file_number_keys_in(toks[1:])) == 0:
+            if head == "reset" or (head == "close" and len(_file_number_keys_in(toks[1:])) == 0):
                 out.add("*")
         target = bare_assignment_target(source, node.span)
         if target is not None:

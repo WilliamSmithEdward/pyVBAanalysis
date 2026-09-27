@@ -101,23 +101,37 @@ def check_collection_state(
                 or token_text(toks[0]) == "gosub"
             ):
                 states.clear()
-            # `Set c = New Collection` starts an empty collection; any other Set ends tracking.
+            # `Set c = New Collection` starts an empty collection. `Set o = c` makes
+            # o and c one collection, so they share one state and an Add through
+            # either is seen by both (XLIDE issue #147). Any other Set ends tracking
+            # of its target, and of every tracked collection its value names, since
+            # the value's new holder can change it unseen.
             target = set_assignment_target(source, node.span)
             if target is not None:
                 lower = target[0].lower()
-                if lower in auto_instanced.plain_locals or lower in auto_instanced.new_locals:
-                    equals = next(
-                        (index for index, tok in enumerate(toks) if tok.raw_text == "="), -1
-                    )
-                    value = toks[equals + 1 :]
-                    if (
-                        len(value) == 2
-                        and token_text(value[0]) == "new"
-                        and token_text(value[1]) == "collection"
-                    ):
-                        states[lower] = _CollectionContents()
-                    else:
-                        states.pop(lower, None)
+                equals = next((index for index, tok in enumerate(toks) if tok.raw_text == "="), -1)
+                value = toks[equals + 1 :]
+                is_collection_local = (
+                    lower in auto_instanced.plain_locals or lower in auto_instanced.new_locals
+                )
+                value_name = token_name(value[0]) if len(value) == 1 else None
+                aliased = value_name.lower() if value_name is not None else None
+                if (
+                    is_collection_local
+                    and len(value) == 2
+                    and token_text(value[0]) == "new"
+                    and token_text(value[1]) == "collection"
+                ):
+                    states[lower] = _CollectionContents()
+                    continue
+                if is_collection_local and aliased is not None and aliased in states:
+                    states[lower] = states[aliased]
+                    continue
+                states.pop(lower, None)
+                for tok in value:
+                    mentioned = token_name(tok)
+                    if mentioned is not None and mentioned.lower() in states:
+                        del states[mentioned.lower()]
                 continue
             _check_statement(node.span, toks, states, push)
 

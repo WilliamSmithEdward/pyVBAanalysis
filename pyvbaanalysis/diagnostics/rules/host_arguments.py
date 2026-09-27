@@ -515,6 +515,16 @@ def _check_multi_cell_as_scalar(
         head = token_text(toks[first_executable_token_index(toks)])
         if head not in _CONDITION_HEADS:
             return
+        # Only the condition of a one-line If is judged here: a range after Then or
+        # Else belongs to that branch's own statement, `If r Is Nothing Then Set r =
+        # ws.Range("A1:P36")` (XLIDE issue #140).
+        then = (
+            next((i for i, tok in enumerate(toks) if token_text(tok) == "then"), -1)
+            if head == "if"
+            else -1
+        )
+        if then > 0 and start > then:
+            return
     # The operator on either side, never the assignment's own `=`.
     eq_index = _index_of_equals(toks) if bare is not None else -1
     before = None if start - 1 == eq_index else _token_at(toks, start - 1)

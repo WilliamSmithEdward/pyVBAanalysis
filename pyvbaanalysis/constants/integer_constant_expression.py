@@ -19,6 +19,7 @@ import re
 from collections.abc import Callable, Mapping
 from typing import Protocol
 
+from ..js_compat import js_trim
 from ..lexer.token_helpers import token_name
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..lexer.tokenize import tokenize
@@ -28,7 +29,6 @@ from ..lexer.tokenize import tokenize
 _MAX_SAFE_INTEGER = 2**53 - 1
 
 _DECIMAL_RE = re.compile(r"^\d+$")
-_SUFFIX_RE = re.compile(r"[%&^]$")
 _HEX_RE = re.compile(r"^&[hH]([0-9A-Fa-f]+)$")
 _OCTAL_RE = re.compile(r"^&[oO]([0-7]+)$")
 
@@ -55,15 +55,29 @@ def parse_decimal_integer_literal(raw: str) -> int | None:
 
 def parse_vba_integer_literal(raw: str) -> int | None:
     """Parses a VBA integer literal (decimal, &H, &O; optional %/&/^ suffix)."""
-    text = _SUFFIX_RE.sub("", raw.strip())
+    trimmed = js_trim(raw)
+    suffix = trimmed[-1] if trimmed and trimmed[-1] in "%&^" else None
+    text = trimmed[:-1] if suffix else trimmed
     hex_match = _HEX_RE.match(text)
-    if hex_match:
-        value = int(hex_match.group(1), 16)
-        return value if _is_safe_integer(value) else None
-    octal_match = _OCTAL_RE.match(text)
-    if octal_match:
-        value = int(octal_match.group(1), 8)
-        return value if _is_safe_integer(value) else None
+    octal_match = None if hex_match else _OCTAL_RE.match(text)
+    matched = hex_match or octal_match
+    if matched is not None:
+        digits = matched.group(1)
+        value = int(digits, 16 if hex_match else 8)
+        if not _is_safe_integer(value):
+            return None
+        # A hex or octal literal is the signed value of its bits (MS-VBAL 3.3.2,
+        # measured in Excel 16.0, XLIDE issue #141): up to four hex digits it is
+        # an Integer, so &H8000 is -32768 and &HFFFF is -1; up to eight it is a
+        # Long, so &H80000000 is -2147483648. An `&` suffix makes a short literal
+        # a Long (&HFFFF& is 65535) but still wraps at 32 bits; a `^` suffix
+        # (LongLong) does not wrap here.
+        fits16 = len(digits) <= 4 if hex_match else value <= 0xFFFF
+        if suffix != "&" and suffix != "^" and fits16 and value > 0x7FFF:
+            return value - 0x10000
+        if suffix != "^" and 0x7FFFFFFF < value <= 0xFFFFFFFF:
+            return value - 0x100000000
+        return value
     return parse_decimal_integer_literal(text)
 
 

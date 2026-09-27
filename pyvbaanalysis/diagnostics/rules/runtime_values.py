@@ -169,8 +169,9 @@ def _runtime_statement_value_hits(
     """Statement and operator forms that raise for a value the code states (XLIDE
     issue #118, each measured in Excel 16.0):
 
-     - `Err.Raise 0` and `Err.Raise 65536`, `Error 0`: error 5. A number is
-       valid from 1 to 65535.
+     - `Err.Raise 0` and `Err.Raise 65536`, `Error 0`: error 5. Err.Raise takes
+       1 to 65535 or any negative Long (XLIDE issue #142); Error takes only 1 to
+       65535.
      - `(-8) ^ (1 / 3)` and `0 ^ -1`: error 5. A negative base takes only a
        whole exponent; zero takes only a non-negative one.
      - `"b" Like "[z-a]"` and `"b" Like "[a-"`: error 93, Invalid pattern
@@ -223,11 +224,20 @@ def _runtime_statement_value_hits(
         group = _number_argument_group(toks, number_index)
         if group is not None:
             value = _integer_group_value(source, span, group, constants)
-            if value is not None and (value < 1 or value > 65535):
+            # Err.Raise takes 1 to 65535 or any negative Long: `vbObjectError + 513`
+            # and an HRESULT such as &H80004002 are how a class raises its own errors
+            # (XLIDE issue #142, measured). The Error statement takes only 1 to 65535.
+            if form == "Err.Raise":
+                invalid = value is not None and (value == 0 or value > 65535 or value < -2147483648)
+                valid = "1 to 65535, or a negative Long such as vbObjectError + n"
+            else:
+                invalid = value is not None and (value < 1 or value > 65535)
+                valid = "1 to 65535"
+            if invalid and value is not None:
                 out.append(
                     (
                         f"{form} {js_number_to_string(value)} is not an error number: valid numbers "
-                        f"are 1 to 65535. {_RAISES_5}",
+                        f"are {valid}. {_RAISES_5}",
                         Span(span.start + group[0].start, span.start + group[-1].end),
                     )
                 )

@@ -17,7 +17,7 @@ Measured in Excel 16.0 (build 20326, 2026-09-26); each compiles and raises 438,
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
@@ -73,11 +73,15 @@ def check_runtime_member_not_found(
         if not isinstance(member, ProcedureNode):
             continue
         env = type_environment_for(symbols, member)
-        late_bound: set[str] = set()
-        for lower, type_name in env.items():
-            normalized = normalize_type(type_name)
-            if normalized == "object" or normalized == "variant" or normalized is None:
-                late_bound.add(lower)
+
+        # Asked only for the target of a Set: walking the whole environment for
+        # every procedure was 5% of a large module's pass (XLIDE issue #139).
+        def is_late_bound(lower: str, env: Mapping[str, str] = env) -> bool:
+            if lower not in env:
+                return False
+            normalized = normalize_type(env[lower])
+            return normalized == "object" or normalized == "variant" or normalized is None
+
         held: dict[str, _KnownClass] = {}
         for node in member.body:
             if activity is not None and activity.is_inactive(node.span):
@@ -100,7 +104,7 @@ def check_runtime_member_not_found(
                 source, node.span.start, toks, held, application_surface, member_ctx, push
             )
             assigned = set_assignment_target(source, node.span)
-            if assigned is not None and assigned[0].lower() in late_bound:
+            if assigned is not None and is_late_bound(assigned[0].lower()):
                 lower = assigned[0].lower()
                 value = toks[_index_of_equals(toks) + 1 :]
                 known = (
