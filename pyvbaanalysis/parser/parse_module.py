@@ -105,6 +105,26 @@ class _BlockFrame:
     body: list[BodyNode] = field(default_factory=list)
     closed: bool = False
     end_stmt: LogicalStatement | None = None
+    # The name a `Next i, j` gives this loop when it closes more than one.
+    next_override: tuple[str, Span] | None = None
+
+
+@dataclass(slots=True)
+class _PendingNext:
+    """Names a `Next i, j` left for the loops outside the one that consumed it."""
+
+    names: list[tuple[str, Span]]
+    stmt: LogicalStatement
+
+
+@dataclass(slots=True)
+class _DirectiveChain:
+    """An open `#If` chain: the open-block height at its `#If`, the arm being
+    parsed, and the height arm 0 ended at."""
+
+    depth_at_if: int
+    arm: int
+    end_height0: int
 
 
 # Visibility / sharing modifiers that may lead a declaration (MS-VBAL 5.2.3).
@@ -192,14 +212,23 @@ class _Parser:
     _diagnostics: list[ParseDiagnostic]
     # Expected closers of the currently open blocks (innermost last).
     _open_stack: list[str]
+    # Names a `Next i, j` left for the loops outside the one that consumed it.
+    _pending_next: _PendingNext | None
+    # Open `#If` chains, innermost last. Only one arm of a chain is compiled, so
+    # a block opener or closer an arm restates from arm 0 is not a second one
+    # (XLIDE issue #130): `End If` written in both arms closes one block, and
+    # `If ... Then` written in both arms opens one.
+    _directive_chains: list[_DirectiveChain]
 
-    __slots__ = ("_source", "_cursor", "_diagnostics", "_open_stack")
+    __slots__ = ("_source", "_cursor", "_diagnostics", "_open_stack", "_pending_next", "_directive_chains")
 
     def __init__(self, source: str, tokens: Sequence[VbaToken]) -> None:
         self._source = source
         self._cursor = StatementCursor(split_logical_statements(tokens))
         self._diagnostics = []
         self._open_stack = []
+        self._pending_next = None
+        self._directive_chains = []
 
     def parse(self) -> ModuleNode:
         members: list[ModuleMember] = []
@@ -248,8 +277,17 @@ class _Parser:
             return self._parse_type_block(mod_index)
         if head == "enum":
             return self._parse_enum_block(mod_index)
-        if head in ("sub", "function", "property"):
+        if head in ("sub", "function"):
             return self._parse_procedure()
+        if head == "property":
+            # `Property` is not reserved: `Property = 1` assigns a variable of
+            # that name, and only `Property Get|Let|Set` opens a procedure
+            # (XLIDE issue #98).
+            if _is_property_header(tokens, mod_index):
+                return self._parse_procedure()
+            nxt = self._cursor.next()
+            assert nxt is not None
+            return self._make_statement(nxt)
         if head == "const":
             self._cursor.next()
             return self._parse_variable_group(stmt, tokens, mod_index, True)
@@ -381,6 +419,42 @@ class _Parser:
         return first is not None and first.kind is TokenKind.DIRECTIVE
 
     def _parse_conditional_directive(
+        self, stmt: LogicalStatement, tokens: Sequence[VbaToken]
+    ) -> ConditionalDirectiveNode:
+        node = self._parse_conditional_directive_node(stmt, tokens)
+        self._track_directive(node.directive_kind)
+        return node
+
+    def _track_directive(self, kind: ConditionalDirectiveKind) -> None:
+        depth = len(self._open_stack)
+        top = self._directive_chains[-1] if self._directive_chains else None
+        if kind is ConditionalDirectiveKind.IF:
+            self._directive_chains.append(_DirectiveChain(depth_at_if=depth, arm=0, end_height0=depth))
+        elif kind is ConditionalDirectiveKind.ELSE_IF or kind is ConditionalDirectiveKind.ELSE:
+            if top is not None:
+                if top.arm == 0:
+                    top.end_height0 = depth
+                top.arm += 1
+        elif kind is ConditionalDirectiveKind.END_IF:
+            if self._directive_chains:
+                self._directive_chains.pop()
+
+    def _restates_arm_zero_closer(self) -> bool:
+        """A closer in a later arm that would take the stack below where arm 0
+        ended restates arm 0's closer."""
+        top = self._directive_chains[-1] if self._directive_chains else None
+        return top is not None and top.arm > 0 and len(self._open_stack) - 1 < top.end_height0
+
+    def _restates_arm_zero_opener(self, opener: str) -> bool:
+        """An opener in a later arm, at the height arm 0 ended on and of the kind
+        arm 0 left open, restates it."""
+        top = self._directive_chains[-1] if self._directive_chains else None
+        if top is None or top.arm == 0 or top.end_height0 <= top.depth_at_if:
+            return False
+        height = len(self._open_stack)
+        return height == top.end_height0 and self._open_stack[height - 1] == self._block_closer(opener)
+
+    def _parse_conditional_directive_node(
         self, stmt: LogicalStatement, tokens: Sequence[VbaToken]
     ) -> ConditionalDirectiveNode:
         directive_word = token_word(_at(tokens, 1))
@@ -918,6 +992,11 @@ class _Parser:
         """One body item, or, when `stmt` opens a block, the opener kind for the
         caller to parse, so _parse_block can nest blocks without recursing."""
         ck = self._closer_kind(stmt)
+        if ck and self._restates_arm_zero_closer():
+            # The closer arm 0 of the enclosing #If chain already used, written
+            # again in this arm (XLIDE issue #130): not a stray closer.
+            self._cursor.next()
+            return self._make_statement(stmt)
         if ck:
             # Any procedure closer ends the open procedure, even from inside a
             # block left open in it: the VBE takes End Sub, End Function and End
@@ -937,6 +1016,12 @@ class _Parser:
             self._cursor.next()
             return self._make_statement(stmt)
         opener = self._opener_kind(stmt)
+        if opener is not None and self._restates_arm_zero_opener(opener):
+            # `If n = 2 Then` in the #Else arm of a chain whose #If arm opened
+            # this block (XLIDE issue #130): the same header, restated; the body
+            # that follows belongs to the block arm 0 opened.
+            self._cursor.next()
+            return self._make_statement(stmt)
         if opener is not None:
             return opener
         tokens = _code_tokens_after_line_number(stmt)
@@ -1085,13 +1170,41 @@ class _Parser:
         """Parse the frame's statements until the block ends, or until one opens a
         nested block, whose opener kind is returned so it is parsed first. Called
         again once that block closes, it resumes at the statement after it."""
-        while not self._cursor.at_end():
+        while True:
+            # `Next i, j` closes two loops at once (MS-VBAL 5.4.2.3): the inner
+            # block consumed the statement and left the outer names here, so this
+            # block is closed by the same statement and takes the next name.
+            pending = self._pending_next
+            if frame.expected == "next" and pending is not None:
+                frame.next_override = pending.names.pop(0)
+                frame.end_stmt = pending.stmt
+                if not pending.names:
+                    self._pending_next = None
+                frame.closed = True
+                return None
+            # Only the loop directly outside takes a leftover name; any other
+            # parent drops it, so a stray `Next i, j` closes nothing later.
+            self._pending_next = None
+            if self._cursor.at_end():
+                return None
             stmt = self._cursor.peek()
             assert stmt is not None
             ck = self._closer_kind(stmt)
+            if ck == frame.expected and self._restates_arm_zero_closer():
+                # `End If` in the #Else arm of a chain whose #If arm already
+                # closed this block (XLIDE issue #130): the same closer, restated.
+                self._cursor.next()
+                self._append_block_item(frame, self._make_statement(stmt))
+                continue
             if ck == frame.expected:
                 frame.end_stmt = self._cursor.next()
                 frame.closed = True
+                if frame.expected == "next":
+                    names = self._next_control_variables(frame.end_stmt)
+                    frame.next_override = names[0] if names else None
+                    if len(names) > 1:
+                        assert frame.end_stmt is not None
+                        self._pending_next = _PendingNext(names=names[1:], stmt=frame.end_stmt)
                 return None
             nested = self._nested_type_or_enum_block_kind(stmt)
             if nested is not None:
@@ -1114,7 +1227,6 @@ class _Parser:
             if isinstance(item, str):
                 return item
             self._append_block_item(frame, item)
-        return None
 
     def _close_block(self, frame: _BlockFrame) -> BodyNode:
         self._open_stack.pop()
@@ -1129,7 +1241,9 @@ class _Parser:
                 frame.closed,
                 span,
             )
-        return self._make_block_node(frame.opener, frame.body, frame.closed, span, head, frame.end_stmt)
+        return self._make_block_node(
+            frame.opener, frame.body, frame.closed, span, head, frame.end_stmt, frame.next_override
+        )
 
     @staticmethod
     def _append_block_item(frame: _BlockFrame, item: BodyNode) -> None:
@@ -1145,11 +1259,12 @@ class _Parser:
         span: Span,
         head: LogicalStatement,
         end_stmt: LogicalStatement | None,
+        next_override: tuple[str, Span] | None = None,
     ) -> BodyNode:
         if opener == "for" or opener == "foreach":
             control = self._for_control_variable(opener, head)
             source = self._for_each_source_expression(head) if opener == "foreach" else None
-            nxt = self._next_control_variable(end_stmt)
+            nxt = next_override if next_override is not None else self._next_control_variable(end_stmt)
             for_node = ForBlockNode(span=span, each=(opener == "foreach"), closed=closed, body=body)
             if control is not None:
                 for_node.control_variable, for_node.control_variable_span = control
@@ -1259,6 +1374,23 @@ class _Parser:
         last = tokens[len(tokens) - 1]
         return (self._source[first.start : last.end], Span(first.start, last.end))
 
+    def _next_control_variables(self, stmt: LogicalStatement | None) -> list[tuple[str, Span]]:
+        """Every name a `Next a, b` lists, innermost loop first; empty for a bare
+        `Next`."""
+        if stmt is None:
+            return []
+        tokens = _code_tokens_after_line_number(stmt)
+        if token_word(_at(tokens, 0)) != "next":
+            return []
+        out: list[tuple[str, Span]] = []
+        for i in range(1, len(tokens), 2):
+            name = self._simple_name_from_token(tokens[i])
+            separator = _at(tokens, i + 1)
+            if not name or (separator is not None and separator.raw_text != ","):
+                return []
+            out.append((name, Span(tokens[i].start, tokens[i].end)))
+        return out
+
     def _next_control_variable(self, stmt: LogicalStatement | None) -> tuple[str, Span] | None:
         if stmt is None:
             return None
@@ -1332,8 +1464,12 @@ class _Parser:
         tokens = code_tokens(stmt)
         mod_index = self._leading_modifier_count(tokens)
         head = token_word(_at(tokens, mod_index))
-        if head in ("sub", "function", "property", "type", "enum", "declare"):
+        if head in ("sub", "function", "type", "enum", "declare"):
             return True
+        if head == "property":
+            # `Property = 1` inside a procedure assigns a variable named
+            # Property; only `Property Get|Let|Set` starts a header (XLIDE #98).
+            return _is_property_header(tokens, mod_index)
         return token_word(_at(tokens, 0)) == "attribute"
 
     def _is_exported_procedure_attribute(
@@ -1540,6 +1676,15 @@ class _Parser:
         self._diagnostics.append(
             ParseDiagnostic(span=Span(at.start, at.end), message=message, severity=severity, spec_ref=spec_ref)
         )
+
+
+def _is_property_header(tokens: Sequence[VbaToken], index: int) -> bool:
+    """Whether `Property` at `index` opens a property procedure: only when Get, Let
+    or Set follows it. `Property` is a contextual word, not a reserved one, so
+    `Dim Property As Long` and `Property = 1` compile (XLIDE issue #98, measured in
+    Excel 16.0), and a header is the only place the accessor word follows it."""
+    accessor = token_word(_at(tokens, index + 1))
+    return accessor == "get" or accessor == "let" or accessor == "set"
 
 
 def _code_tokens_after_line_number(statement: LogicalStatement) -> list[VbaToken]:

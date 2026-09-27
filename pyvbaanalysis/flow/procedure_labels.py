@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from ..conditional import ConditionalActivityTracker, inactive_node_skip
+from ..lexer.keyword_table import is_reserved_identifier
 from ..lexer.token_helpers import (
     split_top_level_token_groups,
     cached_statement_tokens,
@@ -75,7 +76,7 @@ def collect_procedure_label_declarations(
     labels: list[VbaProcedureLabel] = []
 
     def visit(stmt: LeafStatementNode) -> None:
-        label = _statement_label_declaration(source, stmt.span)
+        label = statement_label_declaration(source, stmt.span)
         if label is not None:
             labels.append(label)
 
@@ -102,6 +103,10 @@ def statement_label_references(source: str, span: Span) -> list[VbaProcedureLabe
     if not toks:
         return []
     if token_word(toks[0]) == "on":
+        # `On Local Error GoTo 0` is `On Error GoTo 0` (XLIDE issue #98): drop the
+        # Local so the target reads the same way.
+        if token_word(_at(toks, 1)) == "local" and token_word(_at(toks, 2)) == "error":
+            toks = [toks[0], *toks[2:]]
         return _on_statement_label_references(toks, span)
     refs: list[VbaProcedureLabelReference] = []
     for i, tok in enumerate(toks):
@@ -210,6 +215,11 @@ def _label_reference_group(
 
 def _label_from_token(tok: VbaToken, base: Span) -> VbaProcedureLabel | None:
     name = token_name(tok)
+    # A reserved word is never a label: `Else:` is the Else of its If with a colon
+    # after it (XLIDE issue #129, measured in Excel 16.0: two of them in one
+    # procedure compile), the way `Next:` and `End If:` already read.
+    if name and is_reserved_identifier(name):
+        return None
     if name:
         return VbaProcedureLabel(
             key=f"name:{name.lower()}", text=name, span=_absolute_span(base, tok), kind="name"
@@ -223,7 +233,7 @@ def _label_from_token(tok: VbaToken, base: Span) -> VbaProcedureLabel | None:
     return None
 
 
-def _statement_label_declaration(source: str, span: Span) -> VbaProcedureLabel | None:
+def statement_label_declaration(source: str, span: Span) -> VbaProcedureLabel | None:
     toks = cached_statement_tokens(source, span.start, span.end)
     first = _at(toks, 0)
     if first is None:

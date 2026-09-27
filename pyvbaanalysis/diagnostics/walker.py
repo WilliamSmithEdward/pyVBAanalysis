@@ -12,6 +12,7 @@ from typing import Protocol
 
 from ..conditional import ConditionalActivityTracker, inactive_node_skip
 from ..lexer.token_helpers import match_paren_from, token_word
+from ..lexer.token_helpers import statement_tokens as lex_statement_tokens
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..parser.nodes import (
     BodyNode,
@@ -44,6 +45,7 @@ __all__ = [
     "for_each_procedure_body_line",
     "next_line_start",
     "first_line_break_at_or_after",
+    "raw_expression_tokens",
     "statement_tokens_after_leading_label",
     "first_executable_token_index",
     "top_level_operator_index",
@@ -184,6 +186,17 @@ def first_line_break_at_or_after(source: str, start: int) -> int:
         if ch == "\n" or ch == "\r":
             return i
     return -1
+
+
+def raw_expression_tokens(text: str) -> list[VbaToken]:
+    """Significant tokens of an expression the parser carried as its own string (an
+    If condition, a For Each source, an Enum member value, a parameter default, a
+    Const value). That text is not the module source, so it must not go through
+    statement_tokens: the statement cache is keyed by source string and holds two
+    of them, and each distinct raw string sent there evicted the module, so the next
+    ordinary statement re-lexed the whole module (XLIDE issue #139, a 17x slowdown
+    on real projects)."""
+    return lex_statement_tokens(text, 0, len(text))
 
 
 def statement_tokens_after_leading_label(source: str, span: Span) -> list[VbaToken]:

@@ -1,20 +1,24 @@
 # Diagnostic catalogue
 
-The diagnostic codes pyVBAanalysis can emit, generated from the rule metadata (`tools/generate_diagnostics_catalogue.py`). This table lists the 131 rule-metadata codes across 6 categories. A further 3 structural block-balance codes (`mismatched-end-keyword`, `missing-block-closer`, `unmatched-block-closer`) are emitted by the parser pass and are not in the metadata table, for a full set of 134 codes.
+The diagnostic codes pyVBAanalysis can emit, generated from the rule metadata (`tools/generate_diagnostics_catalogue.py`). This table lists the 165 rule-metadata codes across 6 categories. A further 3 structural block-balance codes (`mismatched-end-keyword`, `missing-block-closer`, `unmatched-block-closer`) are emitted by the parser pass and are not in the metadata table, for a full set of 168 codes.
 
 Each code is reported only when it is provably correct; anything unknown or ambiguous stays quiet (the no-false-positive discipline). The **kind** column says what a code means: a *compile error* is rejected by the VBE compiler, a *runtime error* is a deterministic Run-time error, a *runtime risk* is a likely fault, and *style* is advisory.
 
 Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or the `severity_overrides` argument of `analyze_project` / the reader functions), keyed by code. Use `"off"`, `"information"`, `"warning"`, or `"error"`; the allowed values per code are constrained by policy (some codes can be downgraded but not disabled). See [docs/usage.md](usage.md).
 
-## Declaration (42)
+## Declaration (46)
 
 | Code | Title | Default | Kind | Spec reference |
 | --- | --- | --- | --- | --- |
+| `array-parameter-form` | Array parameter cannot be ByVal or Optional | error | compile error | MS-VBAL 5.3.1.5; VBE "Array argument must be ByRef" / "Optional argument must be Variant or intrinsic type with a default value" (issue #124, Excel 16.0) |
 | `byval-udt-parameter` | User-defined type parameter cannot be ByVal | error | compile error | MS-VBAL 5.3.1 (parameter passing) / VBE compiler |
+| `const-overflow` | Const value overflows | error | compile error | MS-VBAL 5.6.9.3; VBE compile error: Overflow (issue #116, Excel 16.0) |
 | `const-value-not-constant` | Const value must be a constant expression | error | compile error | MS-VBAL 5.2.4 (Const declaration value is a constant-expression) |
 | `declare-missing-ptrsafe` | Declare statement missing PtrSafe for 64-bit Office | error | compile error | VBA 7 Declare statement PtrSafe requirement for 64-bit Office |
 | `dim-initializer` | Declaration cannot include an initializer (VB.NET syntax) | error | compile error | MS-VBAL 5.2.3.1 |
+| `duplicate-const-directive` | Duplicate #Const | error | compile error | MS-VBAL 3.4.1 #Const; VBE "Duplicate definition" (issue #130, Excel 16.0) |
 | `duplicate-declaration` | Duplicate declaration in the current scope | error | compile error | MS-VBAL 5.2 / 5.3 |
+| `duplicate-deftype` | Duplicate Deftype statement | error | compile error | MS-VBAL 5.2.3.1.3; VBE "Duplicate Deftype statement" (issue #124, Excel 16.0) |
 | `duplicate-enum-member` | Duplicate Enum member | error | compile error | MS-VBAL 5.2.3.4 |
 | `duplicate-module-variable` | Duplicate module-level declaration | error | compile error | MS-VBAL 5.2.3 |
 | `duplicate-option` | Duplicate Option statement | error | compile error | MS-VBAL 5.2.1 (module options) |
@@ -34,7 +38,7 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `module-declaration-after-procedure` | Module-level declaration after procedure | error | compile error | MS-VBAL 5.2 / 5.3 |
 | `module-declaration-in-procedure` | Module-level declaration inside procedure | error | compile error | MS-VBAL 5.2 / 5.3 |
 | `object-module-public-member` | Invalid public member in object module | error | compile error | VBE compiler: public object-module member restrictions |
-| `option-after-declaration` | Option statement must precede all declarations | error | compile error | MS-VBAL 5.2.1 |
+| `option-after-declaration` | Option statement after a procedure | error | compile error | MS-VBAL 5.2.1 |
 | `optional-udt-parameter` | Optional parameter cannot be a user-defined type | error | compile error | MS-VBAL 5.3.1 (Optional parameter) / VBE compiler |
 | `paramarray-non-variant` | ParamArray elements must be Variant | error | compile error | MS-VBAL 5.3.1.6 |
 | `paramarray-not-last` | ParamArray must be the final parameter | error | compile error | MS-VBAL 5.3.1.6 |
@@ -70,7 +74,7 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `undeclared-variable` | Variable not defined | error | compile error | MS-VBAL 5.2.4.1.1 |
 | `unknown-call` | Sub or Function not defined | error | compile error | MS-VBAL 5.4.2.1 |
 
-## Semantic (52)
+## Semantic (75)
 
 | Code | Title | Default | Kind | Spec reference |
 | --- | --- | --- | --- | --- |
@@ -80,6 +84,7 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `argument-object-type-mismatch` | Object argument type mismatch | error | compile error | MS-VBAL 5.3.1 |
 | `argument-shape-mismatch` | Argument shape (array/Type vs scalar) mismatch | error | compile error | MS-VBAL 5.3.1 (argument passing) / VBE compiler: ByRef argument type mismatch; array or user-defined type expected |
 | `argument-type-mismatch` | Argument type mismatch | error | runtime error | MS-VBAL 5.3.1 / runtime type coercion and numeric overflow |
+| `arithmetic-overflow` | Arithmetic overflow | error | runtime error | MS-VBAL 5.6.9.3 operator result types; VBE runtime error 6: Overflow (issue #116, Excel 16.0) |
 | `array-assignment-to-scalar` | Array cannot be assigned to scalar | error | compile error | MS-VBAL 5.4.3 / VBE compiler: Type mismatch |
 | `array-bound-requires-array` | Array bound function requires array | error | compile error | MS-VBAL LBound/UBound / VBE compiler: Expected array |
 | `array-declaration-impossible-bounds` | Array declaration lower bound is greater than upper bound | error | compile error | MS-VBAL 5.2.3.1 (array declaration bounds) |
@@ -88,6 +93,10 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `assignment-type-mismatch` | Assignment type mismatch | error | runtime error | MS-VBAL 5.4.3 / runtime type coercion and numeric overflow |
 | `byref-argument-type-mismatch` | ByRef argument type mismatch | error | compile error | MS-VBAL 5.3.1 / VBE compiler: ByRef argument type mismatch |
 | `case-outside-select` | Case statement outside Select Case | error | compile error | MS-VBAL 5.4.2.4 |
+| `collection-index-out-of-range` | Collection index out of range | error | runtime error | VBE runtime errors 5 and 9 on VBA.Collection (issue #121, Excel 16.0) |
+| `collection-key-in-use` | Collection key already in use | error | runtime error | VBE runtime error 457 on VBA.Collection (issue #121, Excel 16.0) |
+| `collection-key-not-found` | Collection key not found | error | runtime error | VBE runtime error 5 on VBA.Collection (issue #121, Excel 16.0) |
+| `collection-operand` | Collection used as an operand | error | compile error | VBE "Argument not optional" on a Collection whose default member Item takes an index (issue #125, Excel 16.0) |
 | `const-assignment` | Assignment to a constant | error | compile error | MS-VBAL 5.4.3.1 |
 | `division-by-zero` | Division by zero | error | runtime error | MS-VBAL 5.6 / runtime division by zero |
 | `duplicate-case-else` | Duplicate Case Else in Select Case | error | compile error | MS-VBAL 5.4.2.10 (Select Case) |
@@ -96,9 +105,19 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `erase-requires-array` | Erase target must be array or Variant | error | compile error | MS-VBAL Erase statement / VBE compiler: Expected array |
 | `exit-outside-block` | Loop exit statement outside matching loop | error | compile error | MS-VBAL 5.4.1.3 |
 | `exit-wrong-proc` | Exit statement does not match the enclosing procedure | error | compile error | MS-VBAL 5.4.1.3 |
+| `file-already-open` | File number opened twice | error | runtime error | VBE runtime error 55: File already open (issue #123, Excel 16.0) |
+| `file-mode-mismatch` | File statement the open mode forbids | error | runtime error | VBE runtime error 54: Bad file mode (issue #123, Excel 16.0) |
+| `file-number-zero` | File number 0 | error | runtime error | VBE runtime error 52: Bad file name or number (issue #123, Excel 16.0) |
+| `file-record-zero` | Record number 0 | error | runtime error | VBE runtime error 63: Bad record number (issue #123, Excel 16.0) |
+| `file-used-after-close` | File statement on a closed file number | error | runtime error | VBE runtime error 52: Bad file name or number (issue #123, Excel 16.0) |
 | `fixed-array-redim` | Fixed-size array cannot be ReDimmed | error | compile error | MS-VBAL ReDim statement |
+| `for-counter-overflow` | For counter overflows after its last pass | error | runtime error | MS-VBAL 5.4.2.3; VBE runtime error 6: Overflow (issue #116, Excel 16.0) |
 | `for-each-control-variable-type` | For Each control variable must be Variant or Object | error | compile error | MS-VBAL 5.4.2.5 |
 | `for-each-source-type` | For Each source must be collection or array | error | compile error | MS-VBAL 5.4.2.5 / VBE compiler: For Each may only iterate over a collection object or an array |
+| `handler-fall-through` | Execution falls into an error handler that re-raises | error | runtime error | VBE runtime error 5 from Err.Raise Err.Number with Err.Number 0 (issue #117, Excel 16.0) |
+| `host-argument-out-of-range` | Host argument out of range | error | runtime error | Office object model: 1-based collections, cell rows and columns from 1 (issue #122, Excel/Word/PowerPoint 16.0) |
+| `implements-member-missing` | Interface member not implemented | error | compile error | MS-VBAL 5.2.4.1; VBE "Object module needs to implement ... for interface ..." (issue #125, Excel 16.0) |
+| `implements-member-signature` | Interface member implemented with another signature | error | compile error | MS-VBAL 5.2.4.1; VBE "Procedure declaration does not match description of event or procedure having the same name" (issue #125, Excel 16.0) |
 | `invalid-assignment-target` | Cannot assign to a literal value | error | compile error | MS-VBAL 5.4.3 (assignment) / VBE compiler |
 | `is-operator-non-object` | 'Is' operator requires object operands | error | compile error | MS-VBAL 5.6 (Is operator) |
 | `late-bound-friend-member` | Friend member reached through a late-bound receiver | error | runtime error | VBE runtime error 438: Object does not support this property or method |
@@ -108,24 +127,32 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `mid-statement-literal-target` | Mid statement target must be a writable String variable | error | compile error | MS-VBAL 5.4.3.4 (Mid/MidB statement) |
 | `missing-library-reference` | Type library not referenced | error | compile error | VBE compiler: User-defined type not defined |
 | `missing-return-assignment` | Function has no return assignment | warning | runtime risk | VBA Function return variable semantics |
+| `multi-cell-range-as-scalar` | Multi-cell range read as a scalar | error | runtime error | VBE runtime error 13: Type mismatch on a Range value that is an array (issue #122, Excel 16.0) |
 | `next-variable-mismatch` | Next variable does not match active For loop | error | compile error | MS-VBAL 5.4.2.5 |
 | `non-callable-call` | Identifier is not callable | error | compile error | MS-VBAL 5.4.2.1 |
 | `non-scalar-binary-operand` | Operator requires a scalar operand | error | compile error | MS-VBAL 5.6 (binary operators) / VBE compiler: array operand Type mismatch |
 | `object-variable-not-set` | Object variable not set | error | runtime error | VBE runtime error 91: Object variable or With block variable not set |
 | `raiseevent-undeclared-event` | RaiseEvent target is not declared | error | compile error | MS-VBAL RaiseEvent statement: event name resolution |
 | `readonly-member-assignment` | Assignment to a read-only member | error | compile error | VBE compiler: Can't assign to read-only property |
+| `recursive-property-accessor` | Property procedure calls itself | error | runtime error | VBE runtime error 28: Out of stack space (issue #117, Excel 16.0) |
 | `redim-impossible-bounds` | ReDim lower bound is greater than upper bound | error | runtime error | MS-VBAL ReDim statement / VBE compiler runtime error 9 |
 | `redim-preserve-dimension-change` | ReDim Preserve can only resize the last dimension | error | runtime error | MS-VBAL ReDim Preserve statement |
+| `resume-without-error` | Resume with no error handler installed | error | runtime error | VBE runtime error 20: Resume without error (issue #117, Excel 16.0) |
+| `return-without-gosub` | Execution falls into a GoSub target | error | runtime error | VBE runtime error 3: Return without GoSub (issue #117, Excel 16.0) |
 | `runtime-argument-value` | Invalid runtime argument value | error | runtime error | MS-VBAL 5.6 / VBA runtime argument bounds and VBE compiler runtime error 5 |
 | `runtime-conversion-value` | Invalid runtime conversion value | error | runtime error | MS-VBAL 5.6 / VBA runtime conversion and VBE compiler runtime error 13 |
+| `runtime-member-not-found` | Member not found at run time | error | runtime error | VBE runtime error 438: Object doesn't support this property or method (issue #121, Excel 16.0) |
 | `scalar-member-access` | Member access on scalar variable | error | compile error | VBE compiler: Invalid qualifier / Syntax error |
 | `scalar-redim` | Scalar variable cannot be ReDimmed | error | compile error | MS-VBAL ReDim statement / VBE compiler: Expected array |
 | `set-required` | Object assignment requires Set | error | runtime error | VBE runtime error 91: Object variable or With block variable not set (MS-VBAL 5.4.3 / Set statement) |
 | `set-requires-object` | Set assignment requires an object variable | error | compile error | MS-VBAL 5.4.3 |
+| `sheet-name-invalid` | Sheet name Excel refuses | error | runtime error | Excel runtime error 1004: invalid name for a sheet or chart (issue #122, Excel 16.0) |
 | `string-arithmetic-coercion` | Nonnumeric string in numeric expression | error | runtime error | MS-VBAL 5.6 / runtime type coercion |
+| `sub-used-as-value` | Sub used as a value | error | compile error | VBE "Expected Function or variable" (issue #125, Excel 16.0) |
 | `typeof-is-always-false` | 'TypeOf ... Is' is always False | warning | runtime risk | MS-VBAL 5.6 (TypeOf...Is expression) |
 | `unallocated-dynamic-array-access` | Dynamic array is not allocated | error | runtime error | VBE runtime error 9: Subscript out of range |
 | `undefined-label` | Label not defined | error | compile error | MS-VBAL 5.4.1 / VBE compiler: Label not defined |
+| `variant-value-misuse` | Variant value used as another kind | error | runtime error | VBE runtime errors 424 and 13 on a Variant holding a scalar or an array (issue #121, Excel 16.0) |
 
 ## Style (13)
 
@@ -145,23 +172,30 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `variable-never-read` | Variable is assigned but never read | information | style-policy | MS-VBAL 5.4.3 (assignment) plus dead-code policy |
 | `vba-test-directive` | Invalid VBA test directive | warning | style-policy | VBA test directive comment syntax |
 
-## Syntax (17)
+## Syntax (24)
 
 | Code | Title | Default | Kind | Spec reference |
 | --- | --- | --- | --- | --- |
+| `bracketed-variable-name` | Bracketed name in a variable declaration | error | compile error | MS-VBAL 3.3.5.3 foreign-name; VBE "Syntax error" on Dim [name] (issue #124, Excel 16.0) |
 | `call-requires-parens` | Call statement requires parentheses around arguments | error | compile error | MS-VBAL 5.4.2.1 |
 | `call-statement-forbids-parens` | Standalone zero-argument call cannot use empty parentheses | error | compile error | MS-VBAL 5.4.2.1 |
 | `call-statement-multi-arg-parens` | Standalone call cannot parenthesize multiple arguments | error | compile error | MS-VBAL 5.4.2.1 |
+| `date-literal-invalid` | Date literal the VBE refuses | error | compile error | MS-VBAL 3.3.3 date tokens; VBE "Syntax error" (issue #133, Excel 16.0) |
+| `directive-trailing-statement` | Code after a compiler directive on its line | error | compile error | MS-VBAL 3.4 conditional compilation; VBE "An # ElseIf, # Else, or # EndIf must be preceded by an # If clause" (issue #130, Excel 16.0) |
 | `else-branch-order` | Else branch must be final in conditional block | error | compile error | MS-VBAL 3.4 / 5.4.2.1 |
 | `expression-call-requires-parens` | Function call in an expression requires parentheses around arguments | error | compile error | MS-VBAL 5.6.9 |
+| `float-literal-overflow` | Floating-point literal overflows | error | compile error | MS-VBAL 3.3.2 FLOAT; VBE "Syntax error" on 1E400 (issue #125, Excel 16.0) |
 | `if-missing-then` | If statement is missing Then | error | compile error | MS-VBAL 5.4.2.1 |
 | `if-reserved-keyword-in-condition` | Reserved keyword in If condition | error | compile error | MS-VBAL 5.4.2.1 (If block) / 3.3.5.2 (reserved identifiers) / VBE compiler: Syntax error |
 | `invalid-erase-target` | Erase target must be a variable or array name | error | compile error | MS-VBAL Erase statement |
 | `invalid-explicit-call-target` | Invalid explicit Call target | error | compile error | VBE compiler: Syntax error |
 | `invalid-expression-syntax` | Invalid expression syntax | error | compile error | MS-VBAL 5.6 / VBE compiler: Syntax error |
 | `invalid-line-continuation` | Invalid line continuation | error | compile error | MS-VBAL 3.2.2 |
-| `open-missing-for` | 'Open' statement requires 'For <mode>' | error | compile error | MS-VBAL 5.4.5.1 (Open statement) / VBE compiler |
+| `line-too-long` | Physical line over 1023 characters | error | compile error | VBE line limit: 1023 characters compile, 1024 are refused (issue #133, Excel 16.0) |
+| `open-missing-for` | 'Open' statement mode without 'For', or no 'As' clause | error | compile error | MS-VBAL 5.4.5.1 (Open statement) / VBE compiler |
+| `rem-after-then` | Rem after Then | error | compile error | MS-VBAL 3.3.1 comment / 5.4.2.9 single-line If; VBE "Syntax error" (issue #125, Excel 16.0) |
 | `statement-outside-procedure` | Statement outside procedure | error | compile error | MS-VBAL 5.2 / 5.4 |
+| `stray-character` | Character VBA does not use | error | compile error | MS-VBAL 3.3.1 special-token; VBE "Syntax error" on ; ` { } @ ~ \| and a non-breaking space (issue #132, Excel 16.0) |
 | `suffixed-literal-overflow` | Type-suffixed literal out of range | error | compile error | MS-VBAL 3.3.2 (number tokens / type suffixes) / VBE compiler |
 | `typeof-missing-operand` | 'TypeOf' requires an object expression | error | compile error | MS-VBAL 5.6 (TypeOf...Is) / VBE compiler |
 | `unbalanced-parens` | Unbalanced parentheses | error | compile error | MS-VBAL 3.3.1 |

@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..lexer.token_helpers import token_word
+from ..lexer.token_helpers import is_decimal_line_number, token_word
 from ..lexer.token_kinds import TokenKind, VbaToken
 
 __all__ = [
@@ -75,15 +75,63 @@ def split_logical_statements(tokens: Sequence[VbaToken]) -> list[LogicalStatemen
         in_single_line_if = in_single_line_if or (ended_by_colon and _is_single_line_if(statement))
         current = []
 
+    def split_tail_block_opener() -> None:
+        # `If a Then With c: .Add 1: End With` (MS-VBAL 5.4.2.9; XLIDE issue #128):
+        # the block opener in a one-line If's Then or Else tail becomes its own
+        # statement, so the block parser opens it and the closers on the same line
+        # find it. The If header keeps `ended_by_colon`, which stops it reading as
+        # a block If, and the opener statement is a tail of it.
+        nonlocal current, in_single_line_if
+        split = _single_line_if_tail_opener_index(current)
+        if split < 0:
+            return
+        tail = current[split:]
+        current = current[:split]
+        flush(True)
+        in_single_line_if = True
+        current = tail
+
     for token in tokens:
         if token.kind is TokenKind.NEWLINE or token.kind is TokenKind.COLON:
+            split_tail_block_opener()
             flush(token.kind is TokenKind.COLON)
             if token.kind is TokenKind.NEWLINE:
                 in_single_line_if = False
             continue
         current.append(token)
+    split_tail_block_opener()
     flush(False)
     return statements
+
+
+_TAIL_BLOCK_OPENERS: frozenset[str] = frozenset({"with", "for", "do", "while", "select"})
+
+
+def _single_line_if_tail_opener_index(tokens: Sequence[VbaToken]) -> int:
+    """Index of the block opener a one-line If's Then/Else tail starts with, or -1."""
+    head = 1 if tokens and is_decimal_line_number(tokens[0]) else 0
+    if token_word(tokens[head] if head < len(tokens) else None) != "if":
+        return -1
+    depth = 0
+    last = -1
+    for i in range(head + 1, len(tokens)):
+        raw = tokens[i].raw_text
+        if raw == "(":
+            depth += 1
+        elif raw == ")":
+            depth -= 1
+        elif depth == 0:
+            word = token_word(tokens[i])
+            if word == "then" or word == "else":
+                last = i
+    if last < 0 or last == len(tokens) - 1:
+        return -1
+    opener = token_word(tokens[last + 1])
+    if not opener or opener not in _TAIL_BLOCK_OPENERS:
+        return -1
+    if opener == "select" and token_word(tokens[last + 2] if last + 2 < len(tokens) else None) != "case":
+        return -1
+    return last + 1
 
 
 def _is_single_line_if(statement: LogicalStatement) -> bool:

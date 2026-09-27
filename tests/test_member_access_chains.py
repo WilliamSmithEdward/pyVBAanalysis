@@ -33,12 +33,14 @@ def _receiver_type(body: str) -> str | None:
 
 def test_method_kind_collection_accessor_resolves_element() -> None:
     # ChartObjects is a method-kind accessor returning the ChartObjects
-    # collection; calling it with an index resolves to the element.
-    assert _receiver_type("ws.ChartObjects(1).") == "Excel.ChartObject"
+    # collection; calling it with an index resolves to the element. The library
+    # declares the accessor `As Object`, so the element is a one-part union: its
+    # members bind late (XLIDE issue #114).
+    assert _receiver_type("ws.ChartObjects(1).") == "union:Excel.ChartObject"
 
 
 def test_uncalled_collection_member_keeps_collection_type() -> None:
-    assert _receiver_type("ws.ChartObjects.") == "Excel.ChartObjects"
+    assert _receiver_type("ws.ChartObjects.") == "union:Excel.ChartObjects"
 
 
 def test_item_is_not_reindexed() -> None:

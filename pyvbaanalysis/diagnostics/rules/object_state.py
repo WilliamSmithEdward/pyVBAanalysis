@@ -18,6 +18,7 @@ diagnostic, never add one).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 
 from ...completion import (
     MemberCompletionContext,
@@ -26,7 +27,16 @@ from ...completion import (
 from ...conditional import ConditionalActivityTracker
 from ...flow.procedure_unstructured import procedure_has_unstructured_flow
 from ...lexer.token_kinds import TokenKind, VbaToken
-from ...parser.nodes import BodyNode, LeafStatementNode, ModuleNode, ProcedureNode, Span, WithBlockNode
+from ...parser.nodes import (
+    BodyNode,
+    ForBlockNode,
+    LeafStatementNode,
+    ModuleNode,
+    ProcedureNode,
+    Span,
+    WithBlockNode,
+    iter_body_nodes,
+)
 from ...symbols.name_resolution import BareIdentifierContext
 from ...symbols.symbol_model import ModuleSymbols, SymbolVisibility, VbaSymbol, VbaSymbolKind
 from ...types.type_inference import (
@@ -48,7 +58,9 @@ from ..dataflow import (
 from ..walker import (
     ProcedureStatementVisitor,
     active_module_members,
+    bare_assignment_target,
     block_header_line_span,
+    for_each_statement,
     is_inactive_node,
     set_assignment_target,
     statement_and_branch_spans,
@@ -167,11 +179,49 @@ def _check_procedure(
     if not locals_:
         return
     state: dict[str, str] = dict.fromkeys(locals_, "unset")
+    # The locals some statement anywhere in the procedure Sets: a `GoSub` may run any
+    # of those statements before control comes back (XLIDE issue #108), so after it
+    # none of them is provably still Nothing.
+    set_anywhere: set[str] = set()
+
+    def collect_sets(stmt: LeafStatementNode) -> None:
+        for span in statement_and_branch_spans(stmt):
+            target = set_assignment_target(source, span)
+            if target is not None and target[0].lower() in locals_:
+                set_anywhere.add(target[0].lower())
+
+    for_each_statement(proc.body, collect_sets, activity)
 
     def on_statement(stmt: LeafStatementNode) -> None:
-        _check_statement(source, stmt, locals_, state, member_ctx, push)
+        _check_statement(source, stmt, locals_, state, set_anywhere, member_ctx, push)
 
     def on_block(node: BodyNode) -> None:
+        # A For Each that runs to its end leaves the control variable Nothing, so an
+        # access after the loop is right to report. One the body can leave early -
+        # Exit For, or a GoTo out of it - leaves it on the current element, so
+        # nothing is proven (XLIDE issue #108: `Exit For` on the first sheet, then
+        # `ws.Name`).
+        if isinstance(node, ForBlockNode):
+            # `For Each x In c` with c still Nothing raises 424, not 91: the loop
+            # asks the collection for its enumerator (XLIDE issue #121).
+            over = node.source_expression.strip().lower() if node.each and node.source_expression else None
+            if over and over in locals_ and state.get(over) == "unset" and node.source_expression_span:
+                push(
+                    "objectVariableNotSet",
+                    f"Object variable '{locals_[over]}' is Nothing when For Each asks it for its "
+                    "elements. This will raise Run-time error '424': Object required.",
+                    node.source_expression_span,
+                )
+            lower = node.control_variable.lower() if node.control_variable else None
+            if (
+                node.each
+                and lower
+                and lower in locals_
+                and state.get(lower) == "unset"
+                and _body_can_leave_loop(source, node, activity)
+            ):
+                state[lower] = "unknown"
+            return
         if not isinstance(node, WithBlockNode):
             return
         receiver = _unset_with_receiver(source, node.span, locals_, state)
@@ -216,14 +266,96 @@ def _check_procedure(
     walk(proc.body, lambda node: is_inactive_node(activity, node), hooks)
 
 
+def _body_can_leave_loop(
+    source: str, loop: ForBlockNode, activity: ConditionalActivityTracker | None
+) -> bool:
+    """Whether the loop body can leave the loop before it ends: an `Exit For` at its
+    own depth (one inside a nested For leaves that one), or any `GoTo`."""
+
+    def skip(node: BodyNode) -> bool:
+        # A nested For's Exit For is its own.
+        return is_inactive_node(activity, node) or isinstance(node, ForBlockNode)
+
+    for node in iter_body_nodes(loop.body, skip):
+        if isinstance(getattr(node, "body", None), list):
+            continue
+        for span in statement_and_branch_spans(node):  # type: ignore[arg-type]
+            toks = statement_tokens_after_leading_label(source, span)
+            head = token_text(toks[0] if toks else None)
+            if (head == "exit" and token_text(toks[1] if len(toks) > 1 else None) == "for") or head == "goto":
+                return True
+    return False
+
+
+def _nothing_guard_names(condition: Sequence[VbaToken]) -> tuple[set[str], set[str]]:
+    """The tracked names a single-line If's condition guards, as (Then arm, Else
+    arm): `Not d Is Nothing` guards the Then arm, `d Is Nothing` the Else arm (XLIDE
+    issue #108: the block form already read the guard, the one-line form did not)."""
+    then_arm: set[str] = set()
+    else_arm: set[str] = set()
+    for i in range(len(condition) - 2):
+        if token_text(condition[i + 1]) != "is" or token_text(condition[i + 2]) != "nothing":
+            continue
+        name = token_name(condition[i])
+        if not name:
+            continue
+        if token_text(condition[i - 1] if i >= 1 else None) == "not":
+            then_arm.add(name.lower())
+        else:
+            else_arm.add(name.lower())
+    return then_arm, else_arm
+
+
 def _check_statement(
     source: str,
     stmt: LeafStatementNode,
-    locals_: set[str],
+    locals_: Mapping[str, str],
     state: dict[str, str],
+    set_anywhere: AbstractSet[str],
     member_ctx: MemberCompletionContext,
     push: PushFn,
 ) -> None:
+    toks = statement_tokens_after_leading_label(source, stmt.span)
+    head = token_text(toks[0] if toks else None)
+    # `GoSub Label` runs the subroutine, which may Set any of the locals, before the
+    # statement after it (XLIDE issue #108).
+    if head == "gosub" or (head == "on" and any(token_text(tok) == "gosub" for tok in toks)):
+        for lower in set_anywhere:
+            if state.get(lower) == "unset":
+                state[lower] = "unknown"
+        return
+    # The arms of a single-line If and what its condition proves about them.
+    branches = statement_and_branch_spans(stmt)
+    then_guards: set[str] = set()
+    else_guards: set[str] = set()
+    if head == "if" and len(branches) > 1:
+        then_index = next(
+            (index for index, tok in enumerate(toks) if index > 0 and token_text(tok) == "then"), -1
+        )
+        if then_index > 0:
+            then_guards, else_guards = _nothing_guard_names(toks[1:then_index])
+
+    def guarded_at(name: str, offset: int) -> bool:
+        def within(index: int) -> bool:
+            return index < len(branches) and branches[index].start <= offset < branches[index].end
+
+        return (name in then_guards and within(1)) or (name in else_guards and within(2))
+
+    # A bare `obj = value` is a Let through the object's default member (XLIDE issue
+    # #107), which needs an object to reach: on a variable still Nothing it raises
+    # 91, the same as a member access would.
+    for span in branches:
+        let_target = bare_assignment_target(source, span)
+        if let_target is None:
+            continue
+        lower = let_target[0].lower()
+        if (
+            lower
+            and lower in locals_
+            and state.get(lower) == "unset"
+            and not guarded_at(lower, let_target[1].start)
+        ):
+            push("objectVariableNotSet", _not_set_message(let_target[0], "the default-member assignment"), let_target[1])
     passed_whole = _locals_passed_whole(source, stmt.span, locals_)
     for name, span in _unset_object_member_accesses(source, stmt.span, locals_, state, member_ctx):
         # An access after a whole pass in the same statement, as in
@@ -231,6 +363,8 @@ def _check_statement(
         # to Set it. One before the pass, as in `Load(obj.Name)`, does not.
         pass_at = passed_whole.get(name.lower())
         if pass_at is not None and span.start > pass_at:
+            continue
+        if guarded_at(name.lower(), span.start):
             continue
         push("objectVariableNotSet", _not_set_message(name, "member access"), span)
     target = set_assignment_target(source, stmt.span)
@@ -258,7 +392,7 @@ _OBJECT_READ_ONLY_INTRINSICS: frozenset[str] = frozenset(
 )
 
 
-def _locals_passed_whole(source: str, span: Span, locals_: set[str]) -> dict[str, int]:
+def _locals_passed_whole(source: str, span: Span, locals_: Mapping[str, str]) -> dict[str, int]:
     return tracked_locals_named_whole(
         statement_tokens_after_leading_label(source, span),
         span.start,
@@ -270,7 +404,7 @@ def _locals_passed_whole(source: str, span: Span, locals_: set[str]) -> dict[str
 def _unset_object_member_accesses(
     source: str,
     span: Span,
-    locals_: set[str],
+    locals_: Mapping[str, str],
     state: Mapping[str, str],
     member_ctx: MemberCompletionContext,
 ) -> list[tuple[str, Span]]:
@@ -302,10 +436,7 @@ def _has_definite_missing_member(
     source: str, dot_end_offset: int, member_name: str, member_ctx: MemberCompletionContext
 ) -> bool:
     surface = resolve_exhaustive_member_surface(source, dot_end_offset, member_ctx)
-    if surface is None:
-        return False
-    lower = member_name.lower()
-    return not any(candidate.name.lower() == lower for candidate in surface.members)
+    return surface is not None and not surface.has_member(member_name)
 
 
 def _set_value_is_nothing(value_tokens: Sequence[VbaToken]) -> bool:
@@ -318,7 +449,7 @@ def _set_value_is_nothing(value_tokens: Sequence[VbaToken]) -> bool:
 
 
 def _unset_with_receiver(
-    source: str, span: Span, locals_: set[str], state: Mapping[str, str]
+    source: str, span: Span, locals_: Mapping[str, str], state: Mapping[str, str]
 ) -> tuple[str, Span] | None:
     header = block_header_line_span(source, span)
     toks = statement_tokens_after_leading_label(source, header)
@@ -335,11 +466,12 @@ def _unset_with_receiver(
 
 def _local_object_variables_for(
     symbols: ModuleSymbols, proc: ProcedureNode, member_ctx: MemberCompletionContext
-) -> set[str]:
+) -> dict[str, str]:
+    """The tracked object locals, lowercased name -> declared name."""
     proc_sym = _procedure_symbol_for(symbols, proc)
     if proc_sym is None or proc_sym.children is None:
-        return set()
-    out: set[str] = set()
+        return {}
+    out: dict[str, str] = {}
     for child in proc_sym.children:
         if (
             child.kind is VbaSymbolKind.LOCAL_VARIABLE
@@ -352,7 +484,7 @@ def _local_object_variables_for(
             and child.as_type
             and is_known_object_assignment_type(child.as_type, member_ctx)
         ):
-            out.add(child.name.lower())
+            out[child.name.lower()] = child.name
     return out
 
 

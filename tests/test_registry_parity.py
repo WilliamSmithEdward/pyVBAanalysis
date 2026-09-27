@@ -42,6 +42,14 @@ _NOT_PORTED = {
     "vbaTestDirective",
 }
 
+# Catalogue rules upstream keeps in its metadata but no longer emits anywhere, so
+# the port does not emit them either.
+_RETIRED_UPSTREAM = {
+    # XLIDE issue #107 (10.12.0): a Property Let's value parameter may be of any
+    # type, object types included, so the report was wrong and upstream removed it.
+    "propertyLetObjectValue",
+}
+
 # Rules emitted by the engine without going through a rule's push() callback,
 # mapped to (file, marker) proving the emission still exists.
 _DIRECT_EMITTERS = {
@@ -68,7 +76,7 @@ def _scan() -> tuple[set[str], set[str]]:
 def test_every_catalogue_rule_is_emitted() -> None:
     pushed, selected = _scan()
     emitted = pushed | selected | set(_DIRECT_EMITTERS)
-    missing = set(DIAGNOSTIC_RULES) - emitted - _NOT_PORTED
+    missing = set(DIAGNOSTIC_RULES) - emitted - _NOT_PORTED - _RETIRED_UPSTREAM
     assert not missing, (
         f"catalogue rules with no Python emitter (unported after a data re-pin?): {sorted(missing)}"
     )
@@ -92,7 +100,7 @@ def test_direct_emitters_still_exist() -> None:
 
 def test_not_ported_set_stays_minimal() -> None:
     # If a deliberately-excluded rule gains a Python emitter, remove it from
-    # _NOT_PORTED so the gate guards it again.
+    # _NOT_PORTED (or _RETIRED_UPSTREAM) so the gate guards it again.
     pushed, selected = _scan()
-    stale = _NOT_PORTED & (pushed | selected)
-    assert not stale, f"_NOT_PORTED entries that now have emitters: {sorted(stale)}"
+    stale = (_NOT_PORTED | _RETIRED_UPSTREAM) & (pushed | selected)
+    assert not stale, f"excluded entries that now have emitters: {sorted(stale)}"

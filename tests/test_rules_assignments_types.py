@@ -78,7 +78,11 @@ def test_set_requires_object() -> None:
 
 
 def test_object_assignment_requires_set() -> None:
-    assert "set-required" in _codes("Sub S()\n    Dim o As Object\n    o = 5\nEnd Sub")
+    # A bare `=` to an object variable is a Let through the default member (XLIDE
+    # issue #107): Collection's Item takes an argument, so the Let cannot reach it,
+    # while Object looks its default member up when it runs.
+    assert "set-required" in _codes("Sub S()\n    Dim c As Collection\n    c = 5\nEnd Sub")
+    assert "set-required" not in _codes("Sub S()\n    Dim o As Object\n    o = 5\nEnd Sub")
 
 
 def test_array_assignment_to_scalar() -> None:

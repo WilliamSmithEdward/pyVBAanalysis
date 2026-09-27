@@ -21,10 +21,19 @@ from ...completion.member_access import (
 from ...completion.member_access import (
     is_known_object_assignment_type as is_known_object_assignment_type_ctx,
 )
-from ...conditional import ConditionalActivityTracker
+from ...conditional import ConditionalActivityTracker, inactive_node_skip
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
 from ...lexer.token_kinds import TokenKind, VbaToken
-from ...parser.nodes import LeafStatementNode, ModuleNode, ProcedureNode, ProcKind, Span
+from ...parser.nodes import (
+    BodyNode,
+    ForBlockNode,
+    LeafStatementNode,
+    ModuleNode,
+    ProcedureNode,
+    ProcKind,
+    Span,
+    iter_body_nodes,
+)
 from ...symbols.name_resolution import (
     BareIdentifierContext,
     BareIdentifierResolutionInput,
@@ -84,7 +93,7 @@ from ..walker import (
     token_text,
     top_level_operator_index,
 )
-from .type_of_is import object_assignment_incompatibility_reason
+from .type_of_is import object_assignment_incompatibility_reason, object_let_assignment_verdict
 
 
 def check_const_assignment(
@@ -110,9 +119,7 @@ def check_const_assignment(
                     name=hit[0],
                     context=BareIdentifierContext.ASSIGNMENT_TARGET,
                     enclosing_procedure=proc_sym,
-                    project_visible_symbols=list(project_visible_symbols)
-                    if project_visible_symbols
-                    else [],
+                    project_visible_symbols=project_visible_symbols or (),
                 )
             )
             if binding.scope is not BareIdentifierResolutionScope.AMBIGUOUS and any(
@@ -181,11 +188,27 @@ def check_assignment_types(
             if not expected:
                 return
             if is_known_object_assignment_type_ctx(expected, member_ctx):
-                push(
-                    "setRequired",
-                    f"Object assignment to '{name}' requires Set because it is declared as {expected}.",
-                    name_span,
-                )
+                # The VBE compiles a bare `=` to an object variable as a Let through
+                # the type's default member (XLIDE issue #107): `r = 5` writes the
+                # Range's Value. What is reported is what the default member makes
+                # of it.
+                verdict = object_let_assignment_verdict(expected, member_ctx)
+                if verdict == "argument":
+                    push(
+                        "setRequired",
+                        f"Assignment to '{name}' requires Set: the default member of {expected} "
+                        "takes an argument, so a Let cannot reach it. This is a VBE compile error: "
+                        "Argument not optional.",
+                        name_span,
+                    )
+                elif verdict == "noDefault":
+                    push(
+                        "setRequired",
+                        f"Assignment to '{name}' requires Set: {expected} has no default member for "
+                        "a Let to reach. This will raise Run-time error '438': Object doesn't "
+                        "support this property or method.",
+                        name_span,
+                    )
                 return
             array_source = _array_assignment_to_scalar_source(
                 name, value_tokens, span.start, expected, shapes,
@@ -199,6 +222,16 @@ def check_assignment_types(
                     "Assign an array element or use a Variant/array target.",
                     src_span,
                 )
+                return
+            # A dynamic Byte array takes a String whole - `b = "abc"` copies the
+            # string's bytes, and a String takes the array back (XLIDE issue #105,
+            # measured in Excel 16.0). The element type is not what the value is
+            # checked against there.
+            resolved_target_shape = resolve_target_shape(name)
+            target_shape = (
+                resolved_target_shape.shape if resolved_target_shape.resolved else shapes.get(name.lower())
+            )
+            if target_shape is not None and target_shape.is_array and normalize_type(target_shape.as_type) == "byte":
                 return
             string_arithmetic = nonnumeric_string_arithmetic_operand(
                 expected, value_tokens, span.start
@@ -331,6 +364,16 @@ def check_member_assignment_types(
                     assignment.member_span,
                 )
                 return
+            # `Set h.Item = x` needs a Property Set; with only a Property Let the VBE
+            # refuses it, "Invalid use of property" (XLIDE issue #107).
+            if target.let_accessor and not target.set_accessor:
+                push(
+                    "setRequiresObject",
+                    f"Set assignment to '{assignment.label}' needs a Property Set, but the property "
+                    "declares only a Property Let. This is a VBE compile error: Invalid use of property.",
+                    assignment.member_span,
+                )
+                return
             actual = infer_argument_type(
                 assignment.value_tokens, span.start, env, module_signatures, source_names,
                 resolve_expression_type, resolve_qualified_expression_type,
@@ -345,15 +388,27 @@ def check_member_assignment_types(
                     actual.span if actual is not None else assignment.member_span,
                 )
             return
-        if is_known_object_assignment_type_ctx(expected, member_ctx):
+        # A bare `=` to a project property calls its Property Let, whatever the
+        # value's type: `h.Item = New Collection` compiles with `Property Let
+        # Item(ByVal v As Object)` (XLIDE issue #107). Only a property with a Set and
+        # no Let refuses it: "Invalid use of property".
+        if target.set_accessor and not target.let_accessor:
+            push(
+                "setRequired",
+                f"Assignment to '{assignment.label}' requires Set: the property declares a Property "
+                "Set and no Property Let. This is a VBE compile error: Invalid use of property.",
+                assignment.member_span,
+            )
+            return
+        if not target.let_accessor and is_known_object_assignment_type_ctx(expected, member_ctx):
             push(
                 "setRequired",
                 f"Object assignment to '{assignment.label}' requires Set because it expects {expected}.",
                 assignment.member_span,
             )
             return
-        if not expected or normalize_type(expected) == "object":
-            return
+        if not expected or not is_known_scalar_type(normalize_type(expected) or ""):
+            return  # a Let of an object or unknown type: nothing provable about the value
         string_arithmetic = nonnumeric_string_arithmetic_operand(
             expected, assignment.value_tokens, span.start
         )
@@ -479,6 +534,21 @@ def check_set_assignments(
             )
             expected = target_declared_type.as_type if target_declared_type.resolved else env.get(name.lower())
             target_type = normalize_type(expected)
+            # `Set v = 5` is refused whatever v is: a literal is never an object
+            # reference ("Object required", XLIDE issue #125, measured in Excel 16.0).
+            literal = [tok for tok in value_tokens if tok.kind is not TokenKind.COMMENT]
+            if (
+                (not target_type or target_type == "variant")
+                and len(literal) == 1
+                and _is_scalar_literal_token(literal[0])
+            ):
+                push(
+                    "setRequiresObject",
+                    f"Set assigns an object reference, but {literal[0].raw_text} is a literal value. "
+                    "This is a VBE compile error: Object required.",
+                    Span(branch.start + literal[0].start, branch.start + literal[0].end),
+                )
+                return
             if not target_type or not is_known_scalar_type(target_type):
                 if not is_known_object_assignment_type_ctx(expected, member_ctx):
                     return
@@ -595,6 +665,8 @@ def _procedure_has_return_assignment(
         set_target = set_assignment_target(source, span)
         if set_target is not None and set_target[0].lower() == lower:
             return True
+        if _return_assigned_by_statement_form(source, span, lower):
+            return True
         call = extract_call(source, span)
         qualified = None if call else extract_qualified_call(source, span, module_signatures)
         effective = call or qualified
@@ -614,7 +686,96 @@ def _procedure_has_return_assignment(
                 return
 
     for_each_statement(proc.body, visit, activity)
-    return found
+    # `For Count3 = 1 To 3` assigns the return variable as its counter (XLIDE issue
+    # #115): the loop is a block, not a statement the walk above visits.
+    return found or _for_loop_assigns(proc.body, lower, activity)
+
+
+def _for_loop_assigns(
+    body: Sequence[BodyNode], lower: str, activity: ConditionalActivityTracker | None
+) -> bool:
+    return any(
+        isinstance(node, ForBlockNode)
+        and node.control_variable is not None
+        and node.control_variable.lower() == lower
+        for node in iter_body_nodes(body, inactive_node_skip(activity))
+    )
+
+
+_TYPE_SUFFIX_CHARS = frozenset("$%&!#@")
+
+
+def _return_assigned_by_statement_form(source: str, span: Span, lower: str) -> bool:
+    """The statement forms besides `Name = value` that assign a Function's return
+    variable (XLIDE issue #115, each measured in Excel 16.0): `For Name = 1 To 3`
+    leaves the counter's final value, `ReDim Name(2)` sizes an array return,
+    `Line Input #f, Name`, `Input #f, Name` and `Get #f, 1, Name` read into it, and
+    `Name$ = "hi"` names it with its type-declaration character."""
+    toks = statement_tokens(source, span)
+    i = first_executable_token_index(toks)
+
+    def at(index: int) -> VbaToken | None:
+        return toks[index] if 0 <= index < len(toks) else None
+
+    def is_name(tok: VbaToken | None) -> bool:
+        name = token_name(tok)
+        return name is not None and name.lower() == lower
+
+    head = token_text(at(i))
+    if head == "for":
+        return is_name(at(i + 2)) if token_text(at(i + 1)) == "each" else is_name(at(i + 1))
+    if head == "redim":
+        k = i + 1
+        if token_text(at(k)) == "preserve":
+            k += 1
+        depth = 0
+        while k < len(toks):
+            raw = toks[k].raw_text
+            if raw == "(":
+                depth += 1
+            elif raw == ")":
+                depth -= 1
+            elif (
+                depth == 0
+                and is_name(toks[k])
+                and (k == i + 1 or token_text(toks[k - 1]) == "preserve" or toks[k - 1].raw_text == ",")
+            ):
+                return True
+            k += 1
+        return False
+    if head in ("line", "input", "get"):
+        # Everything after the file number is a target (Line Input / Input) or the
+        # third slot is (Get #f, rec, var); a plain name in one of them is the
+        # assignment.
+        rest = toks[i + 1 :]
+        return any(is_name(tok) and index > 0 and rest[index - 1].raw_text == "," for index, tok in enumerate(rest))
+    # `Name$ = value`: the suffix is glued to the name and the `=` follows.
+    name_tok = at(i)
+    suffix = at(i + 1)
+    equals = at(i + 2)
+    return (
+        is_name(name_tok)
+        and name_tok is not None
+        and suffix is not None
+        and suffix.start == name_tok.end
+        and len(suffix.raw_text) == 1
+        and suffix.raw_text in _TYPE_SUFFIX_CHARS
+        and equals is not None
+        and equals.raw_text == "="
+    )
+
+
+def _is_scalar_literal_token(tok: VbaToken) -> bool:
+    """A literal that can never be an object reference: a number, string, date, True or False."""
+    if tok.kind in (
+        TokenKind.INTEGER_LITERAL,
+        TokenKind.FLOAT_LITERAL,
+        TokenKind.STRING_LITERAL,
+        TokenKind.DATE_LITERAL,
+    ):
+        return True
+    word = token_text(tok)
+    return word in ("true", "false")
 
 
 def _assigns_own_field(source: str, span: Span, lower: str) -> bool:

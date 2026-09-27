@@ -52,6 +52,8 @@ class SourceDeclaredShape:
 class SourceDeclaredType:
     resolved: bool
     as_type: str | None = None
+    # What the resolved binding is: a variable, a constant, a parameter, a procedure.
+    kind: VbaSymbolKind | None = None
 
 
 _VALUE_DECLARATION_KINDS = frozenset(
@@ -195,9 +197,7 @@ def declared_shape_for_source_binding(
             name=name,
             context=context,
             enclosing_procedure=proc_sym,
-            project_visible_symbols=list(project_visible_symbols)
-            if project_visible_symbols
-            else [],
+            project_visible_symbols=project_visible_symbols or (),
         )
     )
     if binding.scope in (
@@ -235,7 +235,7 @@ def _source_identifier_binding(
             name=name,
             context=context,
             enclosing_procedure=proc_sym,
-            project_visible_symbols=list(project_visible_symbols) if project_visible_symbols else [],
+            project_visible_symbols=project_visible_symbols or (),
         )
     )
 
@@ -298,7 +298,11 @@ def declared_value_type_for_source_binding(
     if not value_definitions:
         return SourceDeclaredType(resolved=False)
     typed = next((d for d in value_definitions if d.as_type), None)
-    return SourceDeclaredType(resolved=True, as_type=typed.as_type if typed is not None else None)
+    return SourceDeclaredType(
+        resolved=True,
+        as_type=typed.as_type if typed is not None else None,
+        kind=(typed if typed is not None else value_definitions[0]).kind,
+    )
 
 
 def declared_value_type_for_qualified_source_binding(

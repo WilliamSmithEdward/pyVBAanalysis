@@ -72,6 +72,7 @@ _COMBINED_TYPE_SEPARATOR = "|"
 _UNION_TYPE_PREFIX = "union:"
 _UNION_TYPE_SEPARATOR = "|"
 _TRAILING_EMPTY_PARENS_RE = re.compile(r"\s*\(\s*\)\s*$")
+_AS_OBJECT_SIGNATURE_RE = re.compile(r"\bAs Object\s*$", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -102,6 +103,15 @@ class MemberCompletionContext:
     # a fresh dict; the scan is then paid once per procedure rather than once per
     # leading-dot member. Must be discarded whenever the source changes.
     with_scan_cache: dict[int, _WithScanIndex] | None = None
+    # Receiver-chain prefix results for one analysis pass, keyed by the chain's
+    # root token offset and the number of segments resolved (XLIDE issue #135).
+    # The caller owns its lifetime: one source, one pass.
+    receiver_type_cache: dict[tuple[int, int], str | None] | None = None
+    # Receiver chains already collected, keyed by the dot token's offset (#135).
+    receiver_chain_cache: dict[int, _ReceiverChain] | None = None
+    # Upstream's memberSurfaceCache (XLIDE issue #139) has no field here: the port
+    # has memoized surfaces per (project types, model) since before, in
+    # _SURFACES_CACHE below, which serves every context of one pass.
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +128,10 @@ class MemberCompletionEntry:
     write_type: str | None = None
     # The verified call signature, when the source or the host metadata has one.
     signature: str | None = None
+    # The setters a project property declares (XLIDE issue #107); None for host
+    # members.
+    let_accessor: bool | None = None
+    set_accessor: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,15 +156,6 @@ class _ReceiverChain:
 
 
 @dataclass(frozen=True, slots=True)
-class _ChainReceiver:
-    """The explicit receiver chain ending at one dot: whether it collected, and the
-    type _receiver_type_from_chain resolves it to."""
-
-    collected: bool
-    receiver_type: str | None
-
-
-@dataclass(frozen=True, slots=True)
 class _ResolvedMemberReturn:
     type: str
     kind: str
@@ -163,6 +168,31 @@ class _MemberSurface:
     owner: str
     members: list[MemberCompletionEntry]
     exhaustive: bool
+    # The members by lowercased name, built the first time one is looked up: a host
+    # type has hundreds of members and a module asks for one name per reference.
+    by_lower_name: dict[str, MemberCompletionEntry] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExhaustiveMemberSurface:
+    """An exhaustive surface reduced to what a member-existence check needs."""
+
+    owner: str
+    surface: _MemberSurface
+
+    def has_member(self, member_name: str) -> bool:
+        return _surface_member_named(self.surface, member_name) is not None
+
+
+def _surface_member_named(surface: _MemberSurface, member_name: str) -> MemberCompletionEntry | None:
+    by_name = surface.by_lower_name
+    if by_name is None:
+        by_name = {}
+        # First occurrence wins, as the linear search it replaces did.
+        for member in surface.members:
+            by_name.setdefault(member.name.lower(), member)
+        surface.by_lower_name = by_name
+    return by_name.get(member_name.lower())
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,12 +261,28 @@ def resolve_exact_member_completion(
     surface = _member_surface_for_type(current_type, ctx)
     if surface is None:
         return None
-    lower = member_name.lower()
-    member = next((m for m in surface.members if m.name.lower() == lower), None)
+    member = _surface_member_named(surface, member_name)
     if member is None or member.signature is not None:
         return member
     signature = _signature_for_member(current_type, member.name, ctx)
     return replace(member, signature=signature) if signature is not None else member
+
+
+def resolve_exhaustive_member_surface_at(
+    source: str, offset: int, ctx: MemberCompletionContext | None = None
+) -> ExhaustiveMemberSurface | None:
+    """The member surface of the receiver ending at ``offset`` when the surface can
+    prove a member absent, without building a completion row for every member
+    (XLIDE issue #139). The member-not-found rules ask this for every dot in a
+    module and only ever test one name against it."""
+    ctx = ctx if ctx is not None else MemberCompletionContext()
+    current_type = resolve_receiver_type_at(source, offset, ctx)
+    if not current_type:
+        return None
+    surface = _member_surface_for_type(current_type, ctx)
+    if surface is None or not surface.exhaustive:
+        return None
+    return ExhaustiveMemberSurface(surface.owner, surface)
 
 
 def resolve_receiver_type_at(
@@ -323,7 +369,23 @@ def _receiver_type_from_tokens(
 ) -> str | None:
     """Walk the receiver chain ending at the dot ``tokens[dot_index]`` and resolve
     it to a qualified host/project type, threading return types through each hop."""
-    explicit_receiver = _explicit_chain_receiver_type(tokens, dot_index, source, offset, ctx)
+    # A dot whose chain is the previous dot's plus one member takes that dot's
+    # chain and adds the member, instead of walking the whole chain back again
+    # (XLIDE issue #135: a 4,000-member chain took 2.4 s, each dot re-walking it).
+    chain = _chain_extended_from_previous_dot(tokens, dot_index, ctx)
+    if chain is None:
+        chain = _collect_receiver_chain_with_start(tokens, dot_index - 1)
+    if chain is not None and ctx.receiver_chain_cache is not None:
+        ctx.receiver_chain_cache[tokens[dot_index].start] = chain
+    # The chain's root resolves the same at every dot of one statement, so the
+    # type walk resumes from the longest prefix already resolved.
+    cache_base: int | None = None
+    if chain is not None and ctx.receiver_type_cache is not None:
+        root_token = _at(tokens, chain.start_index)
+        cache_base = root_token.start if root_token is not None else None
+    explicit_receiver = _receiver_type_from_chain(
+        chain.segments if chain is not None else [], source, offset, ctx, cache_base
+    )
     if explicit_receiver:
         return explicit_receiver
     grouped = _receiver_type_from_parenthesized_receiver(
@@ -337,86 +399,6 @@ def _receiver_type_from_tokens(
     return _receiver_type_from_implicit_with_chain(
         _with_receiver_type_at(source, tokens[dot_index].end, ctx), implicit_with_chain, ctx
     )
-
-
-# The member rules resolve the receiver at every dot of a chain, and a chain was
-# resolved from its root each time, so `a.b.c ...` cost time quadratic in its
-# length: 3000 members took 16 seconds. Each dot's result is kept for the pass,
-# and a dot whose chain is the previous dot's plus one member takes one step on
-# from that result. The root resolves the same way at every dot of one chain:
-# the offset reaches _resolve_root only through the enclosing procedure and the
-# Set statements that end before it, which are the same anywhere in a statement.
-# Entries are keyed by the dot token's identity and keep the token, so only the
-# pass's shared token stream ever matches, never a prefix lexed for one call.
-_CHAIN_RECEIVER_CACHE = IdentityLru(capacity=4)
-
-
-def _explicit_chain_receiver_type(
-    tokens: Sequence[VbaToken],
-    dot_index: int,
-    source: str,
-    offset: int,
-    ctx: MemberCompletionContext,
-) -> str | None:
-    """_receiver_type_from_chain over the chain collected back from the dot
-    ``tokens[dot_index]``, continued from the previous dot when possible."""
-    if not ctx.source_tokens:
-        # No shared stream, so no pass whose dots could be remembered.
-        return _chain_receiver_from_root(tokens, dot_index, source, offset, ctx).receiver_type
-    memo = _chain_receiver_memo(ctx, source)
-    dot = tokens[dot_index]
-    known = memo.get(id(dot))
-    if known is not None and known[0] is dot:
-        return known[1].receiver_type
-    result: _ChainReceiver | None = None
-    last = _receiver_segment_ending_at(tokens, dot_index - 1)
-    if last is not None:
-        segment, name_index = last
-        previous_dot = tokens[name_index - 1] if name_index > 0 else None
-        if previous_dot is not None and previous_dot.raw_text == ".":
-            prior = memo.get(id(previous_dot))
-            if prior is not None and prior[0] is previous_dot:
-                result = _extend_chain_receiver(prior[1], segment, ctx)
-    if result is None:
-        result = _chain_receiver_from_root(tokens, dot_index, source, offset, ctx)
-    memo[id(dot)] = (dot, result)
-    return result.receiver_type
-
-
-def _chain_receiver_from_root(
-    tokens: Sequence[VbaToken],
-    dot_index: int,
-    source: str,
-    offset: int,
-    ctx: MemberCompletionContext,
-) -> _ChainReceiver:
-    chain = _collect_receiver_chain_with_start(tokens, dot_index - 1)
-    return _ChainReceiver(
-        collected=chain is not None,
-        receiver_type=_receiver_type_from_chain(
-            chain.segments if chain is not None else [], source, offset, ctx
-        ),
-    )
-
-
-def _chain_receiver_memo(
-    ctx: MemberCompletionContext, source: str
-) -> dict[int, tuple[VbaToken, _ChainReceiver]]:
-    memo = _CHAIN_RECEIVER_CACHE.get(ctx, source)
-    if memo is None:
-        memo = _CHAIN_RECEIVER_CACHE.put({}, ctx, source)
-    return memo  # type: ignore[no-any-return]
-
-
-def _extend_chain_receiver(
-    prior: _ChainReceiver, segment: _ReceiverChainSegment, ctx: MemberCompletionContext
-) -> _ChainReceiver:
-    """The receiver one member further along a chain, as _receiver_type_from_chain
-    folds it: a chain that did not collect stays so, and a chain whose type did
-    not resolve keeps that result."""
-    if not prior.collected or not prior.receiver_type:
-        return prior
-    return _ChainReceiver(True, _advance_receiver_type(prior.receiver_type, segment, ctx))
 
 
 def is_explicit_element_accessor(name: str) -> bool:
@@ -503,24 +485,88 @@ def _receiver_type_from_chain(
     source: str,
     offset: int,
     ctx: MemberCompletionContext,
+    cache_base: int | None = None,
 ) -> str | None:
     if len(chain) == 0:
         return None
-    root = chain[0]
-    root_type = _resolve_root(root.name, source, offset, ctx)
-    if not root_type:
-        return None
-    current_type: str | None = _apply_default_member_return_type(
-        root_type, root.has_arguments, ctx
-    )
-    s = 1
+    # Prefix results of this chain, keyed by the root token's offset and the
+    # number of segments resolved: the longest cached prefix is where the walk
+    # resumes, and every prefix reached is stored for the next dot.
+    cache: dict[tuple[int, int], str | None] | None = None
+    base = 0
+    if cache_base is not None:
+        cache = ctx.receiver_type_cache
+        base = cache_base
+    resume_at = 0
+    current_type: str | None = None
+    if cache is not None:
+        for s in range(len(chain), 0, -1):
+            key = (base, s)
+            if key in cache:
+                current_type = cache[key]
+                resume_at = s
+                break
+    if resume_at == 0:
+        root = chain[0]
+        root_type = _resolve_root(root.name, source, offset, ctx)
+        if not root_type:
+            if cache is not None:
+                cache[(base, 1)] = None
+            return None
+        current_type = _apply_default_member_return_type(root_type, root.has_arguments, ctx)
+        if cache is not None:
+            cache[(base, 1)] = current_type
+        resume_at = 1
+    s = resume_at
     while s < len(chain) and current_type:
+        # An unresolved member stores None, which also ends the walk.
         current_type = _advance_receiver_type(current_type, chain[s], ctx)
+        if cache is not None:
+            cache[(base, s + 1)] = current_type
         s += 1
     return current_type
 
 
 # -- chain collection ------------------------------------------------------
+
+
+def _chain_extended_from_previous_dot(
+    tokens: Sequence[VbaToken], dot_index: int, ctx: MemberCompletionContext
+) -> _ReceiverChain | None:
+    """The chain for the dot at ``dot_index`` when the token before it is a plain
+    member name that follows an already-resolved dot: that dot's cached chain plus
+    this member. Any other shape (a root, a boundary) is collected the long way."""
+    cache = ctx.receiver_chain_cache
+    if cache is None:
+        return None
+    member = _at(tokens, dot_index - 1)
+    if member is not None and is_ident_like(member):
+        previous_dot = _at(tokens, dot_index - 2)
+        if previous_dot is None or previous_dot.raw_text != ".":
+            return None
+        previous = cache.get(previous_dot.start)
+        if previous is None:
+            return None
+        return _ReceiverChain(
+            [*previous.segments, _ReceiverChainSegment(_word(member), False)], previous.start_index
+        )
+    # Port-only: upstream extends only a plain member and collects `name(args)` the
+    # long way, so a chain of calls such as `.Offset(1, 0).Offset(1, 0)...` stayed
+    # quadratic (a 1,000-link chain took 3.4 s). The segment ending at the `)` is
+    # the one the long walk would collect there, so the chain is the same.
+    if member is None or member.raw_text != ")":
+        return None
+    last = _receiver_segment_ending_at(tokens, dot_index - 1)
+    if last is None:
+        return None
+    segment, name_index = last
+    previous_dot = _at(tokens, name_index - 1)
+    if previous_dot is None or previous_dot.raw_text != ".":
+        return None
+    previous = cache.get(previous_dot.start)
+    if previous is None:
+        return None
+    return _ReceiverChain([*previous.segments, segment], previous.start_index)
 
 
 def _collect_receiver_chain_with_start(
@@ -950,7 +996,11 @@ def _build_member_surface_for_type(
         return _MemberSurface(
             owner=" | ".join(_display_type_name(item) for item in union),
             members=_merge_completion_members(*[surface.members for surface in surfaces]),
-            exhaustive=all(surface.exhaustive for surface in surfaces),
+            # A union is what the library declares Object - ActiveSheet, a Sheets
+            # item - so VBA binds its members when it runs and a name on none of
+            # the parts is not a compile error (XLIDE issue #114: `ActiveSheet.asdf`
+            # compiles). Never exhaustive.
+            exhaustive=False,
         )
     if type_name.startswith(_VBA_LIBRARY_PREFIX):
         qualifier = resolve_vba_library_qualifier(type_name[len(_VBA_LIBRARY_PREFIX) :])
@@ -1128,6 +1178,8 @@ def _project_member_entries(
             writable=m.writable,
             write_type=m.write_type,
             signature=m.signature,
+            let_accessor=m.let_accessor,
+            set_accessor=m.set_accessor,
         )
         for m in project_type.members
     ]
@@ -1269,13 +1321,32 @@ def _host_member_return(
     owner_type: str, member_name: str, model: HostObjectModel | None
 ) -> _ResolvedMemberReturn | None:
     lower = member_name.lower()
-    member = next(
-        (m for m in get_host_members(owner_type, model) if m["name"].lower() == lower), None
-    )
+    members = get_host_members(owner_type, model)
+    member = next((m for m in members if m["name"].lower() == lower), None)
     if member is None:
         return None
     if member.get("returns"):
-        return _ResolvedMemberReturn(type=member["returns"], kind=member.get("kind", "property"))
+        # An accessor the library declares `As Object` is late bound however well
+        # the model knows its element: `Worksheets(1).NoSuchMember` compiles
+        # (XLIDE issue #114). A one-part union keeps the element for completion
+        # and chaining without closing its surface. The hand-written collections
+        # carry the repaired type on Item, so the library's word is read off
+        # `_Default` as well.
+        default_member = (
+            next((m for m in members if m["name"] == "_Default"), None) if lower == "item" else None
+        )
+        declared_object = any(
+            candidate is not None
+            and (
+                candidate.get("declaredType") == "Object"
+                or _AS_OBJECT_SIGNATURE_RE.search(candidate.get("signature") or "") is not None
+            )
+            for candidate in (member, default_member)
+        )
+        return _ResolvedMemberReturn(
+            type=f"{_UNION_TYPE_PREFIX}{member['returns']}" if declared_object else member["returns"],
+            kind=member.get("kind", "property"),
+        )
     returns_any_of = member.get("returnsAnyOf")
     if returns_any_of:
         return _ResolvedMemberReturn(
@@ -1359,14 +1430,22 @@ def _parse_union_type_key(type_name: str) -> list[str] | None:
 def _type_key_for(types: Sequence[str]) -> str:
     out: list[str] = []
     seen: set[str] = set()
+    late_bound = False
     for type_ in types:
-        for item in _parse_union_type_key(type_) or [type_]:
+        parts = _parse_union_type_key(type_)
+        if parts is not None:
+            late_bound = True
+        for item in parts if parts is not None else [type_]:
             key = item.lower()
             if key in seen:
                 continue
             seen.add(key)
             out.append(item)
-    return out[0] if len(out) == 1 else f"{_UNION_TYPE_PREFIX}{_UNION_TYPE_SEPARATOR.join(out)}"
+    # A one-part union stays a union: it marks a value the library declares
+    # Object, whose members bind when it runs (XLIDE issue #114).
+    if len(out) == 1 and not late_bound:
+        return out[0]
+    return f"{_UNION_TYPE_PREFIX}{_UNION_TYPE_SEPARATOR.join(out)}"
 
 
 def _display_type_name(type_name: str) -> str:

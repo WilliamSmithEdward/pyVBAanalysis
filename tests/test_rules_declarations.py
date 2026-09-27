@@ -106,7 +106,9 @@ def test_fixed_length_string_bounds() -> None:
 
 
 def test_option_placement_and_duplication() -> None:
-    assert "option-after-declaration" in _codes("Public X As Long\nOption Explicit")
+    # Only a procedure closes the Option window (XLIDE issue #113).
+    assert "option-after-declaration" in _codes("Sub A()\nEnd Sub\nOption Explicit")
+    assert "option-after-declaration" not in _codes("Public X As Long\nOption Explicit")
     assert "option-after-declaration" not in _codes("Option Explicit\nPublic X As Long")
     assert "duplicate-option" in _codes("Option Explicit\nOption Explicit")
     assert "duplicate-option" not in _codes("Option Explicit\nOption Base 1")

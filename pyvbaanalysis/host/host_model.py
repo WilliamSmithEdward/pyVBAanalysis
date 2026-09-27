@@ -31,6 +31,9 @@ class HostMember(TypedDict, total=False):
     # Marked hidden in the type library: it resolves like any other member, but
     # the editor never offers it (XLIDE issue #56).
     hidden: bool
+    # The type the type library declares, where the model repairs `returns` from
+    # the reference prose: most Item accessors are declared `As Object`.
+    declaredType: str
 
 
 class HostConstant(TypedDict, total=False):
@@ -206,6 +209,16 @@ def _host_constant_index(model: HostObjectModel) -> dict[str, HostConstant]:
 def get_host_type(qualified: str, model: HostObjectModel | None = None) -> HostType | None:
     """The type metadata for a qualified type name (e.g. 'Excel.Range')."""
     return _default(model)["types"].get(qualified)
+
+
+def resolve_host_member(
+    qualified: str, member_name: str, model: HostObjectModel | None = None
+) -> HostMember | None:
+    """An object-access member (a property or method, never an event) of a
+    qualified host type, by name, case-insensitively. None when the type or the
+    member is unknown to the model."""
+    type_index = _host_model_index(_default(model)).members_by_type.get(qualified)
+    return type_index.by_lower_name.get(member_name.lower()) if type_index is not None else None
 
 
 def get_host_members(qualified: str, model: HostObjectModel | None = None) -> list[HostMember]:

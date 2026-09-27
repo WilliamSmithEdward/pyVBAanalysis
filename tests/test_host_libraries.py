@@ -108,7 +108,9 @@ def test_the_first_library_wins_a_shared_name() -> None:
     excel_first = host_object_model_for_tokens(["excel", "word"])
     assert word_first is not None and excel_first is not None
     assert word_first["globals"]["Selection"] == "Word.Selection"
-    assert excel_first["globals"]["Selection"] == "Excel.Range"
+    # Excel's library declares Selection Object: it is whatever is selected (XLIDE
+    # issue #114).
+    assert excel_first["globals"]["Selection"] == "Object"
     assert word_first.get("hostName") == "Word"
 
 

@@ -110,11 +110,17 @@ _KEYWORD_CASING_LISTS: tuple[tuple[str, ...], ...] = (
     FUTURE_RESERVED,
 )
 
+# Reserved in the live VBE though absent from MS-VBAL 3.3.5.2. `Local` is the
+# `On Local Error` keyword: `Dim Local As Long` is a Syntax error and
+# `Function Local()` is "Expected: identifier" (Excel 16.0 build 20326,
+# 2026-09-26, XLIDE issue #98), so it can never be a name.
+MEASURED_RESERVED: tuple[str, ...] = ("Local",)
+
 # Lowercased names of every reserved identifier (MS-VBAL 3.3.5.2). A name in this
 # set is never an <IDENTIFIER>.
 RESERVED_IDENTIFIERS: frozenset[str] = frozenset(
     word.lower()
-    for word_list in (*_KEYWORD_CASING_LISTS, RESERVED_FOR_IMPLEMENTATION_USE)
+    for word_list in (*_KEYWORD_CASING_LISTS, RESERVED_FOR_IMPLEMENTATION_USE, MEASURED_RESERVED)
     for word in word_list
 )
 

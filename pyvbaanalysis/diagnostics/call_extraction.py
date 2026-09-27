@@ -33,6 +33,8 @@ class CallableParamType:
     param_array: bool = False
     is_array: bool | None = None
     by_ref: bool | None = None
+    # A Variant parameter the function refuses Null for (error 94).
+    null_raises: bool | None = None
 
 
 @dataclass(slots=True)
@@ -65,6 +67,10 @@ class CallArguments:
     qualifier: str | None = None
     lookup_key: str | None = None
     explicit_call: bool = False
+    # True for `Take (i)` as a statement: the space makes the parentheses part of
+    # the one argument, which is then passed as a copy, so ByRef exactness does
+    # not apply to it (XLIDE issue #111).
+    arguments_parenthesized: bool = False
     slot_spans: list[Span] | None = None
 
 

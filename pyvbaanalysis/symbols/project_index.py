@@ -210,7 +210,10 @@ def _shadowed_by_own_module(
 
 
 def _is_enum_member_exported(enum_symbol: VbaSymbol, module_kind: ModuleSymbolKind | None) -> bool:
-    return module_kind is ModuleSymbolKind.STANDARD and _is_type_exported(enum_symbol)
+    # A Public Enum in an object module is project-visible too (XLIDE issue #110).
+    return (
+        module_kind is ModuleSymbolKind.STANDARD and _is_type_exported(enum_symbol)
+    ) or enum_symbol.visibility is SymbolVisibility.PUBLIC
 
 
 def _module_raw_integer_constant_expressions(mod: ModuleSymbols) -> dict[str, str | None]:
@@ -406,6 +409,15 @@ def _user_type_field_signature(symbol: VbaSymbol) -> str:
     return f"{symbol.name}{as_clause}"
 
 
+def _string_literal_words_in(source: str) -> frozenset[str]:
+    """The identifier-shaped words inside one module's string literals."""
+    words: set[str] = set()
+    for token in tokenize_cached(source):
+        if token.kind is TokenKind.STRING_LITERAL:
+            words.update(identifier_words(token.raw_text))
+    return frozenset(words)
+
+
 class ProjectIndex:
     """A project-wide symbol index built from a set of module sources."""
 
@@ -418,6 +430,7 @@ class ProjectIndex:
         "_module_implicit_members",
         "_module_predeclared_ids",
         "_module_designer_classes",
+        "_module_string_literal_words",
         "_query_cache",
     )
 
@@ -430,6 +443,11 @@ class ProjectIndex:
         self._module_implicit_members: dict[str, Sequence[ImplicitMember]] = {}
         self._module_predeclared_ids: dict[str, bool] = {}
         self._module_designer_classes: dict[str, str] = {}
+        # Identifier-shaped words inside each module's string literals, taken from
+        # the token stream while it is still cached from the module's own parse.
+        # The whole-project set unions these; re-tokenizing every module for it was
+        # one full lex per module per project build (XLIDE issue #139).
+        self._module_string_literal_words: dict[str, frozenset[str]] = {}
         self._query_cache: dict[str, object] = {}
 
     # --- mutation ---------------------------------------------------------
@@ -448,6 +466,7 @@ class ProjectIndex:
         key = input.module_name.lower()
         self._modules[key] = symbols
         self._module_sources[key] = input.source
+        self._module_string_literal_words[key] = _string_literal_words_in(input.source)
         _set_or_forget(self._module_implicit_members, key, input.implicit_members)
         _set_or_forget(self._module_predeclared_ids, key, input.predeclared_id)
         _set_or_forget(self._module_designer_classes, key, input.designer_class)
@@ -458,6 +477,7 @@ class ProjectIndex:
         key = module_name.lower()
         self._modules.pop(key, None)
         self._module_sources.pop(key, None)
+        self._module_string_literal_words.pop(key, None)
         self._module_implicit_members.pop(key, None)
         self._module_predeclared_ids.pop(key, None)
         self._module_designer_classes.pop(key, None)
@@ -556,10 +576,8 @@ class ProjectIndex:
 
         def compute() -> frozenset[str]:
             words: set[str] = set()
-            for source in self._module_sources.values():
-                for token in tokenize_cached(source):
-                    if token.kind is TokenKind.STRING_LITERAL:
-                        words.update(identifier_words(token.raw_text))
+            for module_words in self._module_string_literal_words.values():
+                words.update(module_words)
             return frozenset(words)
 
         return self._cached("stringLiteralWords", compute)
@@ -1051,8 +1069,12 @@ class ProjectIndex:
     def _is_bare_identifier_visible(self, symbol: VbaSymbol, mod: ModuleSymbols, same_module: bool) -> bool:
         if same_module:
             return True
+        # A Public Enum in a class module is visible across the project by its
+        # bare member names, as it is from a standard module (XLIDE issue #110,
+        # measured in Excel 16.0). A class's other declarations stay behind the
+        # instance.
         if mod.module_kind is not ModuleSymbolKind.STANDARD:
-            return False
+            return symbol.kind is VbaSymbolKind.ENUM and symbol.visibility is SymbolVisibility.PUBLIC
         if symbol.kind is VbaSymbolKind.ENUM or symbol.kind is VbaSymbolKind.TYPE:
             return _is_type_exported(symbol)
         return _is_exported(symbol, mod.module_kind)
@@ -1120,6 +1142,10 @@ class ProjectIndex:
                     existing.signature = _project_object_member_signature(symbol)
                 if _is_default_project_object_member(symbol):
                     existing.default_member = True
+                if symbol.kind is VbaSymbolKind.PROPERTY_LET:
+                    existing.let_accessor = True
+                elif symbol.kind is VbaSymbolKind.PROPERTY_SET:
+                    existing.set_accessor = True
                 existing.attributes = _merge_member_attributes(existing.attributes, symbol.attributes)
                 existing.definitions = [
                     *(existing.definitions or []),
@@ -1137,6 +1163,8 @@ class ProjectIndex:
                 visibility=symbol.visibility,
                 definitions=[_project_object_member_definition(symbol)],
                 default_member=True if _is_default_project_object_member(symbol) else None,
+                let_accessor=True if symbol.kind is VbaSymbolKind.PROPERTY_LET else None,
+                set_accessor=True if symbol.kind is VbaSymbolKind.PROPERTY_SET else None,
                 attributes=_merge_member_attributes(None, symbol.attributes),
             )
         return list(by_name.values())

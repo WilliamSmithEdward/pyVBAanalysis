@@ -186,8 +186,9 @@ def test_a_declaration_in_the_other_arm_closes_no_option_window() -> None:
     assert "option-after-declaration" not in _codes(source)
 
 
-def test_option_after_a_real_declaration_still_reports() -> None:
-    assert "option-after-declaration" in _codes("Public X As Long\nOption Explicit\n")
+def test_option_after_a_real_procedure_still_reports() -> None:
+    # Only a procedure closes the Option window (XLIDE issue #113).
+    assert "option-after-declaration" in _codes("Public Sub T()\nEnd Sub\nOption Explicit\n")
 
 
 def test_implements_after_a_procedure_in_another_arm_is_allowed() -> None:

@@ -155,6 +155,44 @@ def check_duplicate_declarations(
             proc.children or [], activity, lambda sym: sym.kind in _LOCAL_DECL_KINDS,
             _ALWAYS_COLLIDE, report,
         )
+        # A Function's or Property Get's own name is its return variable, so a
+        # local of that name is the same "Duplicate declaration in current scope"
+        # (XLIDE issue #124: `Dim Main As Long` inside `Function Main`, measured in
+        # Excel 16.0).
+        if proc.kind is not VbaSymbolKind.FUNCTION and proc.kind is not VbaSymbolKind.PROPERTY_GET:
+            continue
+        for child in proc.children or []:
+            if (
+                child.kind in (VbaSymbolKind.LOCAL_VARIABLE, VbaSymbolKind.CONSTANT)
+                and child.name.lower() == proc.name.lower()
+                and not (activity is not None and activity.is_inactive(child.name_span))
+            ):
+                report(child)
+
+
+def check_variable_procedure_name_clash(
+    members: Sequence[VbaSymbol], activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    """A module-level variable or constant may not share its name with a procedure
+    of the same module: `Private Helper As Long` beside `Private Sub Helper()` is
+    "Ambiguous name detected: Helper" (XLIDE issue #124, measured in Excel 16.0)."""
+    def report(repeat: VbaSymbol) -> None:
+        push(
+            "duplicateProcedure",
+            f"Ambiguous name detected: '{repeat.name}' names both a variable and a procedure in this module.",
+            repeat.name_span,
+        )
+
+    _report_repeated_names(
+        members,
+        activity,
+        lambda sym: sym.kind in (VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.CONSTANT)
+        or is_procedure_kind(sym.kind),
+        # Only a variable-against-procedure pair is this rule's; repeats within one
+        # kind belong to the duplicate rules above.
+        lambda a, b: is_procedure_kind(a.kind) != is_procedure_kind(b.kind),
+        report,
+    )
 
 
 def check_duplicate_module_members(

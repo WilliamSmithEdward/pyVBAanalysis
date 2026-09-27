@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import enum
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..identity_cache import IdentityLru
 from .symbol_model import ModuleSymbols, VbaSymbol, VbaSymbolKind
@@ -55,7 +55,9 @@ class BareIdentifierResolutionInput:
     context: BareIdentifierContext
     enclosing_procedure: VbaSymbol | None = None
     offset: int | None = None
-    project_visible_symbols: list[VbaSymbol] = field(default_factory=list)
+    # Read only. Pass the project's own sequence, not a copy: its name index is
+    # built once per sequence (by identity) and reused for every reference.
+    project_visible_symbols: Sequence[VbaSymbol] = ()
 
 
 def resolve_bare_identifier_binding(
@@ -74,10 +76,8 @@ def resolve_bare_identifier_binding(
     current_lower = input.current_module.module_name.lower()
     project = [
         symbol
-        for symbol in input.project_visible_symbols
-        if symbol.module_name.lower() != current_lower
-        and symbol.name.lower() == lower_name
-        and _symbol_allowed_in_context(symbol, input.context)
+        for symbol in _project_symbols_named(input.project_visible_symbols, lower_name)
+        if symbol.module_name.lower() != current_lower and _symbol_allowed_in_context(symbol, input.context)
     ]
     if len(project) > 0:
         return _resolution(input, lower_name, _ambiguous_scope(project, BareIdentifierResolutionScope.PROJECT), project)
@@ -90,6 +90,25 @@ def resolve_bare_identifier_binding(
         definitions=[],
         reason=f"No source-backed {input.context.value} binding found for '{input.name}'.",
     )
+
+
+# Per-pass index of the project-visible symbols by lowercased name. The list is one
+# value per project revision, and every bare reference in every module used to
+# filter the whole of it (XLIDE issue #139: 7% of a large project's analysis in this
+# one function upstream).
+_PROJECT_MATCH_INDEX_CACHE = IdentityLru()
+
+
+def _project_symbols_named(symbols: Sequence[VbaSymbol], lower_name: str) -> Sequence[VbaSymbol]:
+    if not symbols:
+        return ()
+    index: dict[str, list[VbaSymbol]] | None = _PROJECT_MATCH_INDEX_CACHE.get(symbols)
+    if index is None:
+        index = {}
+        for symbol in symbols:
+            index.setdefault(symbol.name.lower(), []).append(symbol)
+        _PROJECT_MATCH_INDEX_CACHE.put(index, symbols)
+    return index.get(lower_name, ())
 
 
 def local_identifier_matches(

@@ -38,6 +38,7 @@ from .rules.assignments import (
 )
 from .rules.binary_operand_scalar import check_binary_operand_scalar
 from .rules.call_arity import check_argument_count
+from .rules.collection_state import check_collection_state
 from .rules.control_flow import (
     check_duplicate_case_else,
     check_duplicate_labels,
@@ -80,6 +81,7 @@ from .rules.expressions import (
     check_division_by_zero_expressions,
     check_expression_call_parens,
     check_invalid_expression_syntax,
+    check_string_arithmetic_operands,
     check_unbalanced_parens,
 )
 from .rules.duplicates import (
@@ -90,8 +92,17 @@ from .rules.duplicates import (
     check_duplicate_module_members,
     check_duplicate_procedures,
     check_duplicate_type_fields,
+    check_variable_procedure_name_clash,
 )
+from .rules.declaration_forms import check_declaration_forms
+from .rules.directive_forms import check_directive_forms
+from .rules.file_statements import check_file_statements
+from .rules.handler_flow import check_handler_flow
+from .rules.host_arguments import check_host_arguments
+from .rules.implements_members import check_implements_members
+from .rules.late_bound_members import check_runtime_member_not_found
 from .rules.lexical import check_invalid_line_continuations, check_unterminated_strings
+from .rules.line_continuations import check_line_continuation_limits
 from .rules.module_kind import (
     check_declare_ptr_safe_for_win64,
     check_event_declaration_module_kind,
@@ -105,8 +116,11 @@ from .rules.module_kind import (
 )
 from .rules.numeric_literals import check_suffixed_literal_overflow
 from .rules.object_state import check_object_variable_not_set, check_scalar_member_access
+from .rules.overflow import check_overflow
 from .rules.parameter_defaults import check_parameter_default_values
 from .rules.runtime_values import check_runtime_argument_values, check_runtime_conversion_values
+from .rules.statement_forms import check_statement_forms
+from .rules.stray_tokens import check_stray_characters
 from .rules.type_of_is import (
     check_is_operator_operands,
     check_typeof_is_compatibility,
@@ -127,6 +141,7 @@ from .rules.undeclared import (
     check_undeclared_variables,
     check_unknown_call_statement,
 )
+from .rules.variant_values import check_variant_value_misuse
 from .walker import ProcedureStatementVisitor
 
 
@@ -170,6 +185,7 @@ def _unknown_call_statement(ctx: RulePassContext, push: PushFn) -> ProcedureStat
         ctx.opts.host_model,
         ctx.opts.designer_class,
         push,
+        ctx.opts.project_class_members,
     )
 
 
@@ -192,6 +208,10 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(
         name="duplicateDeclarations",
         run=lambda ctx, push: check_duplicate_declarations(ctx.symbols.root.children or [], ctx.activity, push),
+    ),
+    DiagnosticRuleEntry(
+        name="variableProcedureNameClash",
+        run=lambda ctx, push: check_variable_procedure_name_clash(ctx.symbols.root.children or [], ctx.activity, push),
     ),
     DiagnosticRuleEntry(
         name="duplicateModuleMembers",
@@ -239,9 +259,33 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
             ctx.opts.module_kind,
             ctx.opts.host_model,
             ctx.opts.designer_class,
+            ctx.opts.referenced_hosts,
             push,
         ),
     ),
+    DiagnosticRuleEntry(name="handlerFlow", run=lambda ctx, push: check_handler_flow(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="fileStatements", run=lambda ctx, push: check_file_statements(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(
+        name="overflow",
+        run=lambda ctx, push: check_overflow(
+            ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.opts.host_model, ctx.activity, push
+        ),
+    ),
+    DiagnosticRuleEntry(name="hostArguments", procedure_statements=lambda ctx, push: check_host_arguments(ctx.source, ctx.symbols, ctx.member_ctx, push)),
+    DiagnosticRuleEntry(name="collectionState", run=lambda ctx, push: check_collection_state(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="variantValueMisuse", run=lambda ctx, push: check_variant_value_misuse(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
+    DiagnosticRuleEntry(name="runtimeMemberNotFound", run=lambda ctx, push: check_runtime_member_not_found(ctx.source, ctx.mod, ctx.symbols, ctx.member_ctx, ctx.activity, push)),
+    DiagnosticRuleEntry(name="declarationForms", run=lambda ctx, push: check_declaration_forms(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="lineContinuationLimits", run=lambda ctx, push: check_line_continuation_limits(ctx.source, ctx.mod, push)),
+    DiagnosticRuleEntry(
+        name="implementsMembers",
+        run=lambda ctx, push: check_implements_members(
+            ctx.source, ctx.mod, ctx.symbols, ctx.module_kind, ctx.opts.project_class_members, ctx.activity, push
+        ),
+    ),
+    DiagnosticRuleEntry(name="statementForms", run=lambda ctx, push: check_statement_forms(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_procedures, ctx.activity, push)),
+    DiagnosticRuleEntry(name="strayCharacters", run=lambda ctx, push: check_stray_characters(ctx.source, ctx.activity, push)),
+    DiagnosticRuleEntry(name="directiveForms", run=lambda ctx, push: check_directive_forms(ctx.source, ctx.mod, push)),
     DiagnosticRuleEntry(name="optionPlacement", run=lambda ctx, push: check_option_placement(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="duplicateOption", run=lambda ctx, push: check_duplicate_options(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="optionStatementForm", run=lambda ctx, push: check_option_statement_form(ctx.source, ctx.mod, ctx.opts, ctx.activity, push)),
@@ -251,17 +295,16 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="moduleDeclarationsAfterProcedures", run=lambda ctx, push: check_module_declarations_after_procedures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="moduleLevelStatementsOutsideProcedures", run=lambda ctx, push: check_module_level_statements_outside_procedures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="reservedDeclarationNames", run=lambda ctx, push: check_reserved_declaration_names(ctx.source, ctx.mod, ctx.activity, push)),
-    # propertySetterValueParameters: includes the propertyLetObjectValue object-value
-    # branch (resolveKnownObjectAssignmentType over the project surface via member_ctx).
-    DiagnosticRuleEntry(name="propertySetterValueParameters", run=lambda ctx, push: check_property_setter_value_parameters(ctx.source, ctx.mod, ctx.activity, ctx.member_ctx, push)),
+    DiagnosticRuleEntry(name="propertySetterValueParameters", run=lambda ctx, push: check_property_setter_value_parameters(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="propertyAccessorSignatures", run=lambda ctx, push: check_property_accessor_signatures(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="parameterOrder", run=lambda ctx, push: check_parameter_order(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="parameterDefaultValues", run=lambda ctx, push: check_parameter_default_values(ctx.source, ctx.mod, ctx.activity, ctx.member_ctx, push)),
     DiagnosticRuleEntry(name="parameterDefaultNotConstant", run=lambda ctx, push: check_non_constant_parameter_defaults(ctx.source, ctx.mod, ctx.activity, ctx.member_ctx, push)),
     DiagnosticRuleEntry(name="constValueNotConstant", run=lambda ctx, push: check_non_constant_const_values(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="enumMemberNotConstant", run=lambda ctx, push: check_non_constant_enum_member_values(ctx.source, ctx.mod, ctx.activity, push)),
-    DiagnosticRuleEntry(name="unbalancedParens", run=lambda ctx, push: check_unbalanced_parens(ctx.source, push)),
+    DiagnosticRuleEntry(name="unbalancedParens", run=lambda ctx, push: check_unbalanced_parens(ctx.source, push, ctx.activity)),
     DiagnosticRuleEntry(name="invalidExpressionSyntax", procedure_statements=lambda ctx, push: check_invalid_expression_syntax(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
+    DiagnosticRuleEntry(name="stringArithmeticOperands", procedure_statements=lambda ctx, push: check_string_arithmetic_operands(ctx.source, ctx.symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="divisionByZeroExpressions", procedure_statements=lambda ctx, push: check_division_by_zero_expressions(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_integer_constants, ctx.opts.project_visible_symbols, ctx.activity, push, ctx.opts.host_model)),
     DiagnosticRuleEntry(name="dimInitializer", run=lambda ctx, push: check_dim_initializer(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="invalidRedimTargets", procedure_statements=lambda ctx, push: check_invalid_redim_targets(ctx.source, ctx.mod, ctx.symbols, ctx.opts.project_visible_symbols, ctx.activity, push)),
@@ -269,7 +312,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="arrayDeclarationImpossibleBounds", run=lambda ctx, push: check_array_declaration_bounds(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="redimPreserveDimensions", run=lambda ctx, push: check_redim_preserve_dimensions(ctx.source, ctx.mod, ctx.activity, push)),
     DiagnosticRuleEntry(name="unallocatedDynamicArrayAccess", run=lambda ctx, push: check_unallocated_dynamic_array_access(ctx.source, ctx.mod, ctx.activity, push)),
-    DiagnosticRuleEntry(name="arraySubscriptOutOfBounds", run=lambda ctx, push: check_fixed_array_subscript_bounds(ctx.source, ctx.mod, ctx.activity, push)),
+    DiagnosticRuleEntry(name="arraySubscriptOutOfBounds", run=lambda ctx, push: check_fixed_array_subscript_bounds(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="midStatementLiteralTarget", run=lambda ctx, push: check_mid_statement_literal_target(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push)),
     DiagnosticRuleEntry(name="eraseTargets", procedure_statements=lambda ctx, push: check_erase_targets(ctx.source, ctx.symbols, ctx.opts.project_visible_symbols, push)),
     DiagnosticRuleEntry(name="typeDeclarationCharacterAsClause", run=lambda ctx, push: check_type_declaration_character_as_clause(ctx.mod, ctx.activity, push)),

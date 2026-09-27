@@ -22,6 +22,7 @@ from .host_model import (
     resolve_host_alias,
     resolve_host_constant,
     resolve_host_global,
+    resolve_host_member,
     resolve_host_member_signature,
     resolve_member_return_type,
 )
@@ -62,6 +63,7 @@ __all__ = [
     "resolve_host_alias",
     "resolve_host_constant",
     "resolve_host_global",
+    "resolve_host_member",
     "resolve_host_member_signature",
     "resolve_member_return_type",
 ]

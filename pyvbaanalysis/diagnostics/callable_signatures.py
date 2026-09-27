@@ -57,6 +57,7 @@ from .call_extraction import (
 from .const_expr import collect_body_literal_integer_constants, external_integer_constant_value
 from .context import statement_tokens
 from .walker import (
+    first_executable_token_index,
     statement_tokens_after_leading_label,
     strip_header_brackets,
     token_name,
@@ -262,7 +263,11 @@ def runtime_type_signature(runtime: VbaRuntimeFunction) -> CallableTypeSignature
     if runtime.params is not None:
         params = [
             CallableParamType(
-                name=p.name, type_=p.type_, optional=p.optional, param_array=p.param_array
+                name=p.name,
+                type_=p.type_,
+                optional=p.optional,
+                param_array=p.param_array,
+                null_raises=True if p.null_raises else None,
             )
             for p in runtime.params
         ]
@@ -414,9 +419,22 @@ def expression_calls(
     """Parenthesized current-module / unique-project calls inside an expression."""
     toks = statement_tokens(source, span)
     out: list[CallArguments] = []
+    first_executable = first_executable_token_index(toks)
+    statement_head = token_text(toks[first_executable]) if first_executable < len(toks) else ""
     for i in range(len(toks) - 1):
         call_name = parenthesized_call_name_at(toks, i)
         if call_name is None:
+            continue
+        # `Take (i)` as a statement passes `(i)` as its one argument: the space
+        # makes the parentheses part of the argument, which is then a copy (XLIDE
+        # issue #111). `Take(i)` glued, and `x = Take (i)` inside an expression,
+        # are calls with a list.
+        arguments_parenthesized = (
+            i == first_executable and toks[call_name.paren_index].start > toks[call_name.name_end_index].end
+        )
+        # `ReDim Three(2)` inside Function Three sizes the return array, and a
+        # ReDim target anywhere is a variable, never a call (XLIDE issue #115).
+        if statement_head == "redim" and _is_redim_target_at(toks, i, first_executable):
             continue
         qualifier = (
             token_name(toks[i - 2]) if i >= 2 and toks[i - 1].raw_text == "." else None
@@ -447,9 +465,26 @@ def expression_calls(
                 slots=split.slots,
                 slot_spans=split.spans,
                 slice_start=span.start,
+                arguments_parenthesized=arguments_parenthesized,
             )
         )
     return out
+
+
+def _is_redim_target_at(toks: Sequence[VbaToken], index: int, first_executable: int) -> bool:
+    """Whether the name at `index` is a target of the ReDim statement the tokens
+    spell: at depth 0, right after `ReDim`, `Preserve`, or a separating comma."""
+    depth = 0
+    for k in range(first_executable + 1, index):
+        raw = toks[k].raw_text
+        if raw == "(":
+            depth += 1
+        elif raw == ")":
+            depth -= 1
+    if depth != 0:
+        return False
+    prev = token_text(toks[index - 1]) if index >= 1 else ""
+    return prev == "redim" or prev == "preserve" or prev == ","
 
 
 # -- member calls ----------------------------------------------------------
@@ -659,7 +694,7 @@ class _ScopedIntegerConstantLookup:
                 name=name,
                 context=BareIdentifierContext.EXPRESSION,
                 enclosing_procedure=self._proc_sym,
-                project_visible_symbols=list(self._project_visible) if self._project_visible else [],
+                project_visible_symbols=self._project_visible or (),
             )
         )
         if binding.scope is BareIdentifierResolutionScope.UNRESOLVED:

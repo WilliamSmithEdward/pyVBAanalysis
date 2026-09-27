@@ -92,13 +92,15 @@ class VbaToken:
 # eom-character U+0019, space, ideographic space U+3000) unioned with the
 # JavaScript \s class minus the line terminators it drops ({\n \r \v \f}). U+2028
 # and U+2029 are in \s and are not line terminators here, so they count as WSC.
+# U+00A0 is left out: to the VBE a no-break space pasted from a web page is a
+# Syntax error between tokens and part of a name at the start of a line, so it
+# lexes as a stray character (XLIDE issue #132, measured in Excel 16.0).
 # Code points are spelled out so the source stays plain ASCII.
 _WSC: frozenset[str] = frozenset(
     {
         chr(0x09),  # tab
         chr(0x19),  # eom-character (XLIDE explicit)
         chr(0x20),  # space
-        chr(0xA0),  # no-break space
         chr(0x1680),  # ogham space mark
         chr(0x2028),  # line separator
         chr(0x2029),  # paragraph separator

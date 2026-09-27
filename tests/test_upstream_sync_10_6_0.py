@@ -159,9 +159,9 @@ def test_worksheets_is_closed_as_the_sheets_the_library_returns() -> None:
 
 
 def test_worksheets_one_stays_a_worksheet_and_the_collection_keeps_its_members() -> None:
-    assert _member_not_found("Worksheets(1).NoSuchMemberXyz") == [
-        "Method or data member not found: 'Excel.Worksheet.NoSuchMemberXyz'."
-    ]
+    # The library declares the item `As Object`, so its members bind when the code
+    # runs: the VBE compiles `Worksheets(1).NoSuchMemberXyz` (XLIDE issue #114).
+    assert _member_not_found("Worksheets(1).NoSuchMemberXyz") == []
     assert _member_not_found("Worksheets.Add\nWorksheets(1).Calculate\nDebug.Print Worksheets.Count") == []
 
 

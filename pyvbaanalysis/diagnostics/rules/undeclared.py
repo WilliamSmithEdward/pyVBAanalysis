@@ -20,12 +20,13 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from ...call.call_context import bare_call_statement_target as call_statement_target
-from ...conditional import ConditionalActivityTracker
+from ...conditional import ConditionalActivityTracker, inactive_node_skip
 from ...host import (
     application_member_names,
     resolve_host_constant,
     resolve_host_global,
 )
+from ...host.host_libraries import HOST_LIBRARY_NAMES
 from ...host.host_model import (
     HostObjectModel,
     get_host_members,
@@ -37,6 +38,7 @@ from ...lexer.keyword_table import is_reserved_identifier
 from ...lexer.token_helpers import match_paren_from
 from ...lexer.token_kinds import VbaToken
 from ...parser.nodes import (
+    BodyNode,
     DeclareNode,
     EnumNode,
     LeafStatementNode,
@@ -46,6 +48,8 @@ from ...parser.nodes import (
     Span,
     TypeNode,
     VariableGroupNode,
+    is_leaf_statement,
+    iter_body_nodes,
 )
 from ...runtime import (
     resolve_runtime_constant,
@@ -83,8 +87,11 @@ from ..walker import (
     ProcedureStatementVisitor,
     active_module_members,
     bare_assignment_target,
+    first_executable_token_index,
     set_assignment_target,
+    statement_and_branch_spans,
     token_name,
+    token_text,
 )
 from ...completion import MemberCompletionContext
 from .shared import (
@@ -155,10 +162,7 @@ def check_member_not_found(
                 surface = resolve_exhaustive_member_surface(
                     source, ref.dot_end_offset, member_ctx
                 )
-                if surface is None:
-                    continue
-                lower = ref.member.lower()
-                if any(candidate.name.lower() == lower for candidate in surface.members):
+                if surface is None or surface.has_member(ref.member):
                     continue
                 push(
                     "memberNotFound",
@@ -182,6 +186,7 @@ def check_unknown_call_statement(
     host_model: HostObjectModel | None,
     designer_class: str | None,
     push: PushFn,
+    project_types: Sequence[VbaProjectClassMembers] | None = None,
 ) -> ProcedureStatementVisitor:
     """A bare call statement whose callee resolves to nothing: "Sub or Function not
     defined". Resolution covers project procedures, source bindings, Application
@@ -225,12 +230,20 @@ def check_unknown_call_statement(
                     and call.name_span.end == hit.span.end
                     else None
                 )
-                push(
-                    "unknownCallStatement",
-                    f"Sub or Function not defined: '{hit.name}'.",
-                    hit.span,
-                    data,
+                # A module's name alone is not a call: `Foo` with a module named Foo
+                # is "Expected variable or procedure, not module" (XLIDE issue #125,
+                # measured in Excel 16.0).
+                names_module = any(
+                    project_type.kind == "standardModule" and project_type.name.lower() == hit.name.lower()
+                    for project_type in project_types or []
                 )
+                message = (
+                    f"'{hit.name}' is a module, not a procedure: name the procedure to call, as in "
+                    f"'{hit.name}.Bar'. This is a VBE compile error: Expected variable or procedure, not module."
+                    if names_module
+                    else f"Sub or Function not defined: '{hit.name}'."
+                )
+                push("unknownCallStatement", message, hit.span, data)
 
         return visitor
 
@@ -432,6 +445,7 @@ def check_undeclared_variables(
     module_kind: ModuleSymbolKind | None,
     host_model: HostObjectModel | None,
     designer_class: str | None,
+    referenced_hosts: Sequence[str] | None,
     push: PushFn,
 ) -> None:
     """With Option Explicit, a variable must be declared before it is assigned or
@@ -439,6 +453,12 @@ def check_undeclared_variables(
     cross-module globals and enum members never false-positive."""
     if not _has_option_explicit(mod, activity) or known_identifiers is None:
         return
+    # A library name or the project name qualifies a global in an expression as it
+    # does in an As clause: `Set app = Excel.Application`, `Word.Application`,
+    # `VBAProject.Module2.Twice(4)` (XLIDE issue #101; each runs in its host). The
+    # libraries are the host's own, those merged into its model (Office, MSForms),
+    # the ones the project references, and VBA, which is_known already accepts.
+    library_qualifiers = _library_qualifier_names(host_model, referenced_hosts)
     # A form's controls are declared by its DESIGNER, not its text. No control list
     # at all is not an empty one: reading it as empty claimed every control the
     # form's own code-behind names was undeclared (XLIDE issue #48).
@@ -459,6 +479,10 @@ def check_undeclared_variables(
     # The designer's class contributes members the text never declares, and a bare
     # reference to one is correct code.
     designer_members = designer_class_member_names(designer_class, host_model)
+    # `ReDim items(2) As Long` at procedure level DECLARES `items` when nothing else
+    # does (MS-VBAL 5.4.3.3), and Option Explicit accepts it (XLIDE issue #99, runs
+    # in Excel 16.0). Per procedure, below.
+    redim_declared: AbstractSet[str] = frozenset()
 
     def is_known(
         name: str, proc_sym: VbaSymbol | None, context: BareIdentifierContext
@@ -466,6 +490,8 @@ def check_undeclared_variables(
         lower = name.lower()
         return (
             lower == "vba"
+            or lower in library_qualifiers
+            or lower in redim_declared
             # A UserForm's controls are members the designer declared, not the
             # module's text; referring to one is correct VBA.
             or lower in implicit_member_names
@@ -493,6 +519,7 @@ def check_undeclared_variables(
         if not isinstance(member, ProcedureNode):
             continue
         proc_sym = procedure_symbol_for(symbols, member)
+        redim_declared = _redim_target_names_in(source, member.body, activity)
 
         def visit(span: Span, proc_sym: VbaSymbol | None = proc_sym) -> None:
             reported: set[str] = set()
@@ -546,6 +573,59 @@ def _host_evaluates_bracketed_names(host_model: HostObjectModel | None) -> bool:
     """
     host_name = host_model.get("hostName") if host_model is not None else None
     return host_name is None or host_name == "Excel"
+
+
+def _redim_target_names_in(
+    source: str, body: Sequence[BodyNode], activity: ConditionalActivityTracker | None
+) -> set[str]:
+    """Lower-cased names a procedure's ReDim statements size: `ReDim name(...)`,
+    `ReDim Preserve name(...)`, and each further `, name(...)`. A ReDim of an
+    undeclared name declares it, so these count as declared for the procedure."""
+    out: set[str] = set()
+    for node in iter_body_nodes(body, inactive_node_skip(activity)):
+        if not is_leaf_statement(node):
+            continue
+        for span in statement_and_branch_spans(node):
+            toks = statement_tokens(source, span)
+            i = first_executable_token_index(toks)
+            if token_text(toks[i] if i < len(toks) else None) != "redim":
+                continue
+            i += 1
+            if token_text(toks[i] if i < len(toks) else None) == "preserve":
+                i += 1
+            depth = 0
+            for k in range(i, len(toks)):
+                raw = toks[k].raw_text
+                if raw == "(":
+                    depth += 1
+                elif raw == ")":
+                    depth -= 1
+                elif depth == 0 and (k == i or toks[k - 1].raw_text == ","):
+                    name = token_name(toks[k])
+                    if name and k + 1 < len(toks) and toks[k + 1].raw_text == "(":
+                        out.add(name.lower())
+    return out
+
+
+def _library_qualifier_names(
+    host_model: HostObjectModel | None, referenced_hosts: Sequence[str] | None
+) -> set[str]:
+    """Lower-cased names that may qualify a global in an expression: the libraries
+    whose types the host model carries (its own and the shared ones merged into it),
+    the libraries the project references, and the project itself, which is
+    `VBAProject` unless renamed. An absent model is Excel's by default."""
+    out = {"vbaproject"}
+    if host_model is None:
+        out.add("excel")
+    for qualified in (host_model.get("types") if host_model is not None else None) or {}:
+        dot = qualified.find(".")
+        if dot > 0:
+            out.add(qualified[:dot].lower())
+    for token in referenced_hosts or []:
+        name = HOST_LIBRARY_NAMES.get(token)
+        if name:
+            out.add(name.lower())
+    return out
 
 
 _DESIGNER_CLASS_MEMBER_NAMES = IdentityLru(capacity=8)

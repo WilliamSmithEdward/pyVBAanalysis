@@ -14,6 +14,7 @@ an unresolved argument type is simply not checked.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -35,7 +36,7 @@ from ..lexer.token_helpers import match_paren_from
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..parser.nodes import Span
 from ..runtime.vba_runtime import VbaRuntimeConstant, resolve_runtime_constant, resolve_runtime_object
-from ..symbols.symbol_model import qualified_procedure_key
+from ..symbols.symbol_model import VbaSymbolKind, qualified_procedure_key
 from ..types.type_inference import SourceDeclaredType
 from ..types.type_names import (
     is_boolean_string,
@@ -450,15 +451,33 @@ def _member_expression_return_type(
     return member.returns if member.returns else "Variant"
 
 
+_AS_OBJECT_SIGNATURE_RE = re.compile(r"\bAs Object\s*$", re.IGNORECASE)
+
+
 def _default_host_item_return_type(type_name: str, member_ctx: MemberCompletionContext) -> str | None:
-    item = next(
-        (m for m in get_host_members(type_name, member_ctx.model) if m["name"].lower() == "item"),
-        None,
-    )
+    members = get_host_members(type_name, member_ctx.model)
+    item = next((m for m in members if m["name"].lower() == "item"), None)
     if item is None:
         return None
     if item.get("returns"):
-        return item["returns"]
+        # The library declares most Item accessors `As Object` and the model
+        # repairs the type from the reference prose, which is right for
+        # completion and chaining. It is not a compile-time binding: the VBE
+        # compiles `Worksheets(1).NoSuchMember` and `Workbooks(1).NoSuchMember`
+        # (measured in Excel 16.0, XLIDE issue #114), so the item's members are
+        # late bound. A one-part union carries the type without closing it. The
+        # hand-written collections carry the repaired type on Item, so the
+        # library's word is read off `_Default` too.
+        default_member = next((m for m in members if m["name"] == "_Default"), None)
+        declared_object = any(
+            member is not None
+            and (
+                member.get("declaredType") == "Object"
+                or _AS_OBJECT_SIGNATURE_RE.search(member.get("signature") or "") is not None
+            )
+            for member in (item, default_member)
+        )
+        return f"union:{item['returns']}" if declared_object else item["returns"]
     # A mixed-element collection (Sheets, whose Item is a Worksheet OR a Chart)
     # carries returnsAnyOf instead. Its indexed element is a late-bound Object, which
     # any specific object target accepts, so `Set ws = ThisWorkbook.Sheets("x")` is
@@ -758,6 +777,12 @@ class _ByRefMismatch:
     span: Span
 
 
+# The bindings a ByRef argument passes as the variable itself, not a copy.
+_BYREF_VARIABLE_KINDS = frozenset(
+    {VbaSymbolKind.LOCAL_VARIABLE, VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.PARAMETER}
+)
+
+
 def _is_known_by_ref_exact_type(type_: str | None) -> bool:
     if not type_ or type_ == "variant":
         return False
@@ -786,12 +811,36 @@ def byref_variable_type_mismatch(
         if not name:
             return None
         declared_type = resolve_expression_type(name) if resolve_expression_type else None
+        # A Const is passed as a temporary copy, so its type never has to match
+        # (XLIDE issue #111: `Take(K)` with K an Integer Const compiles).
+        if declared_type is not None and declared_type.resolved and declared_type.kind is VbaSymbolKind.CONSTANT:
+            return None
         actual_raw = (
             declared_type.as_type
             if declared_type is not None and declared_type.resolved
             else env.get(name.lower())
         )
         span = Span(slice_start + toks[0].start, slice_start + toks[0].end)
+        # A VARIABLE declared Variant (or with no type) passed ByRef to a typed
+        # parameter is the compile error itself (XLIDE issue #111): the VBE refuses
+        # `Take v` with `Dim v As Variant` for `x As Long`, `x As String` and
+        # `x As Object` alike (measured 2026-09-26). Only a variable or parameter:
+        # a parameterless Function's name here is a call result, which passes as
+        # a copy.
+        variant_variable = (
+            not param.is_array
+            and declared_type is not None
+            and declared_type.resolved
+            and declared_type.kind in _BYREF_VARIABLE_KINDS
+            and (normalize_type(declared_type.as_type) or "variant") == "variant"
+        )
+        if variant_variable:
+            assert declared_type is not None
+            return _ByRefMismatch(
+                name=name,
+                actual=declared_type.as_type if declared_type.as_type is not None else "Variant",
+                span=span,
+            )
     elif len(toks) == 3 and toks[1].raw_text == ".":
         qualifier = token_name(toks[0])
         member = token_name(toks[2])
@@ -955,9 +1004,13 @@ def validate_argument_types_for_signature(
         expected = param.type_
         if not expected:
             continue
-        byref_mismatch = byref_variable_type_mismatch(
-            param, value_slot, call.slice_start, env,
-            resolve_expression_type, resolve_qualified_expression_type,
+        byref_mismatch = (
+            None
+            if call.arguments_parenthesized
+            else byref_variable_type_mismatch(
+                param, value_slot, call.slice_start, env,
+                resolve_expression_type, resolve_qualified_expression_type,
+            )
         )
         if byref_mismatch is not None:
             push(
@@ -986,6 +1039,17 @@ def validate_argument_types_for_signature(
             source=source, member_ctx=member_ctx,
         )
         if actual is None:
+            continue
+        # A Variant parameter the function still refuses Null for: CStr(Null),
+        # Chr(Null), Asc(Null) raise 94 where Left(Null, 1) hands Null back
+        # (XLIDE issue #104).
+        if param.null_raises and normalize_type(actual.type_) == "null":
+            push(
+                "argumentTypeMismatch",
+                f"Argument '{param.name}' of '{sig.name}' cannot be Null. This will raise "
+                "Run-time error '94': Invalid use of Null.",
+                actual.span,
+            )
             continue
         reason = incompatibility_reason(expected, actual)
         if not reason:

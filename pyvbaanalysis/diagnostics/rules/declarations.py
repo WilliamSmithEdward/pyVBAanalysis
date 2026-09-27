@@ -34,7 +34,6 @@ from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize
 from ...parser.fixed_length_string import parse_fixed_length_string_type
 from ...parser.nodes import (
-    AttributeNode,
     BodyNode,
     ConditionalDirectiveKind,
     ConditionalDirectiveNode,
@@ -63,7 +62,7 @@ from ..const_expr import (
     collect_module_literal_integer_constants,
     resolve_fixed_length_string_size,
 )
-from ..context import AnalyzeModuleOptions, PushFn, statement_tokens
+from ..context import AnalyzeModuleOptions, PushFn, is_object_module_kind, statement_tokens
 from ..walker import (
     absolute_span,
     active_module_members,
@@ -458,7 +457,11 @@ def _property_setter_return_type_span(source: str, proc: ProcedureNode) -> Span:
     return Span(header.start + as_tok.start, header.start + end_tok.end)
 
 
-def check_property_setter_value_parameters(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, member_ctx: MemberCompletionContext, push: PushFn) -> None:
+def check_property_setter_value_parameters(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+    """Property Let/Set setters receive the assigned value through the final
+    parameter. A setter with no parameters has no value slot, setters have no return
+    type, and Property Set value parameters must be object references. A Property
+    Let's value parameter may be of any type (XLIDE issue #107)."""
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode) or member.proc_kind not in (
             ProcKind.PROPERTY_LET,
@@ -485,18 +488,11 @@ def check_property_setter_value_parameters(source: str, mod: ModuleNode, activit
                         f"declared As {value_param.as_type}.",
                         declared_name_span(source, value_param.span, value_param.name),
                     )
-            else:
-                object_type = resolve_known_object_assignment_type(
-                    value_param.as_type, member_ctx
-                )
-                if object_type is not None:
-                    push(
-                        "propertyLetObjectValue",
-                        f"Property Let '{member.name}' final value parameter "
-                        f"'{value_param.name}' must not be an object reference; use "
-                        f"Property Set because it is declared As {object_type.display}.",
-                        declared_name_span(source, value_param.span, value_param.name),
-                    )
+            # A Property Let's value parameter may be any type, object types
+            # included: `Property Let Item(ByVal v As Object)`, `As Worksheet` and
+            # `As <project class>` all compile, and `h.Item = New Collection` calls
+            # the Let (XLIDE issue #107, measured in Excel 16.0). The old
+            # property-let-object-value report was wrong and is retired.
             continue
         push(
             "propertySetterMissingValue",
@@ -1047,33 +1043,53 @@ def _fixed_length_string_length_span(source: str, span: Span) -> Span | None:
 
 
 def check_option_placement(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
-    # Declarations that precede the Option under test AND could be compiled beside
-    # it: a declaration in the other arm of a chain closes no window, because only
-    # one arm is ever built (XLIDE issue #58).
-    declarations_above: list[Span] = []
+    """An `Option` statement may not follow a procedure.
+
+    Only a procedure closes the window. Measured in Excel 16.0 (build 20326,
+    2026-09-26): each of Option Explicit, Base, Compare and Private Module compiles
+    after a Const, a module variable, a Type, an Enum, a Declare and a Deftype
+    statement (XLIDE issue #113 opened with `DefLng A-Z` above `Option Explicit`),
+    and is refused only after `End Sub` / `End Function` with "Only comments may
+    appear after End Sub, End Function, or End Property". The rule used to treat
+    every declaration as closing the window.
+    """
+    # Procedures that precede the Option under test AND could be compiled beside it:
+    # a procedure in the other arm of a chain closes no window, because only one arm
+    # is ever built (XLIDE issue #58).
+    procedures_above: list[Span] = []
+    # `Option Base` alone has a second closer: a module-level array already
+    # dimensioned above it ("Array already dimensioned", measured 2026-09-26).
+    arrays_above: list[Span] = []
+
+    def compiled_with(priors: Sequence[Span], member_span: Span) -> bool:
+        return any(
+            activity is None or not activity.mutually_exclusive(prior, member_span) for prior in priors
+        )
+
     for member in active_module_members(mod, activity):
-        if isinstance(member, AttributeNode):
-            continue
-        # A conditional-compilation directive is not a declaration, so it does not
-        # close the window for Option statements. The live VBE compiles
-        # `#Const FLAG = 1` above `Option Explicit` (oracle case
-        # const_directive_before_option_explicit_compile), which the rule used to
-        # report as a misplaced Option (XLIDE issue #41).
-        if isinstance(member, ConditionalDirectiveNode):
-            continue
         if isinstance(member, OptionNode):
-            compiled_together = any(
-                activity is None or not activity.mutually_exclusive(prior, member.span)
-                for prior in declarations_above
-            )
-            if compiled_together:
+            if compiled_with(procedures_above, member.span):
                 push(
                     "optionAfterDeclaration",
-                    "Option statements must appear before any declaration or procedure.",
+                    "Option statements must appear before the first procedure; only comments may "
+                    "follow End Sub, End Function, or End Property.",
+                    first_token_span(source, member.span),
+                )
+            elif _OPTION_BASE_RE.match(member.option_text.strip()) and compiled_with(arrays_above, member.span):
+                push(
+                    "optionAfterDeclaration",
+                    "'Option Base' must come before any array declaration: an array above it is "
+                    "already dimensioned.",
                     first_token_span(source, member.span),
                 )
             continue
-        declarations_above.append(member.span)
+        if isinstance(member, ProcedureNode):
+            procedures_above.append(member.span)
+        elif isinstance(member, VariableGroupNode) and any(decl.is_array for decl in member.declarations):
+            arrays_above.append(member.span)
+
+
+_OPTION_BASE_RE = re.compile(r"base\b", re.IGNORECASE)
 
 
 # -- checkEmptyType --------------------------------------------------------
@@ -1208,6 +1224,11 @@ def check_option_statement_form(
                 continue
             ends_here(3, "Option Compare")
         elif directive == "private":
+            if argument(2) == "module" and is_object_module_kind(opts.module_kind):
+                # Measured in Excel 16.0 (XLIDE issue #124): "Option Private Module
+                # not permitted in an object module".
+                report(2, "'Option Private Module' is not permitted in a class, document or UserForm module.")
+                continue
             if argument(2) != "module":
                 report(
                     1 if argument(2) is None else 2,
@@ -1457,14 +1478,40 @@ def check_property_accessor_signatures(source: str, mod: ModuleNode, activity: C
             if len(setter.params) == 0:
                 continue
             reason = _property_index_parameter_mismatch(getter.params, setter.params[:-1])
-            if reason is None:
+            if reason is not None:
+                push(
+                    "propertyAccessorSignatureMismatch",
+                    f"{_property_procedure_label(setter.proc_kind)} '{setter.name}' argument list "
+                    f"must match Property Get '{getter.name}' before the final value parameter. {reason}",
+                    declared_name_span(source, setter.span, setter.name),
+                )
                 continue
-            push(
-                "propertyAccessorSignatureMismatch",
-                f"{_property_procedure_label(setter.proc_kind)} '{setter.name}' argument list "
-                f"must match Property Get '{getter.name}' before the final value parameter. {reason}",
-                declared_name_span(source, setter.span, setter.name),
-            )
+            # The value parameter must have the Get's type: `Get Size() As Long` with
+            # `Let Size(ByVal v As Integer)` is "Definitions of property procedures
+            # for the same property are inconsistent" (XLIDE issue #124, measured in
+            # Excel 16.0). Either side without a type is Variant.
+            value_param = setter.params[-1]
+            get_type = normalize_type(getter.return_type)
+            if get_type is None and not getter.type_suffix:
+                get_type = "variant"
+            value_type = normalize_type(value_param.as_type)
+            if value_type is None and not value_param.type_suffix:
+                value_type = "variant"
+            if (
+                get_type is not None
+                and value_type is not None
+                and get_type != value_type
+                and not value_param.is_array
+            ):
+                push(
+                    "propertyAccessorSignatureMismatch",
+                    f"{_property_procedure_label(setter.proc_kind)} '{setter.name}' takes its value As "
+                    f"{value_param.as_type if value_param.as_type is not None else 'Variant'}, but Property "
+                    f"Get '{getter.name}' returns "
+                    f"{getter.return_type if getter.return_type is not None else 'Variant'}; the "
+                    "definitions of a property's procedures must agree.",
+                    declared_name_span(source, value_param.span, value_param.name),
+                )
 
 
 # -- checkNonConstantConstValues / checkNonConstantEnumMemberValues --------
@@ -1474,15 +1521,38 @@ def check_property_accessor_signatures(source: str, mod: ModuleNode, activity: C
 _OPERATOR_KEYWORD_WORDS: frozenset[str] = frozenset(w.lower() for w in OPERATOR_IDENTIFIERS)
 
 
+# The intrinsic functions the VBE folds inside an Enum member value and an Optional
+# parameter default, where it refuses every call in a Const. Measured one by one in
+# Excel 16.0 (build 20326, 2026-09-26; XLIDE issue #112): these sixteen compile in
+# both positions, while Asc, AscW, Chr, Val, Sqr, RGB, Round, IIf, Hex, Oct, InStr,
+# StrComp, CDec, DateSerial, Choose, Mid, Left, UCase, Str, Trim, Format, Replace,
+# String, Space, Now, Timer, Rnd and Array are "Constant expression required" there
+# too.
+_CONSTANT_FOLDED_INTRINSICS: frozenset[str] = frozenset(
+    {
+        "len", "lenb", "abs", "int", "fix", "sgn",
+        "cint", "clng", "clnglng", "cbyte", "cbool", "cdbl", "csng", "ccur", "cvar", "cdate",
+    }
+)
+
+
 def _non_constant_default_element(
-    tokens: list[VbaToken], base_offset: int
+    tokens: list[VbaToken], base_offset: int, position: str
 ) -> tuple[str, Span] | None:
+    """The first element of a Const value ("const"), an Enum member value or an
+    Optional parameter default ("enumOrOptional") that is not a constant."""
     for i, tok in enumerate(tokens):
         word = (tok.canonical_text if tok.canonical_text is not None else tok.raw_text).lower()
         if tok.kind is TokenKind.KEYWORD and (word == "new" or word == "addressof"):
             return (f"'{tok.raw_text}'", Span(base_offset + tok.start, base_offset + tokens[-1].end))
         is_name = tok.kind in (TokenKind.IDENTIFIER, TokenKind.KEYWORD, TokenKind.BRACKETED_IDENTIFIER)
         is_operator_keyword = tok.kind is TokenKind.KEYWORD and word in _OPERATOR_KEYWORD_WORDS
+        if (
+            position == "enumOrOptional"
+            and word in _CONSTANT_FOLDED_INTRINSICS
+            and (i == 0 or tokens[i - 1].raw_text != ".")
+        ):
+            continue
         nxt = tokens[i + 1] if i + 1 < len(tokens) else None
         if is_name and not is_operator_keyword and nxt is not None and nxt.raw_text == "(":
             close_index = match_paren_from(tokens, i + 1)
@@ -1527,7 +1597,7 @@ def check_non_constant_parameter_defaults(
             tokens = _value_tokens_after_equals(source, param.span)
             if tokens is None:
                 continue
-            non_constant = _non_constant_default_element(tokens, param.span.start)
+            non_constant = _non_constant_default_element(tokens, param.span.start, "enumOrOptional")
             if non_constant is None:
                 continue
             label, hit_span = non_constant
@@ -1549,7 +1619,7 @@ def check_non_constant_const_values(source: str, mod: ModuleNode, activity: Cond
             tokens = _value_tokens_after_equals(source, decl.span)
             if tokens is None:
                 continue
-            non_constant = _non_constant_default_element(tokens, decl.span.start)
+            non_constant = _non_constant_default_element(tokens, decl.span.start, "const")
             if non_constant is None:
                 continue
             label, hit_span = non_constant
@@ -1576,7 +1646,7 @@ def check_non_constant_enum_member_values(source: str, mod: ModuleNode, activity
             tokens = _value_tokens_after_equals(source, enum_member.span)
             if tokens is None:
                 continue
-            non_constant = _non_constant_default_element(tokens, enum_member.span.start)
+            non_constant = _non_constant_default_element(tokens, enum_member.span.start, "enumOrOptional")
             if non_constant is None:
                 continue
             label, hit_span = non_constant

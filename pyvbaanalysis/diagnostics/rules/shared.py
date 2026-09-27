@@ -12,11 +12,8 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from ...call.call_context import bare_call_statement_target as call_statement_target
-from ...completion import (
-    MemberCompletionContext,
-    MemberCompletionEntry,
-    resolve_member_surface_at,
-)
+from ...completion import MemberCompletionContext
+from ...completion.member_access import ExhaustiveMemberSurface, resolve_exhaustive_member_surface_at
 from ...conditional import ConditionalActivityTracker, collect_conditional_directives, inactive_node_skip
 from ...lexer.keyword_table import is_reserved_identifier
 from ...lexer.token_kinds import TokenKind, VbaToken
@@ -52,14 +49,6 @@ def _at(toks: Sequence[VbaToken], i: int) -> VbaToken | None:
 # -- exhaustive member-surface resolver ------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class ExhaustiveMemberSurface:
-    """An EXHAUSTIVE member surface: a complete member list that proves absence."""
-
-    owner: str
-    members: list[MemberCompletionEntry]
-
-
 def resolve_exhaustive_member_surface(
     source: str, dot_end_offset: int, member_ctx: MemberCompletionContext
 ) -> ExhaustiveMemberSurface | None:
@@ -70,10 +59,7 @@ def resolve_exhaustive_member_surface(
     for member-not-found: a non-exhaustive host type, Object/Variant, or unresolved
     receiver produces no surface, so no member can be proven absent.
     """
-    surface = resolve_member_surface_at(source, dot_end_offset, member_ctx)
-    if surface is None or not surface.exhaustive:
-        return None
-    return ExhaustiveMemberSurface(owner=surface.owner, members=surface.members)
+    return resolve_exhaustive_member_surface_at(source, dot_end_offset, member_ctx)
 
 
 # -- name-token hits -------------------------------------------------------
@@ -89,6 +75,19 @@ class NameTokenHit:
 def name_token_hit(base: Span, tok: VbaToken, name: str) -> NameTokenHit:
     return NameTokenHit(
         name=name, span=absolute_span(base, tok), bracketed=tok.kind is TokenKind.BRACKETED_IDENTIFIER
+    )
+
+
+def is_bare_or_vba_qualified_intrinsic_call(toks: Sequence[VbaToken], name_index: int) -> bool:
+    """Whether the name at `name_index` calls the VBA intrinsic: bare, or qualified
+    by `VBA.` alone (`VBA.Left`), never a member of some other object."""
+    if name_index < 1 or toks[name_index - 1].raw_text != ".":
+        return True
+    qualifier = token_name(toks[name_index - 2]) if name_index >= 2 else None
+    return (
+        qualifier is not None
+        and qualifier.lower() == "vba"
+        and (name_index < 3 or toks[name_index - 3].raw_text != ".")
     )
 
 
@@ -467,6 +466,12 @@ def _is_contextual_grammar_word(
     # starts a statement, which is not always token 0: `If x Then Error 5 Else Exit
     # Sub` puts it after `Then`.
     if word == "error" and (prev == "on" or index == first_executable or prev in _STATEMENT_OPENERS):
+        return True
+    # `On Local Error ...` is a form of On Error (XLIDE issue #98): Local is grammar
+    # there, and the Error after it is too.
+    if word == "local" and prev == "on" and token_text(_at(toks, index + 1)) == "error":
+        return True
+    if word == "error" and prev == "local" and token_text(_at(toks, index - 2)) == "on":
         return True
     # `Open path For Binary|Output|Append|Random [Access Read] [Lock Read] As #n`.
     # The mode word follows the clause keyword that introduces it; the same words

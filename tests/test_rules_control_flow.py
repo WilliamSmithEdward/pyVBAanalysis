@@ -122,7 +122,11 @@ def test_else_without_if() -> None:
 def test_malformed_statements() -> None:
     assert "invalid-assignment-target" in _codes("Sub S\n    1 = x\nEnd Sub")
     assert "invalid-assignment-target" not in _codes("Sub S\n    x = 1\nEnd Sub")
-    assert "open-missing-for" in _codes('Sub S\n    Open "f.txt" As #1\nEnd Sub')
+    # `For mode` is optional (XLIDE issue #97): a mode word without its For, or no
+    # As clause at all, is what the VBE refuses.
+    assert "open-missing-for" in _codes('Sub S\n    Open "f.txt" Output As #1\nEnd Sub')
+    assert "open-missing-for" in _codes('Sub S\n    Open "f.txt" For Output\nEnd Sub')
+    assert "open-missing-for" not in _codes('Sub S\n    Open "f.txt" As #1\nEnd Sub')
     assert "open-missing-for" not in _codes('Sub S\n    Open "f.txt" For Input As #1\nEnd Sub')
 
 
@@ -139,8 +143,9 @@ def test_undefined_labels() -> None:
     assert code not in _codes("Sub S\n    On Error Resume Next\nEnd Sub")
     assert code not in _codes("Sub S\n    On Error GoTo 0\nEnd Sub")
     assert code not in _codes("Sub S\n    On Error GoTo -1\nEnd Sub")
-    # Labels do not leak across procedures.
-    cross = "Sub A\n    GoTo Shared\nEnd Sub\nSub B\nShared:\nEnd Sub"
+    # Labels do not leak across procedures. (A reserved word such as `Shared` is
+    # never a label, so the name here is an ordinary one.)
+    cross = "Sub A\n    GoTo Elsewhere\nEnd Sub\nSub B\nElsewhere:\nEnd Sub"
     assert code in _codes(cross)
 
 

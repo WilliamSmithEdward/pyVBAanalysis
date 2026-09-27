@@ -36,6 +36,7 @@ from ...parser.nodes import (
     VariableGroupNode,
 )
 from ...symbols.symbol_model import ModuleSymbolKind
+from ...types.type_names import is_known_scalar_type, normalize_type
 from ..context import PushFn, is_object_module_kind
 from ..walker import (
     ProcedureStatementVisitor,
@@ -157,6 +158,25 @@ def check_with_events_declarations(source: str, mod: ModuleNode, module_kind: Mo
                 push("withEventsDeclaration", f"WithEvents variable '{decl.name}' cannot be declared As New.", name_span)
             if decl.is_array:
                 push("withEventsDeclaration", f"WithEvents variable '{decl.name}' cannot be an array.", name_span)
+            # The type must be a class that sources events. `As Object` is refused
+            # outright ("Expected: identifier") and `As Collection`, which has no
+            # events, with "Object does not source automation events" (XLIDE issue
+            # #124, measured in Excel 16.0). An intrinsic type is no object at all.
+            # A host or project class is not judged here.
+            normalized = normalize_type(decl.as_type)
+            if normalized is None or normalized in ("object", "variant"):
+                named = f"'{decl.as_type}'" if decl.as_type else "no type"
+                push(
+                    "withEventsDeclaration",
+                    f"WithEvents variable '{decl.name}' must be declared As a specific class that raises events; {named} names none.",
+                    name_span,
+                )
+            elif normalized == "collection" or is_known_scalar_type(normalized):
+                push(
+                    "withEventsDeclaration",
+                    f"WithEvents variable '{decl.name}' is declared As {decl.as_type}, which does not source automation events.",
+                    name_span,
+                )
 
     def inspect_in_procedure(group: VariableGroupNode) -> None:
         inspect(group, True)
@@ -319,7 +339,15 @@ def _raise_event_target_hits(source: str, span: Span) -> list[tuple[str, Span]]:
     return hits
 
 
+_RAISE_EVENT_RE = re.compile("raiseevent", re.IGNORECASE)
+
+
 def check_raise_event_targets(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+    # The scan below lexes every physical line of every procedure, which is wasted
+    # on the great majority of modules that never raise an event (XLIDE issue
+    # #139). A hit in a comment or string only means the scan runs.
+    if _RAISE_EVENT_RE.search(source) is None:
+        return
     events: set[str] = set()
     for member in active_module_members(mod, activity):
         if isinstance(member, EventNode) and member.name:

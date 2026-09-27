@@ -19,15 +19,27 @@ const HOSTS = [
   ['vb6', 'vb6ObjectModel.ts', 'getVb6ObjectModel', 'pyvbaanalysis/data/vb6_host_model.json'],
 ];
 
-// Which Excel interfaces are NONEXTENSIBLE, measured upstream from the type
-// library's TYPEFLAGS. A complete member list proves absence only for these: the
+// Which host interfaces are NONEXTENSIBLE, measured upstream from each type
+// library's TYPEFLAGS: Excel's first, then Word's, PowerPoint's and Access's
+// (XLIDE issue #127). A complete member list proves absence only for these: the
 // rest of the object model is open, so VBA compiles the call and asks IDispatch
 // for the name at run time. Extracted rather than transcribed, because the
-// no-false-positive contract for member-not-found rests on the set being exact.
+// no-false-positive contract for member-not-found rests on the sets being exact.
 const { EXCEL_CLOSED_TYPE_NAMES } = await importXlide('src/analyzer/host/typeExtensibility.ts');
-const closedOut = 'pyvbaanalysis/data/excel_closed_types.json';
-writeFileSync(closedOut, JSON.stringify({ excelClosedTypes: [...EXCEL_CLOSED_TYPE_NAMES].sort() }, null, 2) + '\n');
-console.log('wrote', closedOut, '-', EXCEL_CLOSED_TYPE_NAMES.length, 'closed Excel types');
+const closedNames = await importXlide('src/analyzer/host/closedTypeNames.ts');
+const closedTypes = {
+  excel: [...EXCEL_CLOSED_TYPE_NAMES].sort(),
+  word: [...closedNames.WORD_CLOSED_TYPE_NAMES].sort(),
+  powerpoint: [...closedNames.POWERPOINT_CLOSED_TYPE_NAMES].sort(),
+  access: [...closedNames.ACCESS_CLOSED_TYPE_NAMES].sort(),
+};
+const closedOut = 'pyvbaanalysis/data/host_closed_types.json';
+writeFileSync(closedOut, JSON.stringify(closedTypes, null, 2) + '\n');
+console.log(
+  'wrote', closedOut, '-',
+  Object.entries(closedTypes).map(([host, names]) => `${names.length} ${host}`).join(', '),
+  'closed types',
+);
 
 // The Microsoft Forms members a UserForm and its controls carry: the generated
 // type-library surface, and the members VBA wraps around a form (Show, Hide, Name,

@@ -11,27 +11,33 @@ Const-backed bounds stay quiet (the no-false-positive contract).
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from ...conditional import ConditionalActivityTracker, inactive_node_skip
 from ...constants.integer_constant_expression import parse_vba_integer_literal, safe_integer
 from ...flow.procedure_unstructured import procedure_has_unstructured_flow
+from ...js_compat import JS_WHITESPACE, js_number_to_string, js_trim
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import (
     BodyNode,
+    ForBlockNode,
     LeafStatementNode,
     ModuleNode,
+    OptionNode,
     ProcedureNode,
     Span,
     StatementNode,
     VariableDeclNode,
     VariableGroupNode,
+    is_leaf_statement,
     iter_body_nodes_in_context,
 )
 from ...symbols.name_resolution import BareIdentifierContext
-from ...symbols.symbol_model import ModuleSymbols, VbaSymbol
+from ...symbols.symbol_model import ModuleSymbols, SymbolVisibility, VbaSymbol, VbaSymbolKind
 from ...types.type_inference import (
     DeclaredValueShape,
     declaration_shape_environment_for,
@@ -56,10 +62,12 @@ from ..walker import (
     for_each_variable_group,
     is_inactive_node,
     pluralize_count,
+    statement_and_branch_spans,
     statement_tokens_after_leading_label,
     token_name,
     token_text,
 )
+from .shared import is_bare_or_vba_qualified_intrinsic_call
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +296,7 @@ def check_redim_impossible_bounds(
     source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
 ) -> ProcedureStatementVisitor:
     module_declarations = _redim_blocked_declarations_for_module(mod, activity)
+    option_base = module_option_base(mod, activity)
 
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
         local_declarations = _redim_blocked_declarations_for_body(member.body, activity)
@@ -295,24 +304,35 @@ def check_redim_impossible_bounds(
 
         def visitor(stmt: LeafStatementNode) -> None:
             for target in _redim_statement_targets(source, stmt.span):
-                lower = target.name.lower()
-                blocked = local_declarations.get(lower)
-                if blocked is None and lower not in local_names:
-                    blocked = module_declarations.get(lower)
+                lower_name = target.name.lower()
+                blocked = local_declarations.get(lower_name)
+                if blocked is None and lower_name not in local_names:
+                    blocked = module_declarations.get(lower_name)
                 if blocked is not None:
                     # A scalar / fixed-size ReDim target is a compile error reported
                     # by invalidRedimTargets; do not also flag the runtime bound.
                     continue
                 for index, dimension in enumerate(target.dimensions):
-                    if (
-                        dimension.lower_value is None
-                        or dimension.upper_value is None
-                        or dimension.lower_value <= dimension.upper_value
-                    ):
+                    if dimension.upper_value is None:
                         continue
+                    # `ReDim a(-1)`: the lower bound is Option Base, 0 by default,
+                    # and an upper bound below it is the same impossibility as
+                    # `ReDim a(5 To 1)` (XLIDE issue #120, measured in Excel 16.0).
+                    lower: int | None
+                    if dimension.lower_value is not None:
+                        lower = dimension.lower_value
+                    else:
+                        lower = option_base if dimension.lower_key is None else None
+                    if lower is None or lower <= dimension.upper_value:
+                        continue
+                    lower_text = (
+                        f"{lower} (Option Base {lower})"
+                        if dimension.lower_value is None
+                        else str(lower)
+                    )
                     push(
                         "redimImpossibleBounds",
-                        f"ReDim lower bound {dimension.lower_value} is greater than upper bound "
+                        f"ReDim lower bound {lower_text} is greater than upper bound "
                         f"{dimension.upper_value} for dimension {index + 1} of '{target.name}'; "
                         "this will raise Run-time error '9': Subscript out of range.",
                         dimension.span,
@@ -449,17 +469,78 @@ def _inspect_array_declaration(source: str, decl: VariableDeclNode, push: PushFn
 
 
 @dataclass(frozen=True, slots=True)
-class _FixedArrayBound:
+class ArrayDimensionBound:
+    """One dimension of an array whose bounds the code fixes."""
+
+    lower: int | float
+    upper: int | float
+    # False when the lower bound came from Option Base rather than the text.
+    explicit_lower: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FixedArrayBound:
+    """An array whose every dimension's bounds are known from the text."""
+
     name: str
-    upper_value: int
-    has_explicit_lower: bool
-    lower_value: int | None = None
+    dims: tuple[ArrayDimensionBound, ...]
+    # Where the bounds came from, for the message: 'Dim', 'Array(...)', 'Split(...)',
+    # 'Range(...).Value'.
+    origin: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ForCounter:
+    """A For counter in force at a statement: the value its last pass has."""
+
+    last: int | float
+    span: Span
+
+
+# Integers below this are exact as a JavaScript number, so they print as Python
+# prints them.
+_EXACT_INTEGER_LIMIT = 2**53
+
+# Heads of statements that can reshape an array or Variant named anywhere in them.
+_SHAPE_SPOILING_HEADS = frozenset({"redim", "erase", "set", "input", "get", "line"})
+
+# `Option Base 0|1` in an Option directive's text; `\s` and `\b` as JavaScript
+# reads them.
+_OPTION_BASE_RE = re.compile(r"base[" + JS_WHITESPACE + r"]+([01])\b", re.IGNORECASE | re.ASCII)
+
+# A multi-cell A1-style address literal: `A1:B2`.
+_RANGE_ADDRESS_RE = re.compile(r"([A-Za-z]{1,3})([0-9]+):([A-Za-z]{1,3})([0-9]+)")
+
+
+def _at(toks: Sequence[VbaToken], i: int) -> VbaToken | None:
+    return toks[i] if 0 <= i < len(toks) else None
+
+
+def _raw_at(toks: Sequence[VbaToken], i: int) -> str | None:
+    tok = _at(toks, i)
+    return tok.raw_text if tok is not None else None
+
+
+def _lower_name(tok: VbaToken | None) -> str | None:
+    name = token_name(tok)
+    return name.lower() if name else None
+
+
+def _as_js_number(value: float) -> int | float:
+    """An integral double as an int, the way a JavaScript number prints: no `.0`."""
+    if value.is_integer() and abs(value) < _EXACT_INTEGER_LIMIT:
+        return int(value)
+    return value
 
 
 def _parse_fixed_array_bounds_for_decl(
-    source: str, decl: VariableDeclNode
-) -> tuple[int | None, int, bool] | None:
-    """Returns (lower_value, upper_value, has_explicit_lower) for a single-dim fixed array."""
+    source: str, decl: VariableDeclNode, option_base: int
+) -> list[ArrayDimensionBound] | None:
+    """Parses the literal bounds of a fixed-size array declaration, one entry per
+    dimension. None unless every dimension's upper bound (and any explicit lower
+    bound) folds to a literal integer. A dimension with no `To` takes Option Base
+    as its lower bound (XLIDE issue #120: `Option Base 1` then `Dim a(3)` refuses
+    `a(0)`)."""
     toks = statement_tokens(source, decl.span)
     open_index = next((i for i, tok in enumerate(toks) if tok.raw_text == "("), -1)
     if open_index < 0:
@@ -472,40 +553,250 @@ def _parse_fixed_array_bounds_for_decl(
         for part in split_top_level_token_groups(toks, open_index + 1, ",", close)
     ]
     dims = [dim_tokens for dim_tokens in dims if dim_tokens]
-    if len(dims) != 1:
-        return None  # multi-dimension subscript matching is out of scope
-    _key, _lower_key, lower_value, upper_value = _comparable_array_bound_key(dims[0])
-    if upper_value is None:
-        return None  # non-literal upper bound is not statically known
-    return (lower_value, upper_value, lower_value is not None)
+    if not dims:
+        return None
+    out: list[ArrayDimensionBound] = []
+    for dim in dims:
+        _key, _lower_key, lower_value, upper_value = _comparable_array_bound_key(dim)
+        if upper_value is None:
+            return None  # a Const or variable bound is not statically known
+        has_to = any(token_text(tok) == "to" for tok in dim)
+        if has_to and lower_value is None:
+            return None
+        out.append(
+            ArrayDimensionBound(
+                lower=lower_value if lower_value is not None else option_base,
+                upper=upper_value,
+                explicit_lower=lower_value is not None,
+            )
+        )
+    return out
 
 
 def _local_fixed_array_declarations_for_body(
-    source: str, body: Sequence[BodyNode], activity: ConditionalActivityTracker | None
-) -> dict[str, _FixedArrayBound]:
-    out: dict[str, _FixedArrayBound] = {}
+    source: str,
+    body: Sequence[BodyNode],
+    activity: ConditionalActivityTracker | None,
+    option_base: int,
+) -> dict[str, FixedArrayBound]:
+    """Local, statically-bounded fixed arrays in a procedure body."""
+    out: dict[str, FixedArrayBound] = {}
 
     def visit(group: VariableGroupNode) -> None:
         if group.is_const:
             return
         for decl in group.declarations:
             if not decl.is_array or not decl.array_bounds:
-                continue  # dynamic arrays (no static bounds) are out of scope
+                continue  # dynamic arrays take their bounds from ReDim or a value
             lower = decl.name.lower()
             if lower in out:
                 continue
-            bounds = _parse_fixed_array_bounds_for_decl(source, decl)
-            if bounds is not None:
-                lower_value, upper_value, has_explicit_lower = bounds
-                out[lower] = _FixedArrayBound(
-                    name=decl.name,
-                    upper_value=upper_value,
-                    has_explicit_lower=has_explicit_lower,
-                    lower_value=lower_value,
-                )
+            dims = _parse_fixed_array_bounds_for_decl(source, decl, option_base)
+            if dims is not None:
+                out[lower] = FixedArrayBound(name=decl.name, dims=tuple(dims), origin="Dim")
 
     for_each_variable_group(body, visit, activity)
     return out
+
+
+def module_option_base(mod: ModuleNode, activity: ConditionalActivityTracker | None) -> int:
+    """The module's `Option Base`, 0 when absent."""
+    for member in active_module_members(mod, activity):
+        if isinstance(member, OptionNode):
+            match = _OPTION_BASE_RE.match(js_trim(member.option_text))
+            if match:
+                return int(match.group(1))
+    return 0
+
+
+def known_array_shapes(
+    source: str,
+    body: Sequence[BodyNode],
+    symbols: ModuleSymbols,
+    proc: ProcedureNode,
+    activity: ConditionalActivityTracker | None,
+    option_base: int,
+) -> dict[str, FixedArrayBound]:
+    """Dynamic-array and Variant locals whose bounds a value fixes (XLIDE issue
+    #120): the local's ONLY assignment is `Array(...)`, `VBA.Array(...)`,
+    `Split(literal, literal[, limit])` or `Range("A1:B2").Value`, and nothing else
+    touches it (no ReDim, Erase, whole pass to a call, or Set).
+
+     - `Array(a, b)` is based at Option Base; `VBA.Array` ignores Option Base and
+       is based at 0 (both measured in Excel 16.0).
+     - `Array()` has UBound -1: every index is out of range.
+     - `Split` is always 0-based and yields one part per delimiter plus one;
+       Split("abc", ",") is one element, Split("a,b", ",") two.
+     - A Range's `.Value` over a multi-cell address literal is a 1-based
+       two-dimensional array of the address's rows and columns.
+
+    Keyed by lowercased name, in the order the locals are first assigned.
+    """
+    proc_sym = procedure_symbol_for(symbols, proc)
+    candidates: set[str] = set()
+    for child in (proc_sym.children if proc_sym is not None else None) or []:
+        if child.kind is not VbaSymbolKind.LOCAL_VARIABLE or child.visibility is SymbolVisibility.STATIC:
+            continue
+        type_ = normalize_type(child.as_type)
+        if (child.array_bounds is None) if child.is_array else (type_ is None or type_ == "variant"):
+            candidates.add(child.name.lower())
+    if not candidates:
+        return {}
+    assignments: dict[str, list[FixedArrayBound]] = {}
+    spoiled: set[str] = set()
+
+    def spoil(lower: str | None) -> None:
+        if lower and lower in candidates:
+            spoiled.add(lower)
+
+    def visit(stmt: LeafStatementNode) -> None:
+        for span in statement_and_branch_spans(stmt):
+            toks = statement_tokens_after_leading_label(source, span)
+            head = token_text(_at(toks, 0))
+            bare = bare_assignment_target(source, span)
+            if bare is not None:
+                target_name, _target_span, value_tokens = bare
+                lower = target_name.lower()
+                if lower not in candidates:
+                    continue
+                shape = _array_value_shape(value_tokens, target_name, option_base)
+                if shape is None:
+                    spoil(lower)
+                else:
+                    assignments.setdefault(lower, []).append(shape)
+                continue
+            if head in _SHAPE_SPOILING_HEADS:
+                for tok in toks:
+                    spoil(_lower_name(tok))
+                continue
+            # Passed whole to a call: `Fill v`, `Fill(v)`, `x = Fill(v)`.
+            for i, tok in enumerate(toks):
+                name = _lower_name(tok)
+                if not name or name not in candidates:
+                    continue
+                prev = _at(toks, i - 1)
+                nxt = _at(toks, i + 1)
+                if nxt is not None and nxt.raw_text == "(":
+                    continue  # an index, not a whole pass
+                opens_slot = (
+                    prev is None
+                    or prev.raw_text in ("(", ",")
+                    or prev.kind is TokenKind.IDENTIFIER
+                    or prev.kind is TokenKind.KEYWORD
+                )
+                closes_slot = (
+                    nxt is None
+                    or nxt.raw_text in (")", ",", ":")
+                    or nxt.kind is TokenKind.COMMENT
+                )
+                if (
+                    opens_slot
+                    and closes_slot
+                    and not (prev is not None and prev.kind is TokenKind.OPERATOR)
+                    and not (nxt is not None and nxt.kind is TokenKind.OPERATOR)
+                    and token_text(prev) != "in"
+                ):
+                    spoil(name)
+
+    for_each_statement(body, visit, activity)
+    out: dict[str, FixedArrayBound] = {}
+    for lower, shapes in assignments.items():
+        if lower not in spoiled and len(shapes) == 1:
+            out[lower] = shapes[0]
+    return out
+
+
+def _array_value_shape(
+    value_tokens: Sequence[VbaToken], name: str, option_base: int
+) -> FixedArrayBound | None:
+    """The bounds of the array `Array(...)`, `Split(...)` or `Range(...).Value`
+    builds, or None."""
+    toks = [tok for tok in value_tokens if tok.kind is not TokenKind.COMMENT]
+    if not toks:
+        return None
+    index = 0
+    vba_qualified = False
+    if token_text(toks[0]) == "vba" and _raw_at(toks, 1) == ".":
+        vba_qualified = True
+        index = 2
+    callee = token_text(_at(toks, index))
+    if callee in ("array", "split") and _raw_at(toks, index + 1) == "(":
+        close = match_paren_from(toks, index + 1)
+        if close != len(toks) - 1:
+            return None
+        inner = toks[index + 2 : close]
+        if callee == "array":
+            count = 0 if not inner else len(split_top_level_token_groups(inner, 0, ","))
+            lower = 0 if vba_qualified else option_base
+            return FixedArrayBound(
+                name=name,
+                dims=(ArrayDimensionBound(lower=lower, upper=lower + count - 1, explicit_lower=True),),
+                origin="VBA.Array(...)" if vba_qualified else "Array(...)",
+            )
+        args = split_top_level_token_groups(inner, 0, ",")
+        if (
+            len(args) < 1
+            or len(args) > 2
+            or len(args[0]) != 1
+            or args[0][0].kind is not TokenKind.STRING_LITERAL
+        ):
+            return None
+        if len(args) == 2 and (len(args[1]) != 1 or args[1][0].kind is not TokenKind.STRING_LITERAL):
+            return None
+        text = args[0][0].raw_text[1:-1].replace('""', '"')
+        delimiter = args[1][0].raw_text[1:-1].replace('""', '"') if len(args) == 2 else " "
+        if len(delimiter) == 0:
+            return None
+        parts = 1 if len(text) == 0 else len(text.split(delimiter))
+        return FixedArrayBound(
+            name=name,
+            dims=(ArrayDimensionBound(lower=0, upper=parts - 1, explicit_lower=True),),
+            origin="Split(...)",
+        )
+    # `Range("A1:B2").Value` and `Worksheets(1).Range("A1:B2").Value`.
+    last = len(toks) - 1
+    if (
+        token_text(toks[last]) == "value"
+        and _raw_at(toks, last - 1) == "."
+        and _raw_at(toks, last - 2) == ")"
+    ):
+        close = last - 2
+        open_index = next(
+            (
+                i
+                for i, tok in enumerate(toks)
+                if tok.raw_text == "(" and match_paren_from(toks, i) == close
+            ),
+            -1,
+        )
+        if (
+            open_index > 0
+            and token_text(toks[open_index - 1]) == "range"
+            and close == open_index + 2
+            and toks[open_index + 1].kind is TokenKind.STRING_LITERAL
+        ):
+            address = _RANGE_ADDRESS_RE.fullmatch(toks[open_index + 1].raw_text[1:-1])
+            if address is not None:
+                # Number() of the row digits, in doubles as upstream computes them.
+                rows = _as_js_number(abs(float(address.group(4)) - float(address.group(2))) + 1)
+                cols = abs(_column_number(address.group(3)) - _column_number(address.group(1))) + 1
+                if rows > 1 or cols > 1:
+                    return FixedArrayBound(
+                        name=name,
+                        dims=(
+                            ArrayDimensionBound(lower=1, upper=rows, explicit_lower=True),
+                            ArrayDimensionBound(lower=1, upper=cols, explicit_lower=True),
+                        ),
+                        origin="Range(...).Value",
+                    )
+    return None
+
+
+def _column_number(letters: str) -> int:
+    n = 0
+    for ch in letters.upper():
+        n = n * 26 + (ord(ch) - 64)
+    return n
 
 
 def _redim_target_names_in_body(
@@ -521,67 +812,276 @@ def _redim_target_names_in_body(
     return out
 
 
+def _subscript_detail(
+    value: int | float, dim: ArrayDimensionBound, index: int, dims: int
+) -> str | None:
+    """Whether `value` is outside `dim`, with the words for the message when it is."""
+    if value >= dim.lower and value <= dim.upper:
+        return None
+    which = f" in dimension {index + 1}" if dims > 1 else ""
+    if dim.upper < dim.lower:
+        return (
+            f"has no element to reach{which}: the array is empty "
+            f"(UBound {js_number_to_string(dim.upper)})"
+        )
+    if value > dim.upper:
+        return f"is above the upper bound {js_number_to_string(dim.upper)}{which}"
+    lower = js_number_to_string(dim.lower)
+    if dim.explicit_lower:
+        return f"is below the lower bound {lower}{which}"
+    return f"is below the lower bound {lower}{which} (Option Base {lower})"
+
+
 def _fixed_array_subscript_violations(
-    source: str, span: Span, fixed: dict[str, _FixedArrayBound], excluded: set[str]
+    source: str,
+    span: Span,
+    fixed: Mapping[str, FixedArrayBound],
+    excluded: set[str],
+    counters: Mapping[str, _ForCounter] | None = None,
 ) -> list[tuple[Span, str]]:
+    """Literal-subscript accesses of a tracked array that fall outside its bounds."""
     toks = statement_tokens_after_leading_label(source, span)
     out: list[tuple[Span, str]] = []
     for i in range(len(toks) - 1):
         if toks[i + 1].raw_text != "(" or (i >= 1 and toks[i - 1].raw_text in (".", "!")):
             continue
         name = token_name(toks[i])
-        lower = name.lower() if name is not None else None
-        if name is None or lower is None or lower not in fixed or lower in excluded:
+        lower = name.lower() if name else None
+        if not name or not lower or lower not in fixed or lower in excluded:
             continue
         close = match_paren_from(toks, i + 1)
         if close <= i + 1:
             continue
         arg_toks = [tok for tok in toks[i + 2 : close] if tok.kind is not TokenKind.COMMENT]
         slots = split_top_level_token_groups(arg_toks, 0, ",")
-        if len(slots) != 1 or len(slots[0]) == 0:
-            continue  # not a single-subscript index access (multi-dim/empty)
-        value = _comparable_array_bound_expression_value(slots[0])
-        if value is None:
-            continue  # non-literal subscript -> not statically provable
         decl = fixed[lower]
-        low_gate = decl.lower_value if (decl.has_explicit_lower and decl.lower_value is not None) else 0
-        if value <= decl.upper_value and value >= low_gate:
+        if len(slots) != len(decl.dims) or any(len(slot) == 0 for slot in slots):
+            continue  # the dimension count is the compiler's business, not this rule's
+        # One report per access: the first dimension that is out of range.
+        for index, slot in enumerate(slots):
+            dim = decl.dims[index]
+            value: int | float | None = _comparable_array_bound_expression_value(slot)
+            via_counter: _ForCounter | None = None
+            if value is None and len(slot) == 1:
+                # `a(i)` inside `For i = 0 To 3`: the counter's last pass.
+                via_counter = (counters or {}).get(_lower_counter_key(slot[0]))
+                value = via_counter.last if via_counter is not None else None
+            if value is None:
+                continue  # a variable, Const or member chain: not provable
+            detail = _subscript_detail(value, dim, index, len(decl.dims))
+            if detail is None:
+                continue
+            origin = "" if decl.origin == "Dim" else f" ({decl.origin})"
+            reached = (
+                f"Counter '{slot[0].raw_text}' reaches {js_number_to_string(value)} "
+                "on its last pass, which"
+                if via_counter is not None
+                else f"Subscript {js_number_to_string(value)}"
+            )
+            out.append(
+                (
+                    Span(span.start + slot[0].start, span.start + slot[-1].end),
+                    f"{reached} for array '{decl.name}'{origin} {detail}. "
+                    "This will raise Run-time error '9': Subscript out of range.",
+                )
+            )
+            break
+    return out
+
+
+def _lower_counter_key(tok: VbaToken) -> str:
+    # tokenName(...)?.toLowerCase() ?? '': an empty name stays empty.
+    name = token_name(tok)
+    return name.lower() if name is not None else ""
+
+
+def _bound_intrinsic_dimension_violations(
+    source: str, span: Span, fixed: Mapping[str, FixedArrayBound], excluded: set[str]
+) -> list[tuple[Span, str]]:
+    """`UBound(a, 2)` / `LBound(a, 2)` on an array with fewer dimensions raises 9
+    (XLIDE issue #120, measured in Excel 16.0)."""
+    toks = statement_tokens_after_leading_label(source, span)
+    out: list[tuple[Span, str]] = []
+    for i in range(len(toks) - 1):
+        callee = token_text(toks[i])
+        if (
+            callee not in ("ubound", "lbound")
+            or toks[i + 1].raw_text != "("
+            or not is_bare_or_vba_qualified_intrinsic_call(toks, i)
+        ):
             continue
-        slot = slots[0]
-        if value > decl.upper_value:
-            detail = f"is above the array's declared upper bound {decl.upper_value}"
-        elif decl.has_explicit_lower:
-            detail = f"is below the array's declared lower bound {decl.lower_value}"
-        else:
-            detail = "is negative and out of range"
+        close = match_paren_from(toks, i + 1)
+        if close < 0:
+            continue
+        args = split_top_level_token_groups(
+            [tok for tok in toks[i + 2 : close] if tok.kind is not TokenKind.COMMENT], 0, ","
+        )
+        if len(args) != 2 or len(args[0]) != 1:
+            continue
+        lower = _lower_name(args[0][0])
+        decl = fixed.get(lower) if lower else None
+        if decl is None or not lower or lower in excluded:
+            continue
+        dimension = _comparable_array_bound_expression_value(args[1])
+        if dimension is None or (dimension >= 1 and dimension <= len(decl.dims)):
+            continue
         out.append(
             (
-                Span(span.start + slot[0].start, span.start + slot[-1].end),
-                f"Subscript {value} for array '{decl.name}' {detail}. "
+                Span(span.start + args[1][0].start, span.start + args[1][-1].end),
+                f"{toks[i].raw_text} asks for dimension {dimension} of '{decl.name}', which has "
+                f"{pluralize_count(len(decl.dims), 'dimension')}. "
                 "This will raise Run-time error '9': Subscript out of range.",
             )
         )
     return out
 
 
+def _inline_split_index_violations(source: str, span: Span) -> list[tuple[Span, str]]:
+    """`Split("abc", ",")(1)`: indexing the result of Split on literals, whose one
+    element sits at 0 (XLIDE issue #120)."""
+    toks = statement_tokens_after_leading_label(source, span)
+    out: list[tuple[Span, str]] = []
+    for i in range(len(toks) - 1):
+        if (
+            token_text(toks[i]) != "split"
+            or toks[i + 1].raw_text != "("
+            or not is_bare_or_vba_qualified_intrinsic_call(toks, i)
+        ):
+            continue
+        close = match_paren_from(toks, i + 1)
+        if close < 0 or _raw_at(toks, close + 1) != "(":
+            continue
+        index_close = match_paren_from(toks, close + 1)
+        if index_close < 0:
+            continue
+        shape = _array_value_shape(toks[i : close + 1], "Split(...)", 0)
+        index_toks = [
+            tok for tok in toks[close + 2 : index_close] if tok.kind is not TokenKind.COMMENT
+        ]
+        value = _comparable_array_bound_expression_value(index_toks)
+        if shape is None or value is None:
+            continue
+        detail = _subscript_detail(value, shape.dims[0], 0, 1)
+        if detail is not None:
+            out.append(
+                (
+                    Span(span.start + index_toks[0].start, span.start + index_toks[-1].end),
+                    f"Subscript {value} for the array Split returns here {detail}. "
+                    "This will raise Run-time error '9': Subscript out of range.",
+                )
+            )
+    return out
+
+
+def _for_counter_last_values(
+    source: str, body: Sequence[BodyNode], activity: ConditionalActivityTracker | None
+) -> dict[int, dict[str, _ForCounter]]:
+    """The For counters in force at each statement, with the last value each
+    reaches: `For i = 0 To 3` (no Step, or a positive literal Step) ends its last
+    pass at 3, so `a(i)` inside it indexes 3 on that pass (XLIDE issue #120).
+
+    Keyed by the statement node's id(): the nodes are not hashable, and every one
+    outlives the procedure's pass."""
+    out: dict[int, dict[str, _ForCounter]] = {}
+
+    def enter(block: BodyNode, counters: dict[str, _ForCounter]) -> dict[str, _ForCounter]:
+        if not isinstance(block, ForBlockNode):
+            return counters
+        inner = dict(counters)
+        header = _for_header_literal_range(source, block)
+        if header is not None:
+            inner[header[0]] = header[1]
+        elif block.control_variable:
+            inner.pop(block.control_variable.lower(), None)
+        return inner
+
+    empty: dict[str, _ForCounter] = {}
+    for node, counters in iter_body_nodes_in_context(body, empty, enter, inactive_node_skip(activity)):
+        if is_leaf_statement(node) and counters:
+            out[id(node)] = counters
+    return out
+
+
+def _for_header_literal_range(source: str, node: ForBlockNode) -> tuple[str, _ForCounter] | None:
+    """`For i = <literal> To <literal> [Step <positive literal>]`: the counter and
+    the value its last pass has."""
+    if node.each or not node.control_variable:
+        return None
+    header_end = source.find("\n", node.span.start)
+    header = Span(
+        node.span.start, node.span.end if header_end < 0 else min(header_end, node.span.end)
+    )
+    toks = statement_tokens_after_leading_label(source, header)
+    eq = next((i for i, tok in enumerate(toks) if tok.raw_text == "="), -1)
+    to = next((i for i, tok in enumerate(toks) if token_text(tok) == "to"), -1)
+    if eq < 0 or to < eq:
+        return None
+    step = next((i for i, tok in enumerate(toks) if token_text(tok) == "step"), -1)
+    start = _comparable_array_bound_expression_value(toks[eq + 1 : to])
+    up_to = _comparable_array_bound_expression_value(toks[to + 1 : step if step > 0 else len(toks)])
+    step_value = _comparable_array_bound_expression_value(toks[step + 1 :]) if step > 0 else 1
+    if start is None or up_to is None or step_value is None or step_value <= 0 or up_to < start:
+        return None
+    # The last pass runs at the highest from + k*step not above upTo. Computed in
+    # doubles, as upstream's Math.floor((upTo - from) / step) * step is.
+    quotient = math.floor(float(up_to - start) / float(step_value))
+    last = _as_js_number(float(start) + float(quotient) * float(step_value))
+    counter_span = node.control_variable_span if node.control_variable_span is not None else header
+    return (node.control_variable.lower(), _ForCounter(last=last, span=counter_span))
+
+
 def check_fixed_array_subscript_bounds(
-    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
+    source: str,
+    mod: ModuleNode,
+    symbols: ModuleSymbols,
+    activity: ConditionalActivityTracker | None,
+    push: PushFn,
 ) -> None:
+    """Rule: a constant subscript proven outside a LOCAL fixed-size array's declared
+    bounds raises Run-time error '9' (oracle-verified `runtime006_*`). No-FP scope:
+    only local, single-dimension fixed arrays with a literal upper bound, accessed
+    with a literal (or folded signed-integer) subscript, are checked. Dynamic /
+    ReDim'd arrays, variable/Const subscripts, multi-dimension arrays, parameters,
+    and the Option-Base-dependent lower region of single-bound `Dim a(n)` decls
+    stay quiet. Flags subscripts above the upper bound, below an explicit literal
+    lower bound, or negative."""
+    option_base = module_option_base(mod, activity)
     for member in active_module_members(mod, activity):
         if isinstance(member, ProcedureNode):
-            _check_fixed_array_subscript_bounds_procedure(source, member, activity, push)
+            _check_fixed_array_subscript_bounds_procedure(
+                source, member, symbols, activity, option_base, push
+            )
 
 
 def _check_fixed_array_subscript_bounds_procedure(
-    source: str, proc: ProcedureNode, activity: ConditionalActivityTracker | None, push: PushFn
+    source: str,
+    proc: ProcedureNode,
+    symbols: ModuleSymbols,
+    activity: ConditionalActivityTracker | None,
+    option_base: int,
+    push: PushFn,
 ) -> None:
-    fixed = _local_fixed_array_declarations_for_body(source, proc.body, activity)
-    if not fixed:
-        return
+    fixed = _local_fixed_array_declarations_for_body(source, proc.body, activity, option_base)
+    for lower, shape in known_array_shapes(
+        source, proc.body, symbols, proc, activity, option_base
+    ).items():
+        if lower not in fixed:
+            fixed[lower] = shape
     excluded = _redim_target_names_in_body(source, proc.body, activity)
+    counters = _for_counter_last_values(source, proc.body, activity)
 
     def visit(stmt: LeafStatementNode) -> None:
-        for span, message in _fixed_array_subscript_violations(source, stmt.span, fixed, excluded):
+        for span, message in _inline_split_index_violations(source, stmt.span):
+            push("arraySubscriptOutOfBounds", message, span)
+        if not fixed:
+            return
+        for span, message in _fixed_array_subscript_violations(
+            source, stmt.span, fixed, excluded, counters.get(id(stmt))
+        ):
+            push("arraySubscriptOutOfBounds", message, span)
+        for span, message in _bound_intrinsic_dimension_violations(
+            source, stmt.span, fixed, excluded
+        ):
             push("arraySubscriptOutOfBounds", message, span)
 
     for_each_statement(proc.body, visit, activity)
@@ -931,7 +1431,7 @@ def _unallocated_bound_calls(
         function_name = token_name(toks[i])
         if function_name is None or function_name.lower() not in ("lbound", "ubound"):
             continue
-        if toks[i + 1].raw_text != "(" or not _is_bare_or_vba_qualified_intrinsic_call(toks, i):
+        if toks[i + 1].raw_text != "(" or not is_bare_or_vba_qualified_intrinsic_call(toks, i):
             continue
         close = match_paren_from(toks, i + 1)
         if close < 0:
@@ -950,17 +1450,6 @@ def _unallocated_bound_calls(
             (function_name, name, Span(span.start + first_slot[0].start, span.start + first_slot[0].end))
         )
     return out
-
-
-def _is_bare_or_vba_qualified_intrinsic_call(toks: Sequence[VbaToken], name_index: int) -> bool:
-    if name_index < 1 or toks[name_index - 1].raw_text != ".":
-        return True
-    qualifier = token_name(toks[name_index - 2]) if name_index >= 2 else None
-    return (
-        qualifier is not None
-        and qualifier.lower() == "vba"
-        and (name_index < 3 or toks[name_index - 3].raw_text != ".")
-    )
 
 
 def _dynamic_array_touches_in_statement(
@@ -1037,7 +1526,7 @@ def _array_bound_scalar_arguments(
         function_name = token_name(toks[i])
         if function_name is None or function_name.lower() not in ("lbound", "ubound"):
             continue
-        if toks[i + 1].raw_text != "(" or not _is_bare_or_vba_qualified_intrinsic_call(toks, i):
+        if toks[i + 1].raw_text != "(" or not is_bare_or_vba_qualified_intrinsic_call(toks, i):
             continue
         close = match_paren_from(toks, i + 1)
         if close < 0 or close <= i + 2:

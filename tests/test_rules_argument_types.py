@@ -46,9 +46,16 @@ def test_string_arithmetic_into_numeric() -> None:
 def test_compatible_arguments_silent() -> None:
     src = "Sub Foo(n As Long)\nEnd Sub\nSub S()\n    Dim x As Long\n    Foo x\nEnd Sub"
     assert not (_codes(src) & set(_CODES))
-    # Variant / unknown arguments are accepted.
-    src2 = "Sub Foo(n As Long)\nEnd Sub\nSub S()\n    Dim v As Variant\n    Foo v\nEnd Sub"
+    # A Variant passed by value, or a parenthesized copy, is accepted.
+    src2 = "Sub Foo(ByVal n As Long)\nEnd Sub\nSub S()\n    Dim v As Variant\n    Foo v\n    Foo (v)\nEnd Sub"
     assert not (_codes(src2) & set(_CODES))
+
+
+def test_variant_variable_passed_byref_to_a_typed_parameter() -> None:
+    # The VBE refuses a Variant VARIABLE passed ByRef to a typed parameter (XLIDE
+    # issue #111); `Foo (v)` passes a copy and compiles.
+    src = "Sub Foo(n As Long)\nEnd Sub\nSub S()\n    Dim v As Variant\n    Foo v\n    Foo (v)\nEnd Sub"
+    assert _codes(src) & set(_CODES) == {"byref-argument-type-mismatch"}
 
 
 def test_oracle_asserted_cases() -> None:

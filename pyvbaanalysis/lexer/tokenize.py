@@ -263,9 +263,29 @@ def _line_break_count(text: str) -> int:
     return count
 
 
+# Test hook (XLIDE issue #139): the lengths of the sources one pass lexed from
+# scratch. A module that shows up more than once was evicted mid-pass, which is what
+# a raw expression string sent to the cached statement lexer does.
+_tokenize_miss_log: list[int] | None = None
+
+
+def start_tokenize_miss_log_for_tests() -> None:
+    global _tokenize_miss_log
+    _tokenize_miss_log = []
+
+
+def stop_tokenize_miss_log_for_tests() -> list[int]:
+    global _tokenize_miss_log
+    log = _tokenize_miss_log if _tokenize_miss_log is not None else []
+    _tokenize_miss_log = None
+    return log
+
+
 @lru_cache(maxsize=8)
 def tokenize_cached(src: str) -> tuple[VbaToken, ...]:
     """Read-only memoized tokenize for hot paths. Do not mutate the result."""
+    if _tokenize_miss_log is not None:
+        _tokenize_miss_log.append(len(src))
     return tuple(tokenize(src))
 
 

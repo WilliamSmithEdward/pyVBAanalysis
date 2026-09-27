@@ -16,9 +16,10 @@ from the type library's own TYPEFLAGS.
 
 Upstream measured the flag from the registered libraries with LoadRegTypeLib
 (Office 16) and confirmed it against the VBE for seven receivers. Of Excel's 747
-interfaces only 27 are closed; the names are vendored as data/excel_closed_types.json
+interfaces only 27 are closed. Word, PowerPoint and Access were read the same way
+by the XLIDE issue #127 sweep. The names are vendored as data/host_closed_types.json
 rather than transcribed here, because the no-false-positive contract for
-member-not-found rests on the set being exact.
+member-not-found rests on the sets being exact.
 """
 
 from __future__ import annotations
@@ -26,8 +27,15 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+@lru_cache(maxsize=1)
+def _closed_type_names() -> dict[str, Any]:
+    raw: dict[str, Any] = json.loads((_DATA_DIR / "host_closed_types.json").read_text(encoding="utf-8"))
+    return raw
 
 
 @lru_cache(maxsize=1)
@@ -38,8 +46,14 @@ def excel_closed_type_names() -> frozenset[str]:
     `Worksheet` and `Chart` are the two a user meets: a typo on a worksheet
     variable is a compile error, the same typo on a Range is not.
     """
-    raw = json.loads((_DATA_DIR / "excel_closed_types.json").read_text(encoding="utf-8"))
-    return frozenset(raw["excelClosedTypes"])
+    return frozenset(_closed_type_names()["excel"])
+
+
+@lru_cache(maxsize=None)
+def _lowered_closed_type_names(library: str) -> frozenset[str]:
+    """The closed types of Word, PowerPoint or Access, lowercased: those hosts are
+    matched case-insensitively, Excel is not."""
+    return frozenset(name.lower() for name in _closed_type_names()[library])
 
 
 # Model types that stand where the library returns a closed type. The Worksheets
@@ -61,14 +75,24 @@ def host_type_resolves_when_compiling(qualified_name: str) -> bool:
     host is Excel. A type the set does not name is extensible, which is the safe
     answer for one nobody has measured: nothing is reported for it.
 
-    Only Excel has been measured against its type library. Another host's types keep
-    the answer they had, which is what they have always been analyzed under, and
-    Word and PowerPoint are closed almost throughout, so the flag would change
-    little there anyway.
+    Word Range, Selection, Paragraph and Table are closed and Document is open;
+    PowerPoint Slide, Shape and TextRange are closed; Access's controls (TextBox,
+    ComboBox, ...) are closed while Form, Report, Control and the project objects
+    are open, which is what lets `f.CustomerID` compile.
     """
     library, dot, display_name = qualified_name.partition(".")
-    if not dot:
+    if not dot or not library:
         library, display_name = "excel", qualified_name
-    if library.lower() != "excel":
-        return True
-    return _EXCEL_TYPES_STANDING_FOR.get(display_name, display_name) in excel_closed_type_names()
+    library = library.lower()
+    if library == "excel":
+        return _EXCEL_TYPES_STANDING_FOR.get(display_name, display_name) in excel_closed_type_names()
+    if library in ("word", "powerpoint", "access"):
+        return display_name.lower() in _lowered_closed_type_names(library)
+    if library == "office":
+        # The shared Office library (CommandBar and friends): its model carries
+        # no hidden members, so absence is never proved there whatever the flag
+        # says.
+        return False
+    # A library nobody has measured keeps the answer it had: closed, which its
+    # (never exhaustive) model cannot act on anyway.
+    return True

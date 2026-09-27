@@ -180,6 +180,11 @@ class VbaProjectClassMember:
     visibility: SymbolVisibility | None = None
     definitions: list[VbaProjectClassMemberDefinition] | None = None
     default_member: bool | None = None
+    # Which setters the property declares. `h.Item = x` compiles only with a
+    # Property Let and `Set h.Item = x` only with a Property Set (XLIDE issue #107,
+    # measured in Excel 16.0: the other pairing is "Invalid use of property").
+    let_accessor: bool | None = None
+    set_accessor: bool | None = None
     attributes: list[VbaSymbolAttribute] | None = None
 
 

@@ -27,6 +27,11 @@ class VbaRuntimeParam:
     type_: str | None = None
     optional: bool = False
     param_array: bool = False
+    # The function raises error 94 (Invalid use of Null) for a Null argument
+    # although the parameter is a Variant: CStr(Null), Chr(Null), Asc(Null).
+    # Measured in Excel 16.0 (build 20326), XLIDE issue #104. False means Null
+    # passes through, which is what Left, Trim, Len and UCase do.
+    null_raises: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +61,13 @@ def _function_from(raw: Mapping[str, Any]) -> VbaRuntimeFunction:
             None
             if params is None
             else tuple(
-                VbaRuntimeParam(p["name"], p.get("type"), bool(p.get("optional")), bool(p.get("paramArray")))
+                VbaRuntimeParam(
+                    p["name"],
+                    p.get("type"),
+                    bool(p.get("optional")),
+                    bool(p.get("paramArray")),
+                    bool(p.get("nullRaises")),
+                )
                 for p in params
             )
         ),

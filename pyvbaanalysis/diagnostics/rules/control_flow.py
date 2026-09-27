@@ -60,6 +60,7 @@ from ..walker import (
     active_module_members,
     for_each_statement,
     is_inactive_node,
+    raw_expression_tokens,
     statement_tokens,
     statement_tokens_after_leading_label,
     token_name,
@@ -137,6 +138,24 @@ def _check_for_each_control_variable_type(
     shape = resolved.shape if resolved.resolved else shapes.get(node.control_variable.lower())
     if shape is None:
         return
+    # Over an array the VBE accepts only a Variant control variable: `For Each o In
+    # arr` with o As Object is "For Each control variable on arrays must be Variant"
+    # (XLIDE issue #125, measured in Excel 16.0), and so is a String.
+    source_name = _simple_for_each_source_name(node.source_expression) if node.source_expression else None
+    source_shape: DeclaredValueShape | None = None
+    if source_name:
+        resolved_source = resolve_shape(source_name, BareIdentifierContext.EXPRESSION)
+        source_shape = resolved_source.shape if resolved_source.resolved else shapes.get(source_name.lower())
+    if source_shape is not None and source_shape.is_array and not shape.is_array:
+        normalized = normalize_type(shape.as_type)
+        if shape.as_type and normalized != "variant":
+            push(
+                "forEachControlVariableType",
+                f"For Each control variable '{node.control_variable}' must be Variant when the source is "
+                f"an array, but it is declared As {shape.as_type}.",
+                node.control_variable_span,
+            )
+            return
     problem = _for_each_control_variable_type_problem(shape, project_types, model)
     if problem is None:
         return
@@ -218,11 +237,7 @@ def _for_each_source_type_problem(
 
 
 def _simple_for_each_source_name(source_expression: str) -> str | None:
-    toks = [
-        t
-        for t in tokenize(source_expression)
-        if t.kind is not TokenKind.COMMENT and t.kind is not TokenKind.NEWLINE
-    ]
+    toks = raw_expression_tokens(source_expression)
     return token_name(toks[0]) if len(toks) == 1 else None
 
 
@@ -722,13 +737,45 @@ def check_malformed_statements(
             and first.kind in (TokenKind.INTEGER_LITERAL, TokenKind.FLOAT_LITERAL, TokenKind.STRING_LITERAL)
         ):
             push("invalidAssignmentTarget", "Cannot assign to a literal value.", absolute_span(stmt.span, first))
-        if token_text(first) == "open" and not any(token_text(t) == "for" for t in toks):
-            push(
-                "openMissingForMode",
-                "An 'Open' statement requires a 'For <mode>' clause.",
-                absolute_span(stmt.span, first),
-            )
+        if token_text(first) == "open":
+            problem = _malformed_open_statement(toks)
+            if problem is not None:
+                push("openMissingForMode", problem, absolute_span(stmt.span, first))
 
     for member in active_module_members(mod, activity):
         if isinstance(member, ProcedureNode):
             for_each_statement(member.body, inspect, activity)
+
+
+# The words the mode clause of an Open statement is made of.
+_OPEN_MODE_WORDS = frozenset({"input", "output", "append", "binary", "random"})
+
+
+def _malformed_open_statement(toks: Sequence[VbaToken]) -> str | None:
+    """Why an `Open` statement will not compile, or None when it will.
+
+    `For mode` is OPTIONAL: `Open path As #f` opens the file for Random access, and
+    `Open path Access Read As #f` compiles too (XLIDE issue #97; both run in Excel
+    16.0). What the VBE refuses is a mode word standing without its `For`
+    ("Expected: For", oracle case corpus_edges_005_malformed_open_compile) and a
+    statement with no `As` clause at all ("Syntax error": `Open path` and
+    `Open path Len = 4`, measured 2026-09-26).
+    """
+    saw_as = False
+    for i in range(1, len(toks)):
+        word = token_text(toks[i])
+        if word == "as":
+            saw_as = True
+            continue
+        if word in _OPEN_MODE_WORDS and token_text(toks[i - 1]) != "for":
+            # Output, Append, Random and Binary are contextual words a variable may
+            # be named, so a mode word is one only where the grammar puts it: after
+            # the path expression and before what follows the mode
+            # (`Open path Output #1`, `Open path Output As #1`).
+            prev = toks[i - 1]
+            following = token_text(toks[i + 1]) if i + 1 < len(toks) else ""
+            ends_operand = prev.kind is not TokenKind.OPERATOR and prev.raw_text not in ("(", ",")
+            starts_clause = following in ("", "as", "access", "lock", "shared", "#")
+            if ends_operand and starts_clause:
+                return f"An 'Open' statement's mode '{toks[i].raw_text}' must follow 'For'."
+    return None if saw_as else "An 'Open' statement requires an 'As #filenumber' clause."

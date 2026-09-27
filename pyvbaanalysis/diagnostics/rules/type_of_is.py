@@ -32,6 +32,8 @@ from ...completion.member_access import (
     simple_type_name_for_assignment,
 )
 from ...conditional import ConditionalActivityTracker
+from ...host.host_model import get_host_members, get_host_type, resolve_host_alias
+from ...host.type_extensibility import host_type_resolves_when_compiling
 from ...lexer.token_kinds import TokenKind
 from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import (
@@ -151,26 +153,6 @@ def _implements_object_type(
     return False
 
 
-def _object_assignment_incompatible(
-    expected_raw: str, actual_raw: str, member_ctx: MemberCompletionContext
-) -> bool:
-    """True when an `actual_raw`-typed object value is provably NOT assignable to an
-    `expected_raw`-typed object reference. Port of the object-vs-object arm of
-    objectAssignmentIncompatibilityReason (scalar/Variant/Nothing arms are not
-    reachable here, both operands are already concrete object types)."""
-    expected = resolve_known_object_assignment_type(expected_raw, member_ctx)
-    if expected is None or expected.kind == "generic":
-        return False
-    actual = resolve_known_object_assignment_type(actual_raw, member_ctx)
-    if actual is None or actual.kind == "generic":
-        return False
-    if expected.key == actual.key:
-        return False
-    if actual.kind == "project" and _implements_object_type(actual, expected):
-        return False
-    return True
-
-
 def object_assignment_incompatibility_reason(
     expected_raw: str | None,
     actual: InferredArgumentType | None,
@@ -201,7 +183,104 @@ def object_assignment_incompatibility_reason(
         return None
     if actual_object.kind == "project" and _implements_object_type(actual_object, expected):
         return None
+    # A Set between two class types is checked when it runs, by QueryInterface,
+    # so it compiles whenever the object could support the target (XLIDE issue
+    # #109). The class an interface is implemented by can hold the interface's
+    # value (`Set c = o`, casting back), and two interfaces one class implements
+    # can hold each other's (`Set b = o`). Only project interfaces are known here.
+    if (
+        expected.kind == "project"
+        and actual_object.kind == "project"
+        and _project_types_can_share_instance(expected, actual_object, member_ctx)
+    ):
+        return None
     return f"This object type is not compatible with {expected.display}."
+
+
+_HAS_PARAMETERS_RE = re.compile(r"\([^)]")
+
+
+def object_let_assignment_verdict(expected_raw: str | None, member_ctx: MemberCompletionContext) -> str:
+    """Port of objectLetAssignmentVerdict: what a bare `name = value` does to a
+    variable of a known object type (XLIDE issue #107, each case measured in Excel
+    16.0). The VBE compiles it as a Let through the type's default member, so it is
+    never "Set required" at compile time:
+
+    - "lets": the type has a parameterless default member (Range's `_Default` is
+      Value; a project class marks one with VB_UserMemId = 0), or is the generic
+      Object, whose default member is looked up when it runs. `r = 5` writes A1.
+      Nothing to report.
+    - "argument": the default member takes an argument, so the VBE refuses the
+      statement: `c = 5` on a Collection is "Argument not optional".
+    - "noDefault": the type is fully known and has no default member, so the
+      statement compiles and raises error 438 when it runs (`ws = 9`).
+    - "unknown": the model cannot say. Nothing is reported.
+    """
+    expected = resolve_known_object_assignment_type(expected_raw, member_ctx)
+    if expected is None:
+        return "unknown"
+    if expected.kind == "generic":
+        return "argument" if expected.key == "collection" else "lets"
+    if expected.kind == "project":
+        project_type = next(
+            (
+                candidate
+                for candidate in member_ctx.project_class_members or []
+                if candidate.name.lower() == expected.key
+            ),
+            None,
+        )
+        if project_type is None or project_type.exhaustive is not True:
+            return "unknown"
+        default_member = next((member for member in project_type.members if member.default_member), None)
+        if default_member is None:
+            return "noDefault"
+        takes_argument = bool(default_member.signature) and _HAS_PARAMETERS_RE.search(
+            default_member.signature or ""
+        ) is not None
+        return "argument" if takes_argument else "lets"
+    members = get_host_members(expected_raw or "", member_ctx.model)
+    host_default = next((member for member in members if member["name"] == "_Default"), None)
+    if host_default is not None:
+        takes_argument = (
+            host_default.get("kind") == "method"
+            or _HAS_PARAMETERS_RE.search(host_default.get("signature") or "") is not None
+        )
+        return "argument" if takes_argument else "lets"
+    return "noDefault" if _host_type_is_closed(expected_raw or "", member_ctx) else "unknown"
+
+
+def _host_type_is_closed(type_name: str, member_ctx: MemberCompletionContext) -> bool:
+    """Whether the host model's member list for the type proves a member absent:
+    the list is complete AND the type library resolves members while compiling
+    (the same two facts member-not-found needs)."""
+    alias = resolve_host_alias(type_name, member_ctx.model)
+    resolved = alias if alias is not None else type_name
+    host_type = get_host_type(resolved, member_ctx.model)
+    return (
+        host_type is not None
+        and host_type.get("exhaustive") is True
+        and host_type_resolves_when_compiling(resolved)
+    )
+
+
+def _project_types_can_share_instance(
+    expected: KnownObjectAssignmentType,
+    actual: KnownObjectAssignmentType,
+    member_ctx: MemberCompletionContext,
+) -> bool:
+    """Whether one project class can carry a value declared as the other: the
+    expected class implements the actual type (a cast from an interface back to
+    the class), or some project class implements both (a cast between two
+    interfaces of one object)."""
+    if _implements_object_type(expected, actual):
+        return True
+    wanted = {expected.key, actual.key}
+    for project_type in member_ctx.project_class_members or []:
+        implemented = {name.lower() for name in project_type.implements or []}
+        if wanted <= implemented:
+            return True
+    return False
 
 
 # Host types the model returns where the type library returns another, so a value
@@ -249,8 +328,20 @@ def _check_typeof_is(
     # is-a the target, so only fire when no project class implements the operand.
     if operand_type.kind == "project" and _is_implemented_by_any_project_class(operand_type, member_ctx):
         return
-    operand_can_be_target = not _object_assignment_incompatible(expr.type_name, declared, member_ctx)
-    target_can_be_operand = not _object_assignment_incompatible(declared, expr.type_name, member_ctx)
+    # Mutual incompatibility: neither type is assignable to the other. If either
+    # is, `TypeOf` could be True, so stay quiet.
+    operand_can_be_target = (
+        object_assignment_incompatibility_reason(
+            expr.type_name, InferredArgumentType(declared, declared, expr.span), member_ctx
+        )
+        is None
+    )
+    target_can_be_operand = (
+        object_assignment_incompatibility_reason(
+            declared, InferredArgumentType(expr.type_name, expr.type_name, expr.span), member_ctx
+        )
+        is None
+    )
     if operand_can_be_target or target_can_be_operand:
         return
     push(

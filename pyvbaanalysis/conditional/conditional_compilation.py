@@ -320,7 +320,11 @@ def evaluate_conditional_expression(
         for t in tokenize(expression)
         if t.kind is not TokenKind.COMMENT and t.kind is not TokenKind.NEWLINE
     ]
-    parser = _ConditionalExpressionParser(tokens, conditional_compiler_constants(env))
+    parser = _ConditionalExpressionParser(
+        tokens,
+        conditional_compiler_constants(env),
+        env is not None and env.project_constants is not None,
+    )
     return parser.parse()
 
 
@@ -470,12 +474,22 @@ def _evaluate_with_project_constants(
     env: ConditionalCompilationEnvironment,
     project_constants: Mapping[str, ConditionalValue],
 ) -> ConditionalValue | None:
-    return evaluate_conditional_expression(
-        expression,
-        ConditionalCompilationEnvironment(
-            compiler_constants=env.compiler_constants, project_constants=dict(project_constants)
-        ),
+    if expression is None or expression.strip() == "":
+        return None
+    # The module's own `#Const` values ride in `project_constants` whether or not
+    # the caller supplied the project's; only the caller's presence says an absent
+    # name is provably undefined (XLIDE issue #102).
+    constants = conditional_compiler_constants(
+        ConditionalCompilationEnvironment(compiler_constants=env.compiler_constants)
     )
+    for name, value in project_constants.items():
+        constants[name] = value
+    tokens = [
+        t
+        for t in tokenize(expression)
+        if t.kind is not TokenKind.COMMENT and t.kind is not TokenKind.NEWLINE
+    ]
+    return _ConditionalExpressionParser(tokens, constants, env.project_constants is not None).parse()
 
 
 def _combine_activity(
@@ -564,11 +578,20 @@ def _normalized_comparison_value(value: ConditionalValue) -> str:
 class _ConditionalExpressionParser:
     """Recursive-descent evaluator: Or > And > comparison > Not > primary."""
 
-    __slots__ = ("_tokens", "_constants", "_index")
+    __slots__ = ("_tokens", "_constants", "_undefined_is_empty", "_index")
 
-    def __init__(self, tokens: list[VbaToken], constants: Mapping[str, ConditionalValue]) -> None:
+    def __init__(
+        self, tokens: list[VbaToken], constants: Mapping[str, ConditionalValue], undefined_is_empty: bool
+    ) -> None:
         self._tokens = tokens
         self._constants = constants
+        # Whether a name no constant defines evaluates as the VBE evaluates it,
+        # to Empty (0 here, since Empty compares as 0 and is False). True only
+        # when the caller supplied the project's own conditional constants, so
+        # an absent name is provably undefined rather than unknown (XLIDE issue
+        # #102); a module's `#Const` lines are folded into the same table before
+        # any `#If` reads them.
+        self._undefined_is_empty = undefined_is_empty
         self._index = 0
 
     def parse(self) -> ConditionalValue | None:
@@ -652,7 +675,10 @@ class _ConditionalExpressionParser:
             return True
         if word == "false":
             return False
-        return self._constants.get(word)
+        value = self._constants.get(word)
+        if value is None and self._undefined_is_empty and token.kind is TokenKind.IDENTIFIER:
+            return 0
+        return value
 
     def _match_word(self, word: str) -> bool:
         if token_word(self._peek()) != word:

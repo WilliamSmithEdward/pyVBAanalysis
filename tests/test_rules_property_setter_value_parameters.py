@@ -4,12 +4,9 @@ Ships every branch:
   - property-setter-missing-value   (Let/Set with no parameters)
   - property-setter-return-type     (Let/Set declares an As return type)
   - property-set-scalar-value       (Property Set final value param is scalar)
-  - property-let-object-value       (Property Let final value param is an object)
-The propertyLetObjectValue branch (M10 slice 3c) resolves the value-param type via
-resolveKnownObjectAssignmentType over the host / project class-assignment surface,
-reusing the same helper as typeOfIsAlwaysFalse. It is a compile-error code with no
-asserted oracle case (the corpus has no positive), so it is covered by direct unit
-positives plus the all-accepted no-FP sweep. The rule is wired in the real
+property-let-object-value is retired: a Property Let's value parameter may be of any
+type, object types included (XLIDE issue #107, measured in Excel 16.0), so the rule
+no longer reports it; the tests below hold it silent. The rule is wired in the real
 registry, so a plain analyze_module exercises every branch.
 """
 
@@ -64,16 +61,17 @@ def test_set_scalar_value_fires() -> None:
     )
 
 
-def test_let_generic_object_value_fires() -> None:
-    # A Property Let whose final value param is As Object must use Property Set.
-    assert "property-let-object-value" in _codes(
+def test_let_generic_object_value_compiles() -> None:
+    # `Property Let Item(ByVal v As Object)` compiles, and `h.Item = New Collection`
+    # calls it (XLIDE issue #107).
+    assert "property-let-object-value" not in _codes(
         "Public Property Let P(ByVal v As Object)\nEnd Property"
     )
 
 
-def test_let_host_object_value_fires() -> None:
-    # As Range resolves to a host object type (host model loaded by default).
-    assert "property-let-object-value" in _codes(
+def test_let_host_object_value_compiles() -> None:
+    # As Range resolves to a host object type, and a Let may still take it.
+    assert "property-let-object-value" not in _codes(
         "Public Property Let P(ByVal v As Range)\nEnd Property"
     )
 
