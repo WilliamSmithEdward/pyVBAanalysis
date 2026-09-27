@@ -3,7 +3,9 @@
 Ported from analyzeModule.ts. analyze_module(source, opts) parses one module,
 builds its symbols and conditional-compilation activity, then drives every rule in
 the ordered DIAGNOSTIC_RULE_REGISTRY, buffering per rule and flushing in registry
-order. It never throws: any internal failure yields an empty list.
+order. It never throws: any internal failure yields an empty list. The list it
+returns has been through the two steps XLIDE takes before showing findings
+(module_analysis.py), unless opts.raw_rule_output asks for the rules' own list.
 
 The member-completion context is assembled once per pass here
 (diagnostic_member_completion_context) and shared through RulePassContext.member_ctx;
@@ -43,6 +45,7 @@ from .inline_suppression import (
     scan_inline_suppressions,
 )
 from .model import DiagnosticSeverity, VbaDiagnostic, VbaDiagnosticData
+from .module_analysis import deduplicate_diagnostics, drop_handled_runtime_errors
 from .registry import DIAGNOSTIC_RULE_REGISTRY
 from .rule_metadata import (
     DIAGNOSTIC_RULES,
@@ -204,11 +207,23 @@ def _run_rules(source: str, opts: AnalyzeModuleOptions) -> list[VbaDiagnostic]:
     out: list[VbaDiagnostic] = []
     for buffer in buffers:
         out.extend(buffer)
-    if not opts.inline_suppression:
-        return out
-    # Drop the diagnostics that '@pyvba-ignore directives suppress, then surface any
-    # malformed directive as an analysis-suppression-directive diagnostic (itself
-    # subject to severity overrides, never to inline suppression).
+    if not opts.raw_rule_output:
+        out = drop_handled_runtime_errors(out, mod)
+    if opts.inline_suppression:
+        out = _apply_inline_suppression(source, out, overrides, whole_project, host_known)
+    return out if opts.raw_rule_output else deduplicate_diagnostics(out)
+
+
+def _apply_inline_suppression(
+    source: str,
+    out: list[VbaDiagnostic],
+    overrides: Mapping[str, str] | None,
+    whole_project: bool,
+    host_known: bool,
+) -> list[VbaDiagnostic]:
+    """Drop the diagnostics that '@pyvba-ignore directives suppress, then surface any
+    malformed directive as an analysis-suppression-directive diagnostic (itself
+    subject to severity overrides, never to inline suppression)."""
     scan = scan_inline_suppressions(source)
     out = filter_inline_suppressions(source, out, scan)
     if scan.issues:

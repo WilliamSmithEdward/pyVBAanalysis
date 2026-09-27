@@ -54,6 +54,11 @@ class AnalyzeModuleOptions:
     # Honor ``'@pyvba-ignore`` suppression directives in the source. Set False to
     # report every diagnostic regardless of in-source suppression (an audit run).
     inline_suppression: bool = True
+    # Return the rules' findings as upstream's analyzeModule does, without the two
+    # steps XLIDE takes before it shows them (module_analysis.py): dropping a
+    # runtime-error finding under On Error Resume Next, and merging findings with
+    # one code and span. The differential harness sets it to compare the rules.
+    raw_rule_output: bool = False
     document_type: Any = None  # EventHandlerDocumentType (from the completion package)
     # Per-rule severity overrides keyed by stable diagnostic code; "off" disables.
     severity_overrides: Mapping[str, str] | None = None

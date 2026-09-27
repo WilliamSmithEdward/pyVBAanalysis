@@ -9,7 +9,11 @@ line per finding, so the comparison reads data rather than parsing text:
 * projects: labelled multi-module cases (cases.py) with the case's host and
   reference list, one line per module holding all its findings.
 
-Findings are compared as multisets per module, by code, span and message.
+Both compare what XLIDE shows for a module: upstream's analyzeVbaModuleSource,
+cut to the findings its rules produce (upstream/shown.mjs), against
+analyze_module, which takes the same two steps (diagnostics/module_analysis.py).
+replay.py compares the rules alone. Findings are compared as multisets per
+module, by code, span and message.
 """
 
 from __future__ import annotations

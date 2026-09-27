@@ -80,13 +80,24 @@ python tools/differential/harness.py projects artifacts/differential/cases/mine.
   the port, rebuilding the project index behind a call made with project context,
   and compares the diagnostics by code, span and message. It finds the gaps
   nothing else exercises: whole checks never ported, fixes older than the last
-  sync point.
+  sync point. The recorded calls are the rules alone, so the port is asked for its
+  `raw_rule_output`.
 * `corpus` runs the oracle corpus through both analyzers, each module standalone
   and with its case's modules as a project.
 * `cases` turns Office files, and folders searched for them and for exported
   `.bas`/`.cls`/`.frm` modules, into project cases. `--markdown` adds every VBA
   block of upstream's syntax corpus, and `--host` names a host for the cases no
   file implies one for. `projects` runs a cases file through both analyzers.
+
+`corpus` and `projects` compare what XLIDE shows. Upstream runs its rules
+through `analyzeVbaModuleSource`, which drops a runtime-error finding under
+`On Error Resume Next` and merges findings with one code and span, as
+`analyze_module` does (`pyvbaanalysis/diagnostics/module_analysis.py`). Its own
+additions the port leaves out, the structural block-balance pass and XLIDE's test
+and suppression directives, are cut from its list by keeping only what its rules
+produced (`tools/differential/upstream/shown.mjs`). One step the port lacks does
+remove findings: a procedure marked `'@xlide-test expected-error=N` hides a runtime
+finding for error N. No corpus has one.
 
 `replay`, `corpus` and `projects` exit 1 when anything differs and print what only
 one side reports. Where the port reports more, the port is wrong. Where upstream

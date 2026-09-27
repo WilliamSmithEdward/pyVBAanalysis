@@ -157,7 +157,9 @@ def test_buffers_flush_in_registry_order(monkeypatch: pytest.MonkeyPatch) -> Non
         DiagnosticRuleEntry(name=_ERROR_RULE, run=make_run("second")),
     )
     monkeypatch.setattr(am_mod, "DIAGNOSTIC_RULE_REGISTRY", registry)
-    diags = analyze_module("Sub S\nEnd Sub")
+    # Both land on one span, which the shown list merges; the flush order is
+    # the rules' own list.
+    diags = analyze_module("Sub S\nEnd Sub", AnalyzeModuleOptions(raw_rule_output=True))
     assert [d.message for d in diags] == ["first", "second"]
 
 

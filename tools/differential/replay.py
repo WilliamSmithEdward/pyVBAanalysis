@@ -94,6 +94,8 @@ def _plain_options(opts: Mapping[str, Any], **project: Any) -> AnalyzeModuleOpti
         referenced_hosts=opts.get("referencedHosts", []),
         severity_overrides=opts.get("severityOverrides"),
         designer_class=opts.get("designerClass"),
+        # The recorded calls are upstream's analyzeModule: the rules' own list.
+        raw_rule_output=True,
         **project,
     )
 
