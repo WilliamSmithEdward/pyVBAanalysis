@@ -151,6 +151,15 @@ run ends. `harness.py unpatch` restores a pin a run left patched, and
 (`.github/dependabot.yml`) opens weekly pull requests to update the GitHub Actions
 and the Python tooling.
 
+`main` and the `v*` release tags are protected by repository rulesets, kept in
+`.github/rulesets/`. `main` requires two checks: `CI passed` from `ci.yml` and
+`Security passed` from `security.yml`. Each is a gate job that fails unless every
+other job in its workflow succeeded, so a new job must be added to its gate's
+`needs` list to be enforced. The JSON files are a record, not synced
+automatically. After changing one, apply it with
+`gh api -X PUT repos/WilliamSmithEdward/pyVBAanalysis/rulesets/<id> --input <file>`
+(`gh api repos/WilliamSmithEdward/pyVBAanalysis/rulesets` lists the ids).
+
 ## Releasing
 
 Publishing is automated by `.github/workflows/publish.yml`, which builds the sdist
