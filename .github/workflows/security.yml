@@ -71,10 +71,16 @@ jobs:
           --config p/python --config p/security-audit
           --config p/secrets --config p/github-actions
           --sarif-output semgrep.sarif --text
-      - uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+      # Code scanning does not read SARIF suppressions, so a line marked
+      # nosemgrep (each one listed in SECURITY.md) would stay an open alert.
+      # Only unsuppressed results are uploaded; semgrep.sarif keeps them all.
+      - name: Drop suppressed results for code scanning
         if: always() && hashFiles('semgrep.sarif') != ''
+        run: jq '.runs[].results |= map(select((.suppressions // []) | length == 0))' semgrep.sarif > semgrep-upload.sarif
+      - uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        if: always() && hashFiles('semgrep-upload.sarif') != ''
         with:
-          sarif_file: semgrep.sarif
+          sarif_file: semgrep-upload.sarif
           category: semgrep
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
