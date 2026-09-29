@@ -40,8 +40,11 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
-    xlide_version = args.xlide_version
+    write_manifest(args.xlide_version, args.commit)
 
+
+def write_manifest(xlide_version: str, commit: str | None) -> None:
+    """Write manifest.json for the vendored data files."""
     files: dict[str, dict[str, object]] = {}
     for name in _FILES:
         raw = (_DATA / name).read_bytes()
@@ -54,7 +57,7 @@ def main() -> None:
     manifest = {
         "sourceRepo": "WilliamSmithEdward/xlide_vscode",
         "xlideVersion": xlide_version,
-        **({"xlideCommit": args.commit} if args.commit else {}),
+        **({"xlideCommit": commit} if commit else {}),
         "files": files,
         "oracleCaseCount": len(cases["cases"]),
         "diagnosticCodeCount": len(audit["diagnostics"]),

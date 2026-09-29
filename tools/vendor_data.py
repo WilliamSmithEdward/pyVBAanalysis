@@ -19,6 +19,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from generate_manifest import write_manifest
 from pin_analyzer import _git, pin
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -99,11 +100,7 @@ def main() -> None:
     _vendor_evidence(root, commit)
 
     print(f"==> manifest for {described} ({commit[:7]})", file=sys.stderr)
-    subprocess.run(
-        [sys.executable, str(Path("tools") / "generate_manifest.py"), described, "--commit", commit],
-        cwd=str(_REPO_ROOT),
-        check=True,
-    )
+    write_manifest(described, commit)
 
 
 if __name__ == "__main__":
