@@ -5,6 +5,36 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 2.3.1 - 2026-09-28
+
+Sync to XLIDE 10.14.1 (commit 67b844d), from 10.14.0, and a command-line flag
+for projects that ship as one file.
+
+### Added
+
+* `--whole-project` on the command line runs the whole-project checks
+  (`undeclared-variable`, `unknown-call`, `member-not-found`) on any input,
+  a single file included, such as a single-module distribution. It cannot be
+  combined with `--partial-project`, and the default is unchanged (#15).
+* Security checks. CodeQL, Semgrep and pip-audit run on every push and pull
+  request and weekly, and any finding fails the run. A release reaches PyPI
+  only when all three pass, and it carries `security-report.md` and the raw
+  results as assets. `SECURITY.md` describes private vulnerability reporting.
+
+### Fixed
+
+* `property-accessor-signature-mismatch` on a Property Set beside a Get of
+  another type, such as a Variant Get with an Object Set. Excel compiles it:
+  a Set's value is never compared with the Get. A Let must still match its Get
+  (XLIDE issue #152).
+
+### Verified
+
+* The oracle corpus (2251 diagnostics in 1289 modules), 16 real workbooks, 195
+  Office files, 693 further projects and 7 VB6 projects give identical findings
+  from both analyzers at 10.14.1. The recorded replay of upstream's test suite
+  did not run for this release.
+
 ## 2.3.0 - 2026-09-26
 
 Sync to XLIDE 10.14.0 (commit 110c76e), from 10.7.1. Upstream measured the
