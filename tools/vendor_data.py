@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -42,13 +43,16 @@ _EVIDENCE = {
 
 def _run_extractors(root: Path) -> None:
     env = dict(os.environ, XLIDE_ROOT=str(root))
+    # npx is a .cmd shim on Windows; its full path runs without a shell.
+    npx = shutil.which("npx")
+    if npx is None:
+        raise SystemExit("npx not found on PATH")
     for name in _EXTRACTORS:
         print(f"==> {name}", file=sys.stderr)
         result = subprocess.run(
-            ["npx", "-y", "tsx", str(Path("tools") / name)],
+            [npx, "-y", "tsx", str(Path("tools") / name)],
             cwd=str(_REPO_ROOT),
             env=env,
-            shell=True,
         )
         if result.returncode != 0:
             raise SystemExit(f"{name} failed")
