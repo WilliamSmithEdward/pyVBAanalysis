@@ -30,7 +30,7 @@ Every push, pull request and release runs [security.yml](.github/workflows/secur
   GitHub Actions workflows.
 - Semgrep with the `python`, `security-audit`, `secrets` and `github-actions`
   rule sets.
-- pip-audit over the installed runtime dependency tree.
+- pip-audit over the runtime dependencies.
 
 Any finding fails the run, and a release is not published to PyPI until all
 three pass. Each release carries the resulting `security-report.md` and the raw

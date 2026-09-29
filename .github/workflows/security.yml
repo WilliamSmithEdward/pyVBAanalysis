@@ -86,11 +86,17 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
-      - run: python -m pip install . pip-audit
-      - name: Audit the installed runtime tree (fails on any known vulnerability)
-        run: pip-audit --local --strict --format json --output pip-audit.json --progress-spinner off
+      # The runtime tree without pyvbaanalysis itself, whose version is not on
+      # PyPI until the release that ships it; frozen before pip-audit is added.
+      - run: |
+          python -m pip install .
+          python -m pip freeze --exclude pyvbaanalysis > runtime.txt
+          cat runtime.txt
+          python -m pip install pip-audit
+      - name: Audit the runtime dependencies (fails on any known vulnerability)
+        run: pip-audit --strict --no-deps -r runtime.txt --format json --output pip-audit.json --progress-spinner off
       - if: always()
-        run: pip-audit --local --strict --progress-spinner off || true
+        run: pip-audit --strict --no-deps -r runtime.txt --progress-spinner off || true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
