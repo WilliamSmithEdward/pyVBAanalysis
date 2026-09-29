@@ -1,5 +1,11 @@
 # pyVBAanalysis
 
+[![CI](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/ci.yml/badge.svg)](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/ci.yml)
+[![Security](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/security.yml/badge.svg)](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/security.yml)
+[![PyPI](https://img.shields.io/pypi/v/pyvbaanalysis)](https://pypi.org/project/pyvbaanalysis/)
+[![Python](https://img.shields.io/pypi/pyversions/pyvbaanalysis)](https://pypi.org/project/pyvbaanalysis/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 Static analysis for Office VBA. It reads your macros and reports likely bugs and the
 errors the VBA compiler would catch, without opening Office or running any code.
 
@@ -105,6 +111,14 @@ is an MCP server built on this. The diagnostics here are its build gate:
 an agent that changes a macro runs them afterwards and treats an error
 as a failure rather than a suggestion, which is most of what stops a
 model shipping VBA that does not compile.
+
+## Security
+
+Report a vulnerability privately through
+[GitHub's advisory form](https://github.com/WilliamSmithEdward/pyVBAanalysis/security/advisories/new),
+not a public issue. CodeQL, Semgrep and pip-audit run on every push and gate
+every release, and each release carries its security report. See
+[SECURITY.md](SECURITY.md).
 
 ## License
 
