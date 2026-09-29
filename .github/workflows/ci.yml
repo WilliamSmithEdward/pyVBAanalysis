@@ -33,19 +33,27 @@ jobs:
       - name: Mypy
         run: python -m mypy pyvbaanalysis
 
+  # Job names carry the platform and the Python minor only: they are the
+  # required status checks on main, so moving a pinned runner or patch version
+  # must not rename them.
   languages:
-    name: Language matrix (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Language matrix (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025]
+        include:
+          - platform: Linux
+            runner: ubuntu-24.04
+            python: "3.12.14"
+          - platform: Windows
+            runner: windows-2025
+            python: "3.12.10" # python.org ships no Windows build past 3.12.10 for 3.12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          # python.org ships no Windows build past 3.12.10 for the 3.12 line.
-          python-version: ${{ matrix.os == 'windows-2025' && '3.12.10' || '3.12.14' }}
+          python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: pyproject.toml
       - run: python -m pip install -e ".[dev]"
@@ -56,17 +64,21 @@ jobs:
         run: python -m pytest tests/test_language_matrix.py -q
 
   test:
-    name: Test (Python ${{ matrix.python-version }})
+    name: Test (Python ${{ matrix.minor }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10.21", "3.11.16", "3.12.14", "3.13.15"]
+        include:
+          - {minor: "3.10", python: "3.10.21"}
+          - {minor: "3.11", python: "3.11.16"}
+          - {minor: "3.12", python: "3.12.14"}
+          - {minor: "3.13", python: "3.13.15"}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: pyproject.toml
       - run: python -m pip install -e ".[dev]"
