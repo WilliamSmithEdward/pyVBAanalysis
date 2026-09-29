@@ -190,7 +190,7 @@ jobs:
           DEPS: ${{ needs.dependencies.result }}
           MALWARE: ${{ needs.malware.result }}
         run: |
-          count() { if [ -f "$1" ]; then jq '[.runs[].results[]] | length' "$1"; else echo "not run"; fi; }
+          count() { if [ -f "$1" ]; then jq '[.runs[].results[] | select((.suppressions // []) | length == 0)] | length' "$1"; else echo "not run"; fi; }
           vulns=$(if [ -f results/pip-audit.json ]; then jq '[.dependencies[].vulns[]] | length' results/pip-audit.json; else echo "not run"; fi)
           {
             echo "# Security report"
