@@ -11,6 +11,12 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    groups:
+      # init, analyze and upload-sarif must move together: one job cannot mix
+      # CodeQL action majors.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
 
   # The Python tooling (exact pins in pyproject.toml) and the runtime dependency.
   - package-ecosystem: pip
