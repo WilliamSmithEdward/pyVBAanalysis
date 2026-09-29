@@ -1486,10 +1486,14 @@ def check_property_accessor_signatures(source: str, mod: ModuleNode, activity: C
                     declared_name_span(source, setter.span, setter.name),
                 )
                 continue
-            # The value parameter must have the Get's type: `Get Size() As Long` with
-            # `Let Size(ByVal v As Integer)` is "Definitions of property procedures
-            # for the same property are inconsistent" (XLIDE issue #124, measured in
-            # Excel 16.0). Either side without a type is Variant.
+            # A Let's value parameter must have the Get's type: `Get Size() As Long`
+            # with `Let Size(ByVal v As Integer)` is "Definitions of property
+            # procedures for the same property are inconsistent" (XLIDE issue #124,
+            # measured in Excel 16.0). Either side without a type is Variant. A Set's
+            # value is never compared: Variant, Object, Collection and even Long Gets
+            # beside an Object or Collection Set all compile (XLIDE issue #152).
+            if setter.proc_kind is not ProcKind.PROPERTY_LET:
+                continue
             value_param = setter.params[-1]
             get_type = normalize_type(getter.return_type)
             if get_type is None and not getter.type_suffix:

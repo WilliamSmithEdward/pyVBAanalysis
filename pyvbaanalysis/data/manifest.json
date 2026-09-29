@@ -1,22 +1,22 @@
 {
   "sourceRepo": "WilliamSmithEdward/xlide_vscode",
-  "xlideVersion": "10.14.0",
-  "xlideCommit": "110c76e91145b322be2e1970b7cbe54eda52468f",
+  "xlideVersion": "10.14.1",
+  "xlideCommit": "67b844d2a573a1f1f2cf9fcfdf820603d2837190",
   "files": {
     "vbe_oracle_cases.json": {
-      "sha256": "325418258ac805a05181d5954d8e35195689e879ce641a5133872bf9496ae2fc",
-      "bytes": 329910
+      "sha256": "b14f2ea3a70a93911033063c8447cd74ae563ef8e3a49a1ee85f3e837d7f5253",
+      "bytes": 344580
     },
     "diagnostic_influence_audit.json": {
-      "sha256": "5e3c18e122edfa141baad321e0f6c79652d3eb8f99162b8e0e0f1fdc8d1c900a",
-      "bytes": 165870
+      "sha256": "5d9b938edada6b23e31ac3c836f1afd1e1cc9ff6387e4b5ebeb79e7cb30279b3",
+      "bytes": 165966
     },
     "rule_metadata.json": {
       "sha256": "3413c1c92e72c31442d46785c7681b39e8470f3ab40e846f183daa43e50c6c16",
       "bytes": 64383
     }
   },
-  "oracleCaseCount": 596,
+  "oracleCaseCount": 612,
   "diagnosticCodeCount": 168,
   "diagnosticCodes": [
     "ambiguous-enum-member",

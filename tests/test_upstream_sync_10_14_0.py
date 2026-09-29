@@ -275,3 +275,20 @@ def test_a_variable_named_constructor_leaves_the_module_analyzed() -> None:
         "Sub Other()\n    Dim d As Double\n    d = 10 / 0\nEnd Sub\n"
     )
     assert [text for text, _ in _found(source, "division-by-zero")] == ["0"]
+
+
+# -- 10.14.1, #152: a Property Set's value is never compared with the Get ------
+
+
+def test_a_set_beside_a_get_of_another_type_compiles() -> None:
+    source = (
+        "Option Explicit\nPrivate mItem As Object\n"
+        "Public Property Get Item() As Variant\n    Set Item = mItem\nEnd Property\n"
+        "Public Property Set Item(ByVal v As Object)\n    Set mItem = v\nEnd Property\n"
+    )
+    assert _found(source, "property-accessor-signature-mismatch") == []
+    let_mismatch = (
+        "Option Explicit\nPublic Property Get Size() As Long\nEnd Property\n"
+        "Public Property Let Size(ByVal v As Integer)\nEnd Property\n"
+    )
+    assert len(_found(let_mismatch, "property-accessor-signature-mismatch")) == 1
