@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 from generate_manifest import write_manifest
-from pin_analyzer import _git, pin
+from pin_analyzer import _git, default_xlide_checkout, pin
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DATA = _REPO_ROOT / "pyvbaanalysis" / "data"
@@ -80,7 +80,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--ref", help="XLIDE commit, tag or branch to vendor from")
     parser.add_argument("--root", type=Path, help="an XLIDE checkout to use as-is instead of pinning")
-    parser.add_argument("--source", type=Path, default=_REPO_ROOT.parent / "xlide_vscode")
+    parser.add_argument("--source", type=Path, default=default_xlide_checkout())
     args = parser.parse_args()
 
     if args.root is not None:

@@ -19,17 +19,19 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-/** The XLIDE checkout root: a pin when XLIDE_ROOT is set, the sibling otherwise. */
+/** The XLIDE checkout root: a pin when XLIDE_ROOT is set, otherwise
+ *  ../xlide/xlide_vscode, or the older sibling ../xlide_vscode. */
+const CHECKOUTS = [resolve(here, '..', '..', 'xlide', 'xlide_vscode'), resolve(here, '..', '..', 'xlide_vscode')];
 export const XLIDE_ROOT = process.env.XLIDE_ROOT
     ? resolve(process.env.XLIDE_ROOT)
-    : resolve(here, '..', '..', 'xlide_vscode');
+    : CHECKOUTS.find((path) => existsSync(path)) ?? CHECKOUTS[0];
 
 /** Proves the root is the XLIDE repository rather than some other folder. */
 const MARKER = 'src/analyzer/diagnostics/ruleMetadata.ts';
 
 if (!existsSync(resolve(XLIDE_ROOT, MARKER))) {
     console.error(`No XLIDE checkout at ${XLIDE_ROOT} (looked for ${MARKER}).`);
-    console.error('Clone xlide_vscode next to this repository, or set XLIDE_ROOT to a pin:');
+    console.error('Clone xlide_vscode to ../xlide/xlide_vscode, or set XLIDE_ROOT to a pin:');
     console.error('  python tools/pin_analyzer.py --ref v10.5.0');
     process.exit(1);
 }

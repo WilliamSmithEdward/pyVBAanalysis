@@ -34,8 +34,8 @@ mypy pyvbaanalysis
 This repository ports XLIDE's TypeScript analyzer. XLIDE owns the language and
 host knowledge; pyVBAanalysis reproduces its behavior in Python.
 
-* The XLIDE source is expected as a sibling checkout at `../xlide_vscode`, to read
-  while porting.
+* The XLIDE source is expected as a checkout at `../xlide/xlide_vscode` (the older
+  sibling `../xlide_vscode` still works), to read while porting.
 * XLIDE also owns the oracle: the Excel/VBE evidence corpus and the provenance
   audit. pyVBAanalysis consumes the emitted evidence verbatim as both porting spec
   and test fixtures. Do not reimplement the oracle here.

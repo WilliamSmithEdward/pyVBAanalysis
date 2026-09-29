@@ -149,8 +149,15 @@ def main() -> int:
     record.add_argument("--out", help="the JSONL file to write (default: artifacts/differential/<commit>/calls.jsonl)")
     record.add_argument(
         "--node-modules",
-        default=str(_ROOT.parent / "xlide_vscode" / "node_modules"),
-        help="the installed packages the suite borrows, read-only (default: the sibling checkout's)",
+        default=str(
+            next(
+                (p for p in (_ROOT.parent / "xlide" / "xlide_vscode", _ROOT.parent / "xlide_vscode") if p.is_dir()),
+                _ROOT.parent / "xlide" / "xlide_vscode",
+            )
+            / "node_modules"
+        ),
+        help="the installed packages the suite borrows, read-only "
+        "(default: ../xlide/xlide_vscode's, else ../xlide_vscode's)",
     )
     record.add_argument("--timeout", type=int, default=1800, help="seconds before the suite is stopped")
     record.set_defaults(run=_record)

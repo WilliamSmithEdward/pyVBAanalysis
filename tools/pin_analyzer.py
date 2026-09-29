@@ -32,6 +32,18 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Where the XLIDE checkout is looked for, first match wins: `../xlide/xlide_vscode`,
+# then the older sibling layout `../xlide_vscode`.
+XLIDE_CHECKOUT_CANDIDATES = (
+    _REPO_ROOT.parent / "xlide" / "xlide_vscode",
+    _REPO_ROOT.parent / "xlide_vscode",
+)
+
+
+def default_xlide_checkout() -> Path:
+    """The first candidate that exists, or the first when none does."""
+    return next((p for p in XLIDE_CHECKOUT_CANDIDATES if p.is_dir()), XLIDE_CHECKOUT_CANDIDATES[0])
 # Under artifacts, which is not in source control: a pin is a build input,
 # reproducible from the ref at any time, and far too large for history.
 _PIN_PARENT = _REPO_ROOT / "artifacts" / "analyzer-pin"
@@ -114,8 +126,8 @@ def main() -> None:
     parser.add_argument(
         "--source",
         type=Path,
-        default=_REPO_ROOT.parent / "xlide_vscode",
-        help="the XLIDE checkout to copy from (default: the sibling)",
+        default=default_xlide_checkout(),
+        help="the XLIDE checkout to copy from (default: ../xlide/xlide_vscode, else ../xlide_vscode)",
     )
     parser.add_argument("--force", action="store_true", help="rebuild the pin even if it is already there")
     args = parser.parse_args()
