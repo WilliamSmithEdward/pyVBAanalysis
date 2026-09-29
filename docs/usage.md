@@ -235,7 +235,8 @@ for a partial view:
   Pass `whole_project=True` if that single file really is the entire project.
 * `analyze_project` defaults to whole-project; pass `whole_project=False` for a fragment.
 * On the command line, a folder or several files is a whole project, a single targeted
-  file is partial automatically, and `--partial-project` forces partial for any input.
+  file is partial automatically, `--partial-project` forces partial for any input, and
+  `--whole-project` runs the whole-project checks on any input, a single file included.
 
 Every other check is local or resolves positively (it reports only when it can prove
 the problem), so a partial view never turns it into a false positive.
@@ -311,6 +312,7 @@ Flags:
 | `--select CODE` | Report only these codes; repeatable. Codes match case-insensitively; an unknown code exits 2. |
 | `--ignore CODE` | Hide these codes from the report; repeatable. Codes match case-insensitively; an unknown code exits 2. |
 | `--partial-project` | Treat the input as a fragment of a larger project: skip the whole-project checks (`undeclared-variable`, `unknown-call`, `member-not-found`). A single targeted file is treated as partial automatically. |
+| `--whole-project` | Treat the input as the complete project and run the whole-project checks, even on a single file such as a single-module distribution. Cannot be combined with `--partial-project`. |
 | `--no-inline-suppression` | Ignore `'@pyvba-ignore` directives in the source and report every diagnostic (an audit run). |
 | `--fail-level LEVEL` | Exit non-zero only when a diagnostic at or above `error`/`warning`/`information` is reported (default `information`, meaning any). |
 | `--format text\|json` | Output format (default `text`). |

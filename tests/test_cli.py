@@ -258,6 +258,24 @@ def test_cli_partial_project_flag(tmp_path: Path, capsys: pytest.CaptureFixture[
     assert "unknown-call" not in capsys.readouterr().out and code_partial == 0
 
 
+def test_cli_whole_project_flag(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # Issue #15: one file, alone in a folder, is partial by default; --whole-project
+    # runs the whole-project checks on it, and cannot be combined with --partial-project.
+    probe = (
+        'Attribute VB_Name = "Probe"\r\nOption Explicit\r\n'
+        "Sub A()\r\n    NotAProc 1\r\n    undeclaredX = 1\r\nEnd Sub\r\n"
+    )
+    _write(tmp_path / "Probe.bas", probe)
+    assert main([str(tmp_path)]) == 0
+    assert "unknown-call" not in capsys.readouterr().out
+    assert main([str(tmp_path / "Probe.bas"), "--whole-project"]) == 1
+    out = capsys.readouterr().out
+    assert "unknown-call" in out and "undeclared-variable" in out
+    with pytest.raises(SystemExit) as exited:
+        main([str(tmp_path), "--whole-project", "--partial-project"])
+    assert exited.value.code == 2
+
+
 def test_cli_inline_suppression(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     src = (
         'Attribute VB_Name = "Mod1"\r\nOption Explicit\r\nSub S()\r\n'

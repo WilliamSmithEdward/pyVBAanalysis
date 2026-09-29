@@ -288,12 +288,19 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="CODE",
         help="hide these diagnostic codes from the report; repeatable",
     )
-    parser.add_argument(
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument(
         "--partial-project",
         action="store_true",
         help="treat the input as a fragment of a larger project: skip the whole-project "
         "checks (undeclared-variable, unknown-call, member-not-found) that need every "
         "module. A single targeted file is treated as partial automatically.",
+    )
+    scope.add_argument(
+        "--whole-project",
+        action="store_true",
+        help="treat the input as the complete project and run the whole-project checks, "
+        "even on a single file, such as a single-module distribution.",
     )
     parser.add_argument(
         "--no-inline-suppression",
@@ -357,7 +364,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # A single targeted file is a partial view of any real project, so the whole-project
     # rules are suppressed for it; a folder or several files are treated as the project.
-    loose_whole_project = not (args.partial_project or len(loose_paths) <= 1)
+    # --whole-project and --partial-project override either way.
+    loose_whole_project = args.whole_project or not (
+        args.partial_project or len(loose_paths) <= 1
+    )
     inline_suppression = not args.no_inline_suppression
     loose_results, warnings, loose_errors = _analyze_loose_group(
         loose_paths, args.only, overrides, loose_whole_project, inline_suppression
