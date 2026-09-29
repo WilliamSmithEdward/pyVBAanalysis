@@ -116,8 +116,9 @@ model shipping VBA that does not compile.
 
 Report a vulnerability privately through
 [GitHub's advisory form](https://github.com/WilliamSmithEdward/pyVBAanalysis/security/advisories/new),
-not a public issue. CodeQL, Semgrep and pip-audit run on every push and gate
-every release, and each release carries its security report. See
+not a public issue. CodeQL, Semgrep, pip-audit and a ClamAV and YARA-X malware
+scan run on every push and daily, and gate every release, and each release
+carries its security report. See
 [SECURITY.md](SECURITY.md).
 
 ## License

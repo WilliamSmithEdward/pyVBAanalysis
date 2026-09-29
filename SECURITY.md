@@ -24,16 +24,29 @@ missing diagnostic is an ordinary bug; open an issue for it.
 
 ## How the code is checked
 
-Every push, pull request and release runs [security.yml](.github/workflows/security.yml):
+Every push, pull request and release runs [security.yml](.github/workflows/security.yml),
+and it runs daily as well:
 
 - CodeQL with the `security-extended` queries, over the Python package and the
   GitHub Actions workflows.
 - Semgrep with the `python`, `security-audit`, `secrets` and `github-actions`
   rule sets.
 - pip-audit over the runtime dependencies.
+- A malware scan of the tracked files and the built wheel and sdist: ClamAV,
+  with signatures updated on every run and macro and heuristic alerts on, and
+  YARA-X with the full rule set of [YARA Forge](https://github.com/YARAHQ/yara-forge),
+  which collects the public YARA rule repositories.
 
-Any finding fails the run, and a release is not published to PyPI until all
-three pass. Each release carries the resulting `security-report.md` and the raw
-SARIF and pip-audit output as assets. Dependabot keeps the dependencies and the
-workflow actions current, and the run repeats weekly so new advisories surface
-between releases.
+Any finding fails the run, and a release is not published to PyPI until every
+check passes. Known acceptable malware-scan findings are listed, each with its
+reason, in [security/malware-allowlist.toml](security/malware-allowlist.toml);
+there are none so far. Each release carries the resulting `security-report.md`,
+naming the ClamAV signature version and the YARA Forge release it scanned with,
+and the raw results as assets.
+
+Everything the checks run on is pinned: actions by commit SHA, the ClamAV and
+Semgrep engines by image digest, pip-audit by hash, the YARA-X engine by version
+and SHA-256, and the YARA Forge rules by release and SHA-256. Dependabot proposes
+new versions of the first three once they are a week old. A weekly workflow
+proposes the newest YARA Forge release a week old in a pull request, and the
+Security workflow scans that pull request before it can be merged.

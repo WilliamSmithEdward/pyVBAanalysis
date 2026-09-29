@@ -1,0 +1,61 @@
+name: YARA Forge update
+
+# Weekly: move the YARA Forge pin (security/yara-forge.json) to the newest
+# release that is at least a week old, with the SHA-256 GitHub records for its
+# asset, and propose it in a pull request. The Security workflow is started on
+# that branch, so the new rules are scanned before anyone merges them. A pull
+# request opened with GITHUB_TOKEN starts no workflow by itself, hence the
+# explicit dispatch. Opening it needs the repository setting "Allow GitHub
+# Actions to create and approve pull requests".
+
+on:
+  schedule:
+    - cron: "41 7 * * 1" # Mondays
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yara-forge-update
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    name: Propose the next YARA Forge release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.14"
+      - name: Find and verify the release
+        id: pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python security/yara_forge_update.py
+      - name: Open the pull request and scan it
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ steps.pin.outputs.release }}
+        run: |
+          branch="yara-forge/$RELEASE"
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            echo "$branch already exists; nothing to propose"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add security/yara-forge.json
+          git commit -m "chore(security): pin YARA Forge $RELEASE"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "chore(security): pin YARA Forge $RELEASE" \
+            --body "Moves the YARA Forge pin to [$RELEASE](https://github.com/YARAHQ/yara-forge/releases/tag/$RELEASE), the newest release at least a week old. The SHA-256 is the digest GitHub records for the asset, checked against the download. The Security workflow runs on this branch; merge when its malware scan passes."
+          gh workflow run security.yml --ref "$branch"

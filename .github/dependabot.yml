@@ -1,13 +1,39 @@
 version: 2
+# Every pin keeps an updater. A new version is proposed once it is a week old
+# (the cooldown), and each proposal runs CI and the Security workflow before merge.
+# Not followed here: the YARA-X release download (see security.yml) and the
+# exact Python and runner versions in the workflows, which are moved by hand.
 updates:
-  # Keep the GitHub Actions pinned in the workflows current.
+  # The GitHub Actions, pinned by commit SHA in the workflows.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
 
-  # Keep the Python tooling and the runtime dependency current.
+  # The Python tooling (exact pins in pyproject.toml) and the runtime dependency.
   - package-ecosystem: pip
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+
+  # pip-audit and its dependencies, hash-pinned for the Security workflow.
+  - package-ecosystem: pip
+    directory: /security/requirements
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  # The ClamAV and Semgrep engine images, pinned by digest.
+  - package-ecosystem: docker
+    directories:
+      - /security/docker/clamav
+      - /security/docker/semgrep
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

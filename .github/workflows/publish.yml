@@ -32,17 +32,17 @@ jobs:
   publish:
     name: Build and publish to PyPI
     needs: security
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: pypi
       url: https://pypi.org/p/pyvbaanalysis
     permissions:
       id-token: write # OIDC token for PyPI Trusted Publishing
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.14"
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install package + dev/build tools
@@ -55,21 +55,21 @@ jobs:
       - name: Build sdist + wheel
         run: python -m build
       - name: Upload build artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
           path: dist/*
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
   attach-security-report:
     name: Attach the security report to the release
     needs: [security, publish]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: security-report
           path: report
@@ -79,5 +79,5 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           cd report
-          tar -czf security-sarif.tar.gz *.sarif *.json
+          tar -czf security-sarif.tar.gz *.sarif *.json *.txt
           gh release upload "$TAG" security-report.md security-sarif.tar.gz --clobber --repo "$GITHUB_REPOSITORY"

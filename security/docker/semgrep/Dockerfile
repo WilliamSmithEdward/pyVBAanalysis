@@ -1,0 +1,3 @@
+# The Semgrep engine the security scan runs, pinned by digest; Dependabot moves it.
+# Its many Python dependencies come with the image rather than from pip.
+FROM semgrep/semgrep:1.177.0@sha256:acaac22ffc7b7cc5926de0751b223bce0b2491c33d18422fa72f632c78d81198
