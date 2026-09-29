@@ -28,12 +28,21 @@ API = "https://api.github.com/repos/YARAHQ/yara-forge/releases?per_page=30"
 COOLDOWN = dt.timedelta(days=7)
 
 
+# The only hosts fetched from: the GitHub API, and the release download host
+# its asset URLs name (GitHub redirects that one to its object storage).
+_HOSTS = ("https://api.github.com/", "https://github.com/YARAHQ/yara-forge/releases/download/")
+
+
 def _get(url: str, accept: str = "application/vnd.github+json") -> bytes:
+    if not url.startswith(_HOSTS):
+        raise SystemExit(f"refusing to fetch {url}")
     request = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": "pyvbaanalysis-yara-forge-update"})
     token = os.environ.get("GH_TOKEN")
-    if token and url.startswith("https://api.github.com/"):
+    if token and url.startswith(_HOSTS[0]):
         request.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310 - fixed https hosts
+    # Known acceptable (SECURITY.md): the URL is checked against _HOSTS above, so
+    # no file: or other scheme reaches urlopen.
+    with urllib.request.urlopen(request, timeout=120) as response:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         return response.read()
 
 

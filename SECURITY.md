@@ -44,6 +44,13 @@ there are none so far. Each release carries the resulting `security-report.md`,
 naming the ClamAV signature version and the YARA Forge release it scanned with,
 and the raw results as assets.
 
+Known acceptable findings in the other checks are suppressed at the line, each
+with its reason:
+
+- Semgrep `dynamic-urllib-use-detected` in `security/yara_forge_update.py`: the
+  updater fetches release URLs the GitHub API returns, and refuses any URL that
+  is not https on the GitHub API or the YARA Forge release download path.
+
 Everything the checks run on is pinned: actions by commit SHA, the ClamAV and
 Semgrep engines by image digest, pip-audit by hash, the YARA-X engine by version
 and SHA-256, and the YARA Forge rules by release and SHA-256. Dependabot proposes
