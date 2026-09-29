@@ -152,8 +152,9 @@ run ends. `harness.py unpatch` restores a pin a run left patched, and
 and the Python tooling.
 
 `main` and the `v*` release tags are protected by repository rulesets, kept in
-`.github/rulesets/`. `main` requires two checks: `CI passed` from `ci.yml` and
-`Security passed` from `security.yml`. Each is a gate job that fails unless every
+`.github/rulesets/`. The gate jobs are `CI passed` from `ci.yml`, `Security
+passed` from `security.yml` and `Malware scan passed` from `malware-scan.yml`;
+`main.json` records which of them `main` requires. Each is a gate job that fails unless every
 other job in its workflow succeeded, so a new job must be added to its gate's
 `needs` list to be enforced. The JSON files are a record, not synced
 automatically. After changing one, apply it with

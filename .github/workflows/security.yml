@@ -1,20 +1,18 @@
 name: Security
 
 # Static security analysis: CodeQL (Python and the workflows themselves),
-# Semgrep, pip-audit over the runtime dependency tree, and a malware scan of
-# the tracked files and the built packages with ClamAV and YARA-X. Any finding
-# fails the run, except the known acceptable ones in
-# security/malware-allowlist.toml. Results go to the repository's Security tab
-# as SARIF and to a `security-report` artifact, which publish.yml attaches to
-# every release.
+# Semgrep and pip-audit over the runtime dependency tree. Any finding fails
+# the run. The malware scan (ClamAV and YARA-X) is in malware-scan.yml.
+# Results go to the repository's Security tab as SARIF and to a
+# `security-report` artifact, which publish.yml attaches to every release.
 
 on:
   push:
     branches: [main]
   pull_request:
   schedule:
-    - cron: "17 6 * * *" # daily, so new signatures and advisories surface between pushes
-  workflow_dispatch: # the YARA Forge updater starts it on its pull request branch
+    - cron: "17 6 * * *" # daily, so new advisories surface between pushes
+  workflow_dispatch:
   workflow_call:
 
 permissions:
@@ -118,89 +116,15 @@ jobs:
           name: pip-audit
           path: pip-audit.json
 
-  malware:
-    name: Malware scan (ClamAV + YARA-X)
-    runs-on: ubuntu-24.04
-    env:
-      # YARA-X engine: no updater follows a release download. To move it, pick a
-      # release at least a week old and take the digest GitHub records for the
-      # asset: gh api repos/VirusTotal/yara-x/releases/tags/<tag>
-      YARA_X_VERSION: v1.20.0
-      YARA_X_SHA256: cabb8df46492fff59c51261302c71ed9cb2cef393d3f0ca560801a34a8e24cbe
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12.14"
-      - name: Export the tracked files and build the packages
-        run: |
-          mkdir -p scan/tree
-          git archive HEAD | tar -x -C scan/tree
-          python -m pip install -e ".[build]"
-          python -m build --outdir scan/dist
-          ls -l scan/dist
-      - name: ClamAV (signatures updated on every run)
-        run: |
-          docker build -t clamav-pinned security/docker/clamav
-          docker run --rm --entrypoint sh -v "$PWD/scan:/scan" -w /scan clamav-pinned -c '
-            freshclam --stdout || exit 3
-            clamscan --version > clamav-version.txt
-            clamscan -r --infected --no-summary --alert-macros=yes --heuristic-alerts=yes tree dist > clamscan.txt
-            rc=$?; [ "$rc" -le 1 ] || exit "$rc"'
-          cat scan/clamav-version.txt scan/clamscan.txt
-      - name: YARA-X with the pinned YARA Forge release
-        run: |
-          curl -fsSL -o yara-x.tar.gz "https://github.com/VirusTotal/yara-x/releases/download/$YARA_X_VERSION/yara-x-$YARA_X_VERSION-x86_64-unknown-linux-gnu.tar.gz"
-          echo "$YARA_X_SHA256  yara-x.tar.gz" | sha256sum -c -
-          tar -xzf yara-x.tar.gz yr
-          release=$(jq -r .release security/yara-forge.json)
-          asset=$(jq -r .asset security/yara-forge.json)
-          package=$(jq -r .package security/yara-forge.json)
-          curl -fsSL -o rules.zip "https://github.com/YARAHQ/yara-forge/releases/download/$release/$asset"
-          echo "$(jq -r .sha256 security/yara-forge.json)  rules.zip" | sha256sum -c -
-          unzip -q rules.zip -d rules
-          ./yr --version | tee scan/yara-version.txt
-          echo "YARA Forge $release ($package)" | tee -a scan/yara-version.txt
-          # Deprecation warnings from the rule set go to a file, not the log (see
-          # security/malware-allowlist.toml); a compile error still fails the step.
-          ./yr compile -o rules.yarc "rules/packages/$package/yara-rules-$package.yar" 2> scan/yara-warnings.txt || { cat scan/yara-warnings.txt; exit 1; }
-          (cd scan && for target in tree dist; do
-            ../yr scan --compiled-rules --recursive --disable-console-logs --output-format ndjson ../rules.yarc "$target"
-          done > yara.ndjson)
-          echo "$(grep -c '^warning' scan/yara-warnings.txt) rule warning(s)"
-      - name: Verdict (fails on anything not in the allowlist)
-        run: python security/malware_verdict.py scan/clamscan.txt scan/yara.ndjson scan/malware.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: malware-scan
-          path: |
-            scan/malware.json
-            scan/clamav-version.txt
-            scan/yara-version.txt
-
-  # The one check branch protection requires from this workflow (see ci.yml).
-  gate:
-    name: Security passed
-    needs: [codeql, semgrep, dependencies, malware]
-    if: always()
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Every scan succeeded
-        env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
-        run: |
-          echo "$RESULTS"
-          for r in $RESULTS; do test "$r" = success; done
-
   report:
     name: Security report
-    needs: [codeql, semgrep, dependencies, malware]
+    needs: [codeql, semgrep, dependencies]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          pattern: "{sarif-*,pip-audit}"
           path: results
           merge-multiple: true
       - name: Write the report
@@ -208,7 +132,6 @@ jobs:
           CODEQL: ${{ needs.codeql.result }}
           SEMGREP: ${{ needs.semgrep.result }}
           DEPS: ${{ needs.dependencies.result }}
-          MALWARE: ${{ needs.malware.result }}
         run: |
           count() { if [ -f "$1" ]; then jq '[.runs[].results[] | select((.suppressions // []) | length == 0)] | length' "$1"; else echo "not run"; fi; }
           vulns=$(if [ -f results/pip-audit.json ]; then jq '[.dependencies[].vulns[]] | length' results/pip-audit.json; else echo "not run"; fi)
@@ -223,22 +146,27 @@ jobs:
             echo "| CodeQL (GitHub Actions) | $CODEQL | $(count results/actions.sarif) |"
             echo "| Semgrep (python, security-audit, secrets, github-actions) | $SEMGREP | $(count results/semgrep.sarif) |"
             echo "| pip-audit (runtime dependencies) | $DEPS | $vulns |"
-            if [ -f results/malware.json ]; then
-              malware="$(jq '.unexpected' results/malware.json) unexpected, $(jq '[.findings[] | select(.verdict == "allowed")] | length' results/malware.json) allowed"
-            else
-              malware="not run"
-            fi
-            echo "| Malware scan (ClamAV + YARA-X, tracked files and built packages) | $MALWARE | $malware |"
-            echo
-            echo "Scanned with:"
-            echo
-            for f in results/clamav-version.txt results/yara-version.txt; do
-              if [ -f "$f" ]; then sed 's/^/- /' "$f"; fi
-            done
           } > security-report.md
-          mkdir -p report && cp security-report.md report/ && cp results/*.sarif results/*.json results/*.txt report/ 2>/dev/null || true
+          mkdir -p report && cp security-report.md report/ && cp results/*.sarif results/*.json report/ 2>/dev/null || true
           cat security-report.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-report
           path: report/
+
+  # The one check the ruleset requires from this workflow (see ci.yml).
+  security-passed:
+    name: Security passed
+    if: always()
+    needs: [codeql, semgrep, dependencies, report]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check every security job passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Results: $RESULTS"
+          for result in $RESULTS; do
+            [ "$result" = success ] || exit 1
+          done

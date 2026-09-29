@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/ci.yml/badge.svg)](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/ci.yml)
 [![Security](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/security.yml/badge.svg)](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/security.yml)
+[![Malware scan](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/malware-scan.yml/badge.svg)](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/malware-scan.yml)
 [![PyPI](https://img.shields.io/pypi/v/pyvbaanalysis)](https://pypi.org/project/pyvbaanalysis/)
 [![Python](https://img.shields.io/pypi/pyversions/pyvbaanalysis)](https://pypi.org/project/pyvbaanalysis/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)

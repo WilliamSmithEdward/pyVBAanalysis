@@ -24,8 +24,9 @@ missing diagnostic is an ordinary bug; open an issue for it.
 
 ## How the code is checked
 
-Every push, pull request and release runs [security.yml](.github/workflows/security.yml),
-and it runs daily as well:
+Every push, pull request and release runs [security.yml](.github/workflows/security.yml)
+and [malware-scan.yml](.github/workflows/malware-scan.yml), and both run daily
+as well:
 
 - CodeQL with the `security-extended` queries, over the Python package and the
   GitHub Actions workflows.
@@ -40,8 +41,8 @@ and it runs daily as well:
 Any finding fails the run, and a release is not published to PyPI until every
 check passes. Known acceptable malware-scan findings are listed, each with its
 reason, in [security/malware-allowlist.toml](security/malware-allowlist.toml);
-there are none so far. Each release carries the resulting `security-report.md`,
-naming the ClamAV signature version and the YARA Forge release it scanned with,
+there are none so far. Each release carries the resulting `security-report.md`
+and `malware-report.md`, the latter naming the ClamAV signature version and the YARA Forge release it scanned with,
 and the raw results as assets.
 
 Known acceptable findings in the other checks are suppressed at the line, each
@@ -56,4 +57,4 @@ Semgrep engines by image digest, pip-audit by hash, the YARA-X engine by version
 and SHA-256, and the YARA Forge rules by release and SHA-256. Dependabot proposes
 new versions of the first three once they are a week old. A weekly workflow
 proposes the newest YARA Forge release a week old in a pull request, and the
-Security workflow scans that pull request before it can be merged.
+Malware scan workflow scans that pull request before it can be merged.
