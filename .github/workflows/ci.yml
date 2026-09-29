@@ -84,3 +84,19 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - name: Pytest
         run: python -m pytest -q
+
+  # The one check branch protection requires from this workflow, so renaming or
+  # adding a job above needs no protection change. It always runs and fails
+  # unless every job succeeded: a skipped required check would count as passing.
+  gate:
+    name: CI passed
+    needs: [lint, languages, test]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Every job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          for r in $RESULTS; do test "$r" = success; done

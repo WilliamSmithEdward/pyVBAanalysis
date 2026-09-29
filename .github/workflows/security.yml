@@ -179,6 +179,20 @@ jobs:
             scan/clamav-version.txt
             scan/yara-version.txt
 
+  # The one check branch protection requires from this workflow (see ci.yml).
+  gate:
+    name: Security passed
+    needs: [codeql, semgrep, dependencies, malware]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Every scan succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          for r in $RESULTS; do test "$r" = success; done
+
   report:
     name: Security report
     needs: [codeql, semgrep, dependencies, malware]
