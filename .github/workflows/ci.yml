@@ -29,9 +29,11 @@ jobs:
         with:
           python-version: "3.12.14"
           cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install the package and dev tools
-        run: python -m pip install -e ".[dev]"
+          cache-dependency-path: .github/requirements/test.txt
+      - name: Install the test tools, then the package
+        run: |
+          python -m pip install --require-hashes -r .github/requirements/test.txt
+          python -m pip install --no-deps --no-build-isolation -e .
       - name: Ruff
         run: python -m ruff check .
       - name: Mypy
@@ -61,9 +63,11 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install the package and dev tools
-        run: python -m pip install -e ".[dev]"
+          cache-dependency-path: .github/requirements/test.txt
+      - name: Install the test tools, then the package
+        run: |
+          python -m pip install --require-hashes -r .github/requirements/test.txt
+          python -m pip install --no-deps --no-build-isolation -e .
       # Runs on both platforms because the failure mode this guards is
       # encoding-shaped: a default locale or console code page that differs
       # between Linux and Windows must not change what the analyzer sees.
@@ -89,9 +93,11 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install the package and dev tools
-        run: python -m pip install -e ".[dev]"
+          cache-dependency-path: .github/requirements/test.txt
+      - name: Install the test tools, then the package
+        run: |
+          python -m pip install --require-hashes -r .github/requirements/test.txt
+          python -m pip install --no-deps --no-build-isolation -e .
       - name: Pytest
         run: python -m pytest -q
 

@@ -5,6 +5,30 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## Unreleased
+
+### Added
+
+* Coverage-guided fuzzing with Atheris of the lexer, the parser and every
+  diagnostic rule on arbitrary source (`fuzz/fuzz_analyzer.py`), daily and on
+  every change to the analyzer. The seed corpus, drawn from the oracle cases,
+  is replayed by the test suite. The first runs, over 300,000 inputs, found
+  nothing.
+* Releases carry signed build provenance: the Publish workflow signs each
+  wheel and sdist with GitHub's artifact attestations before uploading to PyPI,
+  and attaches the signed bundle to the GitHub release as
+  `pyvbaanalysis-<version>.sigstore.json`. `SECURITY.md` has the steps to
+  verify a download.
+* OpenSSF Scorecard rates the repository's security practices on every change
+  to main and weekly, and the README shows its badge.
+
+### Changed
+
+* CI installs its test tools and pyOpenVBA from a hash-locked lock
+  (`.github/requirements/test.txt`), and the dependency audit reads the
+  runtime set from `.github/requirements/runtime.txt`, which Dependabot moves
+  daily, instead of resolving either at run time.
+
 ## 2.3.1 - 2026-09-28
 
 Sync to XLIDE 10.14.1 (commit 67b844d), from 10.14.0, and a command-line flag

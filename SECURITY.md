@@ -33,6 +33,10 @@ as well:
 - Semgrep with the `python`, `security-audit`, `secrets` and `github-actions`
   rule sets.
 - pip-audit over the runtime dependencies.
+- Coverage-guided fuzzing with Atheris of the lexer, the parser and every
+  diagnostic rule on arbitrary source, in [fuzz.yml](.github/workflows/fuzz.yml),
+  daily and on every change to the analyzer. It is not a gate: a finding fails
+  that workflow and becomes a regression seed in `tests/fuzz_corpus/vba`.
 - A malware scan of the tracked files and the built wheel and sdist: ClamAV,
   with signatures updated on every run and macro and heuristic alerts on, and
   YARA-X with the full rule set of [YARA Forge](https://github.com/YARAHQ/yara-forge),
@@ -58,6 +62,12 @@ A weekly workflow proposes new YARA pins in a pull request, YARA Forge's newest
 release at once and a YARA-X release once it is a week old, and the Malware
 scan workflow scans that pull request before it can be merged.
 
+[OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/WilliamSmithEdward/pyVBAanalysis)
+rates these practices on every change to main and weekly, and publishes
+the result the README badge shows. Some of its checks assume more than one
+maintainer, such as a second person approving every change, so a
+single-maintainer project cannot score full marks on them.
+
 ## Verifying a download
 
 Every file on PyPI carries PyPI's own provenance, which names this
@@ -71,4 +81,7 @@ pip download pyvbaanalysis --no-deps -d check
 gh attestation verify check/<file> --owner WilliamSmithEdward
 ```
 
-The output names the commit and workflow run that built the file.
+The output names the commit and workflow run that built the file. The
+signed bundle is also attached to the GitHub release as
+`pyvbaanalysis-<version>.sigstore.json`, so the check works without asking
+GitHub for it: add `--bundle pyvbaanalysis-<version>.sigstore.json`.

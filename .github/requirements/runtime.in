@@ -1,0 +1,5 @@
+# The runtime dependencies as a user's install resolves them today, for the
+# Security workflow's dependency audit. Dependabot moves the pin daily (the
+# owner's packages skip the cooldown), so the audit follows what PyPI serves.
+#   uv pip compile runtime.in --universal --generate-hashes --python-version 3.10 -o runtime.txt
+pyopenvba==6.3.4
