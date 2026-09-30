@@ -78,10 +78,50 @@ class InlineSuppressionScan:
     issues: list[tuple[Span, str]] = field(default_factory=list)
 
 
+def _statement_lines(source: str) -> dict[int, range]:
+    """Each physical line's statement, as the range of physical lines it spans.
+
+    A statement continued with `` _`` spans several physical lines and ends at its
+    NEWLINE token; the lexer drops the continuations themselves, so the lines a
+    NEWLINE closes run from just after the previous one.
+    """
+    out: dict[int, range] = {}
+    first = 1
+    # Lines are counted from the previous NEWLINE on, so the pass stays linear.
+    line = 1
+    counted_to = 0
+    for token in tokenize_cached(source):
+        if token.kind is TokenKind.NEWLINE:
+            line += source.count("\n", counted_to, token.start)
+            counted_to = token.start
+            lines = range(first, line + 1)
+            for covered in lines:
+                out[covered] = lines
+            first = line + 1
+    return out
+
+
 def scan_inline_suppressions(source: str) -> InlineSuppressionScan:
-    """Parse the ``'@pyvba-ignore`` directives in ``source`` into suppression state."""
+    """Parse the ``'@pyvba-ignore`` directives in ``source`` into suppression state.
+
+    A statement continued over several physical lines counts as one line: a
+    trailing ``'@pyvba-ignore`` covers every line of its statement, and
+    ``-next-line`` covers every line of the statement that starts below it. VBA
+    allows a comment only after a statement's last physical line, so without this
+    a finding on an earlier line of a continued statement could not be reached.
+    """
     scan = InlineSuppressionScan()
     first_source_line = _first_source_line(source)
+    # Built on the first line directive only: most modules have none.
+    statements: dict[int, range] | None = None
+
+    def target(line: int, codes: set[str] | None) -> None:
+        nonlocal statements
+        if statements is None:
+            statements = _statement_lines(source)
+        for covered in statements.get(line, range(line, line + 1)):
+            scan.line_targets.setdefault(covered, _Target()).add(codes)
+
     for token in tokenize_cached(source):
         if token.kind is not TokenKind.COMMENT:
             continue
@@ -100,9 +140,9 @@ def scan_inline_suppressions(source: str) -> InlineSuppressionScan:
         codes = _parse_codes(directive.group(2), span, scan)
         line = line_col(source, token.start)[0]
         if verb is None:
-            scan.line_targets.setdefault(line, _Target()).add(codes)
+            target(line, codes)
         elif verb.lower() == "-next-line":
-            scan.line_targets.setdefault(line + 1, _Target()).add(codes)
+            target(line + 1, codes)
         else:  # -file
             if first_source_line is not None and line >= first_source_line:
                 scan.issues.append(

@@ -102,6 +102,38 @@ def test_directive_text_in_string_is_not_a_directive() -> None:
     assert _BOUNDS in _codes(src)
 
 
+# A statement continued over physical lines is one line to both directives:
+# VBA allows a comment only after its last physical line, so a trailing
+# directive could otherwise never reach a finding on an earlier one.
+_DIV = "division-by-zero"
+_CONTINUED_HEAD = "Option Explicit\nFunction F() As Double\n    Dim x As Double\n"
+
+
+def _div_left(body: str) -> int:
+    source = _CONTINUED_HEAD + body + "End Function\n"
+    return sum(1 for d in analyze_module(source) if d.code == _DIV)
+
+
+def test_a_trailing_directive_covers_every_physical_line_of_its_statement() -> None:
+    first = "    x = 1 / 0 + _\n        2  '@pyvba-ignore: division-by-zero\n"
+    middle = "    x = 2 + _\n        1 / 0 + _\n        3  '@pyvba-ignore: division-by-zero\n"
+    assert _div_left(first) == 0
+    assert _div_left(middle) == 0
+
+
+def test_next_line_covers_the_whole_next_statement() -> None:
+    body = "    '@pyvba-ignore-next-line: division-by-zero\n    x = 2 + _\n        1 / 0\n"
+    assert _div_left(body) == 0
+
+
+def test_a_continued_directive_reaches_no_further_than_its_statement() -> None:
+    # The statement after still reports.
+    trailing = "    x = 2 + _\n        3  '@pyvba-ignore: division-by-zero\n    x = 1 / 0\n"
+    next_line = "    '@pyvba-ignore-next-line: division-by-zero\n    x = 2 + _\n        3\n    x = 1 / 0\n"
+    assert _div_left(trailing) == 1
+    assert _div_left(next_line) == 1
+
+
 def test_directive_diagnostic_is_never_suppressible() -> None:
     # A whole-file catch-all must not hide the warning a malformed directive produces.
     src = "'@pyvba-ignore-file\nSub S()  '@pyvba-ignore: not-a-real-code\nEnd Sub\n"

@@ -270,6 +270,9 @@ End Sub
 
 * `'@pyvba-ignore` suppresses diagnostics on its own line (write it as a trailing comment).
 * `'@pyvba-ignore-next-line` suppresses the following line.
+* A statement continued over several lines with ` _` counts as one line for both: VBA
+  allows a comment only after its last line, so a trailing `'@pyvba-ignore` there covers
+  the whole statement, and `-next-line` above it covers every line of it.
 * `'@pyvba-ignore-file` suppresses the whole module; place it before the first
   non-comment, non-attribute line.
 
