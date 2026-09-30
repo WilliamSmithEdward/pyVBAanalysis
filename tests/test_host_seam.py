@@ -700,6 +700,30 @@ def test_a_legacy_ppt_reads_its_modules() -> None:
     assert set(kinds) >= {"ZFixtureSetup", "PyVbaHarnessRunner", "PyVbaHarnessCall"}
 
 
+def test_access_module_text_keeps_its_characters_and_short_modules(tmp_path: Path) -> None:
+    """Before pyOpenVBA 6.3.0, AccessReader decoded module text as latin-1 (an
+    em dash came back as \\x97, a euro sign as \\x80) and could miss a short
+    module altogether (pyOpenVBA #33). The floor is past that: accented names,
+    and a one-line module, read intact and analyze clean."""
+    path = tmp_path / "Prices.accdb"
+    db = pyopenvba.access.AccessDatabase.create_new(path)
+    db.set_module(
+        "Module1",
+        "Option Compare Database\r\nOption Explicit\r\n"
+        "' Preis in € — netto\r\n"
+        "Public Function Größe() As Long\r\n"
+        "    Dim Zähler As Long\r\n    Zähler = 2\r\n    Größe = Zähler\r\n"
+        "End Function\r\n",
+    )
+    db.add_module("Short", "Option Compare Database\r\n")
+    db.save()
+    by_name = {m.name: m for m in read_office_modules(path)}
+    assert "Short" in by_name
+    assert "' Preis in € — netto" in by_name["Module1"].source
+    assert "Größe" in by_name["Module1"].source
+    assert analyze_office_file(path)["Module1"] == []
+
+
 @pytest.mark.parametrize("suffix", [".accda", ".mda"])
 def test_an_access_add_in_reads_as_a_database(tmp_path: Path, suffix: str) -> None:
     # An add-in is stored as a database is, so the Access reader opens it.
