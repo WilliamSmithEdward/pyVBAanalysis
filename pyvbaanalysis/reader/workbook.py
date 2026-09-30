@@ -16,7 +16,7 @@ designer header, so a workbook and a folder of loose files go through the same c
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,7 @@ from ..host.host_libraries import referenced_host_tokens
 from ..host.host_registry import host_token_for_file_name
 from ..diagnostics import VbaDiagnostic
 from ..project import analyze_project
-from ..symbols import ModuleInput
+from ..symbols import ImplicitMember, ModuleSymbolKind
 from .vbe_module import LoadedModule, loaded_module_from_text
 
 # The Excel container extensions read_workbook_modules / analyze_workbook accept.
@@ -170,6 +170,34 @@ def _read_access_project(
     return modules, libids
 
 
+def _form_controls(container: Any) -> dict[str, tuple[ImplicitMember, ...]]:
+    """Each UserForm's controls, by lowercased form name, read from the form's
+    designer storage: the members its code-behind uses and never declares.
+
+    Every control counts, a Frame's or MultiPage's children included, each
+    typed as pyOpenVBA names its class (``MSForms.TextBox``, or
+    ``ActiveX.Control`` for a control from another library). MSForms names are
+    unique across a form, so a name seen twice is one control. A form whose
+    designer streams do not reconcile gets no entry, the way upstream leaves a
+    form it cannot read without members.
+    """
+    out: dict[str, tuple[ImplicitMember, ...]] = {}
+    try:
+        forms = container.forms()
+    except Exception:
+        return out
+    for form in forms:
+        seen: set[str] = set()
+        members: list[ImplicitMember] = []
+        for control in form.walk():
+            if not control.name or control.name.lower() in seen:
+                continue
+            seen.add(control.name.lower())
+            members.append(ImplicitMember(control.name, control.kind))
+        out[form.name.lower()] = tuple(members)
+    return out
+
+
 def _reference_libids(references: Iterable[Any]) -> list[str]:
     """The libid of each reference that has one, in declaration order.
 
@@ -213,6 +241,13 @@ def _read_office_project(path: str | Path) -> tuple[list[LoadedModule], list[str
                     )
                 )
             libids = _reference_libids(project.references)
+            controls = _form_controls(container)
+        modules = [
+            replace(module, implicit_members=controls[module.name.lower()])
+            if module.kind is ModuleSymbolKind.USERFORM and module.name.lower() in controls
+            else module
+            for module in modules
+        ]
         return modules, libids
     except WorkbookReadError:
         raise
@@ -278,10 +313,7 @@ def analyze_office_file(
     whole project for context.
     """
     project = read_office_project(path)
-    inputs = [
-        ModuleInput(module_name=module.name, module_kind=module.kind, source=module.source)
-        for module in project.modules
-    ]
+    inputs = [module.as_module_input() for module in project.modules]
     return analyze_project(
         inputs,
         only=only,

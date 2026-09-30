@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from ..symbols import ModuleSymbolKind
+from ..symbols import ImplicitMember, ModuleInput, ModuleSymbolKind
 
 _VB_NAME_RE = re.compile(
     r'^\s*Attribute\s+VB_Name\s*=\s*"([^"]*)"', re.IGNORECASE | re.MULTILINE
@@ -43,6 +43,12 @@ _DOCUMENT_BASE_GUIDS = frozenset(
         "00020906-0000-0000-C000-000000000046",  # Word.Document (ThisDocument)
     }
 )
+# A UserForm's VB_Base names two GUIDs, the form's class and its designer; a
+# class or document module names one. A container keeps a form's design in a
+# storage of its own, so its code-behind carries no designer block, and this is
+# what marks it (upstream classifyModuleType).
+_VB_BASE_LINE_RE = re.compile(r'^\s*Attribute\s+VB_Base\s*=\s*"([^"]*)"', re.IGNORECASE | re.MULTILINE)
+_GUID_RE = re.compile(r"\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}")
 # The base the VBE writes on every class module it creates. Whatever its other
 # attributes, a module on this base is a class.
 _CLASS_BASE_GUID = "FCFB3D2A-A0FA-1068-A738-08002B3371B5"
@@ -80,6 +86,20 @@ class LoadedModule:
     kind: ModuleSymbolKind
     source: str
     designer_block: str = ""
+    # A UserForm's controls, read from its designer storage by a container
+    # reader. None when nothing read them: a loose .frm carries them in its own
+    # designer block, which the project index parses.
+    implicit_members: tuple[ImplicitMember, ...] | None = None
+
+    def as_module_input(self) -> ModuleInput:
+        """The project-analysis input for this module, with everything the
+        reader learned about it that its text does not say."""
+        return ModuleInput(
+            module_name=self.name,
+            module_kind=self.kind,
+            source=self.source,
+            implicit_members=self.implicit_members,
+        )
 
 
 def strip_export_header(text: str) -> str:
@@ -132,7 +152,8 @@ def classify_module_kind(
 ) -> ModuleSymbolKind:
     """Classify a module as standard, class, document, or UserForm.
 
-    Signals, strongest first: a UserForm designer block or ``.frm`` extension; an
+    Signals, strongest first: a UserForm designer block, ``.frm`` extension or a
+    ``VB_Base`` naming two GUIDs (a form's code-behind read from a container); an
     ``Attribute VB_Base`` line whose GUID is a host document coclass (ThisWorkbook,
     sheet, chart, or Word ThisDocument modules); a ``.bas`` extension or a
     pyOpenVBA standard flag, each of which states outright that the module is
@@ -147,6 +168,9 @@ def classify_module_kind(
     ext = (extension or "").lower().lstrip(".")
     head = text[:8000]
     if ext == "frm" or _VERSION_FORM_RE.match(head) or _DESIGNER_BEGIN_RE.search(head):
+        return ModuleSymbolKind.USERFORM
+    base_line = _VB_BASE_LINE_RE.search(head)
+    if base_line is not None and len(_GUID_RE.findall(base_line.group(1))) >= 2:
         return ModuleSymbolKind.USERFORM
     base = _VB_BASE_GUID_RE.search(head)
     if base is not None and base.group(1).upper() in _DOCUMENT_BASE_GUIDS:

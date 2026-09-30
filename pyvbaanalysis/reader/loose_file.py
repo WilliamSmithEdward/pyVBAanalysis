@@ -15,7 +15,6 @@ from pathlib import Path
 from ..conditional import ConditionalCompilationEnvironment
 from ..diagnostics import VbaDiagnostic
 from ..project import analyze_project
-from ..symbols import ModuleInput
 from .vbe_module import LoadedModule, loaded_module_from_text
 
 # The loose VBE export extensions the loaders recognize.
@@ -77,7 +76,7 @@ def analyze_loose_file(
     """
     module = load_loose_module(path)
     results = analyze_project(
-        [ModuleInput(module_name=module.name, module_kind=module.kind, source=module.source)],
+        [module.as_module_input()],
         severity_overrides=severity_overrides,
         conditional_compilation=conditional_compilation,
         whole_project=whole_project,
@@ -104,10 +103,7 @@ def analyze_loose_files(
     are only a fragment, to suppress the rules that need every module.
     """
     modules = [load_loose_module(path) for path in paths]
-    inputs = [
-        ModuleInput(module_name=module.name, module_kind=module.kind, source=module.source)
-        for module in modules
-    ]
+    inputs = [module.as_module_input() for module in modules]
     return analyze_project(
         inputs,
         only=only,

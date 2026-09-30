@@ -51,7 +51,7 @@ Out of scope:
   Risk 7), not the editor wrapping.
 
 Dependencies: the only runtime dependency is pyOpenVBA
-(https://pypi.org/project/pyOpenVBA/, version 3.4.0 or later, requires Python >=3.10),
+(https://pypi.org/project/pyOpenVBA/, version 6.3.3 or later, requires Python >=3.10),
 used to read VBA modules directly out of Office macro containers (Excel, Word,
 PowerPoint, and read-only Access; the file's extension selects both the container
 reader and the host object model the rules resolve against).

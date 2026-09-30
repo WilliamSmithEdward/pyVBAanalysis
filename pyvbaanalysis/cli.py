@@ -39,7 +39,6 @@ from .reader import (
     load_loose_module,
     read_office_project,
 )
-from .symbols import ModuleInput
 
 
 _SEVERITY_RANK = {"information": 0, "warning": 1, "error": 2}
@@ -128,9 +127,7 @@ def _analyze_loose_group(
             continue
         seen[key] = path
         unique.append(module)
-    inputs = [
-        ModuleInput(module_name=m.name, module_kind=m.kind, source=m.source) for m in unique
-    ]
+    inputs = [m.as_module_input() for m in unique]
     diagnostics = analyze_project(
         inputs,
         only=only or None,
@@ -156,9 +153,7 @@ def _analyze_workbook_group(
             errors.append(f"{path}: {exc}")
             continue
         modules = project.modules
-        inputs = [
-            ModuleInput(module_name=m.name, module_kind=m.kind, source=m.source) for m in modules
-        ]
+        inputs = [m.as_module_input() for m in modules]
         diagnostics = analyze_project(
             inputs,
             only=only or None,

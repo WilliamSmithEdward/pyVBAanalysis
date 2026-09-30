@@ -26,12 +26,13 @@ classifiers = [
 # transitive dependencies, so the runtime tree stays pure Python. Everything else is
 # the standard library.
 #
-# The 3.4.0 floor is a correctness requirement, not just currency: earlier
-# versions resolve a VBA project's code page incorrectly, so module text in a
-# non-Latin project (Cyrillic, Greek, the double-byte CJK pages) decodes as
-# mojibake - which the analyzer would then see as identifiers and could report
-# diagnostics on. Reads of Latin-1 projects are byte-identical either way.
-dependencies = ["pyOpenVBA>=3.4.0"]
+# The floor is a correctness requirement, not just currency. 3.4.0 resolves a
+# VBA project's code page correctly (earlier, text in a non-Latin project
+# decoded as mojibake the analyzer then read as identifiers). 3.5.0 added
+# forms(), the UserForm designer read that gives a form's controls; without it
+# every control the code-behind names is undeclared. 6.3.3 is the release the
+# reader is tested against.
+dependencies = ["pyOpenVBA>=6.3.3"]
 
 [project.optional-dependencies]
 # Exact pins: CI is a regression gate, so the toolchain must not drift

@@ -44,8 +44,17 @@ def _office_case(path: Path, label: str) -> dict[str, Any] | None:
         "label": label,
         "host": project.host,
         "referenced": project.referenced_hosts or [],
-        "modules": [{"name": m.name, "type": m.kind.value, "source": m.source} for m in project.modules],
+        "modules": [_office_module(m) for m in project.modules],
     }
+
+
+def _office_module(module: Any) -> dict[str, Any]:
+    """One module of an Office case, with a UserForm's controls from its designer
+    storage, so both analyzers see the members its code-behind never declares."""
+    entry: dict[str, Any] = {"name": module.name, "type": module.kind.value, "source": module.source}
+    if module.implicit_members:
+        entry["implicitMembers"] = [{"name": m.name, "type": m.type} for m in module.implicit_members]
+    return entry
 
 
 def _loose_case(paths: list[Path], label: str, host: str | None) -> dict[str, Any] | None:

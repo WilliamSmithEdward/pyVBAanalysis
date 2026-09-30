@@ -425,6 +425,53 @@ def _word_document(tmp_path: Path) -> Path:
     return path
 
 
+_FORM_CODE = (
+    "Option Explicit\r\n"
+    "Private Sub UserForm_Initialize()\r\n"
+    '    RegionPick.AddItem "West"\r\n'
+    '    Inner.Text = "x"\r\n'
+    '    Me.Caption = "Pick"\r\n'
+    "End Sub\r\n"
+    "Public Sub Dismiss()\r\n"
+    "    Me.Hide\r\n"
+    "End Sub\r\n"
+)
+
+
+def _workbook_with_form(tmp_path: Path) -> Path:
+    """A real .xlsm with a UserForm: a ComboBox, and a TextBox inside a Frame."""
+    path = tmp_path / "FormBook.xlsm"
+    with pyopenvba.ExcelFile.create_new(path) as book:
+        form = book.add_form("FrmPick")
+        form.add_control("ComboBox", "RegionPick")
+        form.add_control("Frame", "Box")
+        form.add_control("TextBox", "Inner", container="Box")
+        header = book.vba_project().get_module("FrmPick").source
+        book.set_module("FrmPick", header + _FORM_CODE)
+        book.set_module("Module1", "Option Explicit\r\nSub Go()\r\n    FrmPick.Show\r\nEnd Sub\r\n")
+        book.save()
+    return path
+
+
+def test_a_userform_in_a_container_is_read_as_a_form_with_its_controls(tmp_path: Path) -> None:
+    by_name = {module.name: module for module in read_office_modules(_workbook_with_form(tmp_path))}
+    form = by_name["FrmPick"]
+    assert form.kind is ModuleSymbolKind.USERFORM
+    assert [(m.name, m.type) for m in form.implicit_members or ()] == [
+        ("RegionPick", "MSForms.ComboBox"),
+        ("Box", "MSForms.Frame"),
+        ("Inner", "MSForms.TextBox"),
+    ]
+
+
+def test_a_userform_in_a_container_analyzes_clean(tmp_path: Path) -> None:
+    """Its controls, nested ones included, and the UserForm's own members
+    (Caption, Hide, Show) all resolve: nothing here is undeclared or missing."""
+    results = analyze_office_file(_workbook_with_form(tmp_path))
+    assert results["FrmPick"] == []
+    assert results["Module1"] == []
+
+
 def test_a_word_container_reads_its_modules(tmp_path: Path) -> None:
     modules = read_office_modules(_word_document(tmp_path))
     by_name = {module.name: module for module in modules}

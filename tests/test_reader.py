@@ -127,6 +127,22 @@ def test_classify_userform_via_designer_block_without_extension() -> None:
     assert classify_module_kind(_FRM) is ModuleSymbolKind.USERFORM
 
 
+def test_classify_userform_read_from_a_container() -> None:
+    # A form's code-behind as a container stores it: no designer block (the
+    # design lives in its own storage), but a VB_Base naming two GUIDs, the
+    # form's class and its designer. Upstream's classifyModuleType keys on that.
+    form_text = (
+        'Attribute VB_Name = "FrmPick"\r\n'
+        'Attribute VB_Base = "0{02B718B7-899D-4036-A9FF-48D0EAE6E861}{23C42563-2461-4FAC-BFD0-3E4082C6A41A}"\r\n'
+        "Attribute VB_GlobalNameSpace = False\r\n"
+        "Attribute VB_Creatable = False\r\n"
+        "Attribute VB_PredeclaredId = True\r\n"
+        "Attribute VB_Exposed = False\r\n"
+        "Option Explicit\r\n"
+    )
+    assert classify_module_kind(form_text, pyopenvba_standard=False) is ModuleSymbolKind.USERFORM
+
+
 def test_classify_pyopenvba_flags() -> None:
     assert classify_module_kind(_BAS, pyopenvba_standard=True) is ModuleSymbolKind.STANDARD
     assert classify_module_kind(_CLS, pyopenvba_standard=False) is ModuleSymbolKind.CLASS
