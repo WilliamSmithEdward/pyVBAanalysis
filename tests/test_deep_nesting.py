@@ -169,3 +169,31 @@ def test_no_walk_recurses_once_per_nested_block() -> None:
         if n >= 20 and "pyvbaanalysis" in code.co_filename
     )
     assert recursive == []
+
+
+def _overflow_texts(source: str) -> list[str]:
+    result = analyze_project([ModuleInput("Module1", ModuleSymbolKind.STANDARD, source)], host="excel")
+    return [source[d.span.start : d.span.end] for d in result["Module1"] if d.code == "arithmetic-overflow"]
+
+
+def test_an_overflow_inside_redundant_parentheses_past_the_recursion_limit_is_reported() -> None:
+    """The overflow folder spent about eleven frames per parenthesis, one per
+    precedence level, so 100 nested parentheses passed the recursion limit and
+    the rule isolation dropped every overflow finding in the module. The VBE
+    compiles 400; XLIDE reports this one."""
+    source = (
+        "Option Explicit\nSub S()\n    Dim i As Integer\n"
+        f"    i = {'(' * 400}CInt(40000){')' * 400}\nEnd Sub\n"
+    )
+    assert _overflow_texts(source) == ["CInt(40000)"]
+
+
+def test_a_deep_expression_does_not_cost_the_module_its_other_overflow_findings() -> None:
+    """Parentheses that each hold an operation still nest one fold per level. An
+    expression too deep to fold is unknown, and the other statements are still
+    checked; XLIDE reports the overflow on the second line here."""
+    source = (
+        "Option Explicit\nSub S()\n    Dim d As Double, i As Integer\n"
+        f"    d = {'(' * 160}1{' + 1)' * 160}\n    i = CInt(40000)\nEnd Sub\n"
+    )
+    assert _overflow_texts(source) == ["CInt(40000)"]

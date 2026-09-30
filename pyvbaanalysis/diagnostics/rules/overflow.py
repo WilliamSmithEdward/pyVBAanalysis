@@ -224,7 +224,14 @@ class _TypedFolder:
     def fold(self) -> _Folded:
         if len(self._toks) == 0:
             return None
-        result = self._additive()
+        try:
+            result = self._additive()
+        except RecursionError:
+            # Port-only: each parenthesis that holds an operation costs one fold
+            # per precedence level, so an expression nested past the interpreter
+            # limit is unknown here, where XLIDE folds it. Letting the error out
+            # would drop every overflow finding in the module.
+            return None
         if isinstance(result, _Overflow):
             return result
         return result if self._index == len(self._toks) else None
@@ -318,7 +325,17 @@ class _TypedFolder:
             close = match_paren_from(self._toks, self._index)
             if close < 0:
                 return None
-            nested = _TypedFolder(self._toks[self._index + 1 : close], self._base, self._names)
+            inner_start, inner_end = self._index + 1, close
+            # `((x))` folds as `(x)`: peel the layers that only wrap another
+            # parenthesis here, so redundant nesting costs no recursion.
+            while (
+                inner_end - inner_start >= 2
+                and self._toks[inner_start].raw_text == "("
+                and match_paren_from(self._toks, inner_start) == inner_end - 1
+            ):
+                inner_start += 1
+                inner_end -= 1
+            nested = _TypedFolder(self._toks[inner_start:inner_end], self._base, self._names)
             value = nested.fold()
             self._index = close + 1
             return value
