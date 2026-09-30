@@ -32,6 +32,7 @@ from pyvbaanalysis.reader import (
     WorkbookReadError,
     analyze_office_file,
     read_office_modules,
+    read_office_project,
     read_workbook_modules,
 )
 from pyvbaanalysis.reader.vbe_module import classify_module_kind
@@ -677,12 +678,38 @@ def test_the_excel_reader_points_at_the_generic_one(tmp_path: Path) -> None:
 
 
 def test_an_unreadable_container_is_rejected_by_extension(tmp_path: Path) -> None:
-    # .ppt is knowingly absent from the readable set (pyOpenVBA 3.4.0 lists it but
-    # reads it as a plain CFB), so it must fail as an extension, not as a parse.
-    path = tmp_path / "Deck.ppt"
-    path.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64)
+    # pyOpenVBA refuses a .ppam (a PowerPoint add-in) by its extension, so it must
+    # fail here as an extension, not as a confusing parse error.
+    path = tmp_path / "Deck.ppam"
+    path.write_bytes(b"PK\x03\x04" + b"\x00" * 64)
     with pytest.raises(WorkbookReadError, match="Unsupported file extension"):
         read_office_modules(path)
+
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_a_legacy_ppt_reads_its_modules() -> None:
+    """A .ppt keeps its project in a compressed storage inside the document;
+    pyOpenVBA 6 reads it. Upstream's readModules gives the same modules."""
+    project = read_office_project(_FIXTURES / "PowerPointFixture.ppt")
+    assert project.host == "powerpoint"
+    kinds = {m.name: m.kind for m in project.modules}
+    assert kinds["Module1"] is ModuleSymbolKind.STANDARD
+    assert kinds["CDeck"] is ModuleSymbolKind.CLASS
+    assert set(kinds) >= {"ZFixtureSetup", "PyVbaHarnessRunner", "PyVbaHarnessCall"}
+
+
+@pytest.mark.parametrize("suffix", [".accda", ".mda"])
+def test_an_access_add_in_reads_as_a_database(tmp_path: Path, suffix: str) -> None:
+    # An add-in is stored as a database is, so the Access reader opens it.
+    path = tmp_path / f"Tools{suffix}"
+    db = pyopenvba.access.AccessDatabase.create_new(path)
+    db.set_module("Module1", "Option Compare Database\r\nOption Explicit\r\nPublic Sub Go()\r\nEnd Sub\r\n")
+    db.save()
+    project = read_office_project(path)
+    assert project.host == "access"
+    assert [m.name for m in project.modules] == ["Module1"]
 
 
 # -- the model memos are identity-safe -------------------------------------

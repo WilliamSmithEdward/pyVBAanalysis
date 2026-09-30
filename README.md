@@ -106,9 +106,11 @@ Office installed.
 
 Each file is measured against its own host's object model, so a Word document is
 never judged by Excel's surface. Readable containers: Excel (.xlsm, .xlsb, .xlam,
-.xls), Word (.docm, .dotm, .doc), PowerPoint (.pptm, .potm) and Access (.accdb,
-.mdb, read-only). Legacy .ppt is not readable yet, because its VBA project sits in
-a compressed record the reader does not open.
+.xls), Word (.docm, .dotm, .doc), PowerPoint (.pptm, .potm, .ppt) and Access
+(.accdb, .mdb, and the add-ins .accda and .mda, read-only). Excel and Word
+templates (.xltm, .xlt, .dot), the older Excel add-in (.xla) and PowerPoint shows
+and add-ins (.ppsm, .ppam, .ppa) are not readable yet: pyOpenVBA does not open
+them.
 
 ## Documentation
 

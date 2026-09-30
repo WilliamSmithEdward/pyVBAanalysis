@@ -32,16 +32,16 @@ from .vbe_module import LoadedModule, loaded_module_from_text
 # The Excel container extensions read_workbook_modules / analyze_workbook accept.
 EXCEL_EXTENSIONS = frozenset({".xlsm", ".xlsb", ".xlam", ".xls"})
 # Every container extension read_office_modules / analyze_office_file accept, by
-# host token. Scoped to what pyOpenVBA 3.4.0 actually opens: the host registry
-# recognizes more extensions (templates and add-ins) than the engine can read, and
-# claiming one we cannot open would trade a clear error for a confusing one.
+# host token. Scoped to what pyOpenVBA 6.3.3 actually opens: the host registry
+# recognizes more extensions than the engine can read (.xltm, .xlt, .xla, .dot,
+# .ppam, .ppsm, .ppa are refused by extension there), and claiming one we cannot
+# open would trade a clear error for a confusing one.
 WORD_EXTENSIONS = frozenset({".docm", ".dotm", ".doc"})
-# .ppt is deliberately absent: pyOpenVBA 3.4.0 lists it but reads it as a plain
-# CFB, and a legacy .ppt keeps its VBA project in a zlib-compressed CFB inside an
-# ExOleObjStg record, so every open fails on the missing dir stream. Listing it
-# would trade a clear "unsupported extension" for a confusing parse error.
-POWERPOINT_EXTENSIONS = frozenset({".pptm", ".potm"})
-ACCESS_EXTENSIONS = frozenset({".accdb", ".mdb"})
+# A legacy .ppt keeps its VBA project in a zlib-compressed CFB inside an
+# ExOleObjStg record; pyOpenVBA reads it from 6.x on (3.4.0 did not).
+POWERPOINT_EXTENSIONS = frozenset({".pptm", ".potm", ".ppt"})
+# .mda and .accda are Access add-ins, stored as a database is.
+ACCESS_EXTENSIONS = frozenset({".accdb", ".mdb", ".accda", ".mda"})
 OFFICE_EXTENSIONS = EXCEL_EXTENSIONS | WORD_EXTENSIONS | POWERPOINT_EXTENSIONS | ACCESS_EXTENSIONS
 
 
