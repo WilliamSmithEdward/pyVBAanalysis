@@ -72,6 +72,19 @@ def test_runtime_function_as_parameter_type_fires() -> None:
     assert _CODE in _codes("Public Sub S(ByVal a As Left)\nEnd Sub", _STD)
 
 
+def test_implements_reserved_identifier_fires_in_declarations() -> None:
+    assert _CODE in _codes("Implements If\nPublic Sub S()\nEnd Sub", _STD)
+
+
+def test_implements_inside_a_procedure_is_not_a_type_reference() -> None:
+    # Implements is only legal before the first procedure, so XLIDE's scan
+    # stops there (typeSemanticTokens.ts collectTypeNameReferences). A line
+    # starting with it inside a procedure is implements-statement-placement's,
+    # and its next word is no type name.
+    source = "Public Sub S()\n    Dim x As Long\n    Implements If x > 0 Then\n    End If\nEnd Sub"
+    assert _CODE not in _codes(source, _STD)
+
+
 def test_known_non_type_name_fires() -> None:
     # A project declaration that is not a type (a Sub named like the As-name).
     helper = "Public Sub Widget()\nEnd Sub"

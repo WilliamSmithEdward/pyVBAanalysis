@@ -626,11 +626,11 @@ _IMPLEMENTS_RE = re.compile(
 )
 
 
-def _collect_implements_refs(source: str) -> list[_TypeNameRef]:
+def _collect_implements_refs(source: str, scan_end: int) -> list[_TypeNameRef]:
     out: list[_TypeNameRef] = []
     line_start = 0
     length = len(source)
-    while line_start <= length:
+    while line_start <= scan_end:
         line_end = source.find("\n", line_start)
         if line_end < 0:
             line_end = length
@@ -668,7 +668,13 @@ def _collect_implements_refs(source: str) -> list[_TypeNameRef]:
 
 def _collect_type_name_references(source: str, mod: ModuleNode) -> list[_TypeNameRef]:
     out: list[_TypeNameRef] = []
-    out.extend(_collect_implements_refs(source))
+    # Implements is only legal in the declarations section, so the line scan
+    # stops at the first procedure (typeSemanticTokens.ts). A line inside a
+    # procedure that starts with it names no type.
+    first_procedure_start = next(
+        (member.span.start for member in mod.members if isinstance(member, ProcedureNode)), len(source)
+    )
+    out.extend(_collect_implements_refs(source, first_procedure_start))
 
     def collect_group(group: VariableGroupNode) -> None:
         for decl in group.declarations:
