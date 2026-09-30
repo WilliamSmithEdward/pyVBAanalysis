@@ -95,9 +95,12 @@ through `analyzeVbaModuleSource`, which drops a runtime-error finding under
 `analyze_module` does (`pyvbaanalysis/diagnostics/module_analysis.py`). Its own
 additions the port leaves out, the structural block-balance pass and XLIDE's test
 and suppression directives, are cut from its list by keeping only what its rules
-produced (`tools/differential/upstream/shown.mjs`). One step the port lacks does
-remove findings: a procedure marked `'@xlide-test expected-error=N` hides a runtime
-finding for error N. No corpus has one.
+produced (`tools/differential/upstream/shown.mjs`). Two steps the port lacks do
+remove findings, and that filter cannot put them back: a procedure marked
+`'@xlide-test expected-error=N` hides a runtime finding for error N, and XLIDE's
+`'@xlide-analysis-disable-*` comments hide what they name (the port reads
+`'@pyvba-ignore` instead). A case using either reports port-only findings. No
+corpus has one.
 
 `replay`, `corpus` and `projects` exit 1 when anything differs and print what only
 one side reports. Where the port reports more, the port is wrong. Where upstream
