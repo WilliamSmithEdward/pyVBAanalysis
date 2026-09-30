@@ -522,6 +522,95 @@ def test_an_access_form_analyzes_clean(tmp_path: Path) -> None:
     assert analyze_office_file(_database_with_form(tmp_path))["Form_Orders"] == []
 
 
+# (code page, control name, module name): a form control and a module named in
+# each script, read out of a project saved in that script's code page.
+_NATIVE_FORM_NAMES = [
+    (1251, "Имя", "МодульТест"),
+    (1253, "Όνομα", "Ενότητα"),
+    (1250, "Jméno", "Modul"),
+    (1254, "İsimKutusu", "Modül"),
+    (932, "名前", "モジュール"),
+    (936, "名称", "测试模块"),
+]
+
+
+def _patch_project_code_page(dir_raw: bytes, code_page: int) -> bytes:
+    """Rewrite the dir stream's PROJECTCODEPAGE record ([MS-OVBA] 2.3.4.2.1.4),
+    as pyOpenVBA's own language matrix does. PROJECTVERSION's size slot is a
+    reserved marker over a fixed 10-byte payload, so it is stepped over."""
+    import struct
+
+    buf = bytearray(dir_raw)
+    pos = 0
+    while pos + 6 <= len(buf):
+        record_id = struct.unpack_from("<H", buf, pos)[0]
+        if record_id == 0x0009:
+            pos += 12
+            continue
+        size = struct.unpack_from("<I", buf, pos + 2)[0]
+        if record_id == 0x0003:
+            struct.pack_into("<H", buf, pos + 6, code_page)
+            return bytes(buf)
+        pos += 6 + size
+    raise AssertionError("PROJECTCODEPAGE record not found")
+
+
+def _workbook_in_code_page(tmp_path: Path, code_page: int, control: str, module: str) -> Path:
+    import io
+    import zipfile
+
+    from pyopenvba.cfb import CFB
+    from pyopenvba.vba import compress, decompress
+
+    path = tmp_path / f"cp{code_page}.xlsm"
+    with pyopenvba.ExcelFile.create_new(path) as book:
+        book.save()
+    entry = "xl/vbaProject.bin"
+    with zipfile.ZipFile(io.BytesIO(path.read_bytes())) as zin:
+        cfb = CFB.from_bytes(zin.read(entry))
+        dir_raw = decompress(cfb.get_stream_in_storage("VBA", "dir"))
+        cfb.write_stream_in_storage("VBA", "dir", compress(_patch_project_code_page(dir_raw, code_page)))
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as zout:
+            for info in zin.infolist():
+                zout.writestr(info, cfb.to_bytes() if info.filename == entry else zin.read(info.filename))
+    path.write_bytes(out.getvalue())
+    with pyopenvba.ExcelFile(path) as book:
+        form = book.add_form("Frm1")
+        form.add_control("TextBox", control)
+        header = book.vba_project().get_module("Frm1").source
+        book.set_module(
+            "Frm1",
+            header + "Option Explicit\r\nPrivate Sub UserForm_Initialize()\r\n"
+            f'    {control}.Text = "x"\r\n    Me.{control}.Visible = True\r\nEnd Sub\r\n',
+        )
+        book.vba_project().add_module(
+            module,
+            f'Attribute VB_Name = "{module}"\r\nOption Explicit\r\nSub Go()\r\n'
+            f'    Frm1.Show\r\n    Frm1.{control}.Text = "y"\r\nEnd Sub\r\n',
+            kind=pyopenvba.VBAModuleKind.standard,
+        )
+        book.save()
+    return path
+
+
+@pytest.mark.parametrize(
+    ("code_page", "control", "module"), _NATIVE_FORM_NAMES, ids=[f"cp{row[0]}" for row in _NATIVE_FORM_NAMES]
+)
+def test_a_userform_in_a_non_western_project_reads_its_native_control_names(
+    tmp_path: Path, code_page: int, control: str, module: str
+) -> None:
+    """A form's controls come from its designer storage, decoded in the
+    project's code page: a Russian, Greek, Czech, Turkish, Japanese or Chinese
+    control name reaches the analyzer intact, and code using it is clean."""
+    path = _workbook_in_code_page(tmp_path, code_page, control, module)
+    by_name = {m.name: m for m in read_office_modules(path)}
+    assert by_name["Frm1"].kind is ModuleSymbolKind.USERFORM
+    assert [(m.name, m.type) for m in by_name["Frm1"].implicit_members or ()] == [(control, "MSForms.TextBox")]
+    assert module in by_name
+    assert {name: found for name, found in analyze_office_file(path).items() if found} == {}
+
+
 def test_an_access_class_named_in_another_case_by_the_catalog_is_a_class(tmp_path: Path) -> None:
     """The dir catalog can spell a module `Basket` while the module list reads
     `basket` (XLIDE's AccessFormFixture.accdb does). The class check must not
