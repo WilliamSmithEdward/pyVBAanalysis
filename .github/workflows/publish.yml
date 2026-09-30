@@ -20,30 +20,9 @@ permissions:
   contents: read
 
 jobs:
-  # CodeQL, Semgrep and pip-audit (security.yml). Any finding fails this job,
-  # and publishing waits on it.
-  security:
-    name: Security analysis
-    uses: ./.github/workflows/security.yml
-    permissions:
-      contents: read
-      security-events: write
-
-  # ClamAV and YARA-X (malware-scan.yml). Any unexpected finding fails this
-  # job, and publishing waits on it.
-  malware-scan:
-    name: Malware scan
-    uses: ./.github/workflows/malware-scan.yml
-
-  publish:
-    name: Build and publish to PyPI
-    needs: [security, malware-scan]
+  build:
+    name: Build distributions
     runs-on: ubuntu-24.04
-    environment:
-      name: pypi
-      url: https://pypi.org/p/pyvbaanalysis
-    permissions:
-      id-token: write # OIDC token for PyPI Trusted Publishing
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -65,11 +44,41 @@ jobs:
         with:
           name: dist
           path: dist/*
+
+  # CodeQL, Semgrep and pip-audit (security.yml). Any finding fails this job,
+  # and publishing waits on it.
+  security:
+    name: Security
+    uses: ./.github/workflows/security.yml
+    permissions:
+      contents: read
+      security-events: write
+
+  # ClamAV and YARA-X (malware-scan.yml). Any unexpected finding fails this
+  # job, and publishing waits on it.
+  malware-scan:
+    name: Malware scan
+    uses: ./.github/workflows/malware-scan.yml
+
+  publish:
+    name: Publish to PyPI
+    needs: [build, security, malware-scan]
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pyvbaanalysis
+    permissions:
+      id-token: write # OIDC token for PyPI Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
-  attach-security-report:
-    name: Attach the security and malware reports to the release
+  attach-reports:
+    name: Attach the reports
     needs: [security, malware-scan, publish]
     runs-on: ubuntu-24.04
     permissions:
