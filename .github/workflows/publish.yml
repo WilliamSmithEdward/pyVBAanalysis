@@ -25,11 +25,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12.14"
-          cache: pip
-          cache-dependency-path: pyproject.toml
       - name: Install package + dev/build tools
         run: |
           python -m pip install -e ".[dev]"
@@ -54,7 +54,7 @@ jobs:
     uses: ./.github/workflows/security.yml
     permissions:
       contents: read
-      security-events: write
+      security-events: write  # upload results to code scanning
 
   # ClamAV and YARA-X (malware-scan.yml). Any unexpected finding fails this
   # job, and publishing waits on it.
@@ -84,7 +84,7 @@ jobs:
     needs: [security, malware-scan, publish]
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: write  # attach the reports to the release
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

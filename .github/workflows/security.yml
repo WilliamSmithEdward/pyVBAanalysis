@@ -1,8 +1,8 @@
 name: Security
 
 # Static security analysis: CodeQL (Python and the workflows themselves),
-# Semgrep and pip-audit over the runtime dependency tree. Any finding fails
-# the run. The malware scan (ClamAV and YARA-X) is in malware-scan.yml.
+# Semgrep and pip-audit over the runtime dependency tree, and zizmor over the
+# workflows. Any finding fails the run. The malware scan (ClamAV and YARA-X) is in malware-scan.yml.
 # Results go to the repository's Security tab as SARIF and to a
 # `security-report` artifact, which publish.yml attaches to every release.
 
@@ -24,13 +24,15 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      security-events: write
+      security-events: write  # upload results to code scanning
     strategy:
       fail-fast: false
       matrix:
         language: [python, actions]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           languages: ${{ matrix.language }}
@@ -40,9 +42,11 @@ jobs:
           category: codeql-${{ matrix.language }}
           output: sarif
       - name: Fail on any finding
+        env:
+          LANGUAGE: ${{ matrix.language }}
         run: |
           count=$(jq '[.runs[].results[]] | length' sarif/*.sarif)
-          echo "CodeQL ${{ matrix.language }}: $count finding(s)"
+          echo "CodeQL $LANGUAGE: $count finding(s)"
           jq -r '.runs[].results[] | "\(.ruleId): \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine) \(.message.text)"' sarif/*.sarif
           test "$count" -eq 0
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -56,9 +60,11 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      security-events: write
+      security-events: write  # upload results to code scanning
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The engine is pinned by digest (.github/security/semgrep); the registry
       # rule sets are fetched fresh on every run.
       - run: docker build -t semgrep-pinned .github/security/semgrep
@@ -91,6 +97,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12.14"
@@ -115,6 +123,47 @@ jobs:
         with:
           name: pip-audit
           path: pip-audit.json
+
+  # zizmor audits the workflows themselves: template injection, credential
+  # persistence, over-broad permissions, dangerous triggers, and actions with
+  # known advisories or impostor commits. Findings it should not raise are
+  # turned off in .github/zizmor.yml or ignored inline, each with its reason;
+  # anything else fails the job.
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write  # upload results to code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.14"
+
+      - name: Install zizmor
+        run: python -m pip install --require-hashes -r .github/requirements/zizmor.txt
+
+      # The token lets the online audits look up advisories and check that each
+      # pinned SHA belongs to the action it names.
+      - name: Audit the workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=0
+          zizmor --format sarif .github/workflows > zizmor.sarif || status=$?
+          zizmor --format plain .github/workflows || true
+          exit "$status"
+
+      - uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        if: ${{ !cancelled() }}
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor
 
   report:
     name: Security report
@@ -158,7 +207,7 @@ jobs:
   security-passed:
     name: Security passed
     if: always()
-    needs: [codeql, semgrep, dependencies, report]
+    needs: [codeql, semgrep, dependencies, zizmor, report]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
