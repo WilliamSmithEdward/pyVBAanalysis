@@ -275,6 +275,7 @@ def test_word_this_document_classifies_as_a_document_module() -> None:
 
 _PREDECLARED_EXPOSED = (
     'Attribute VB_Name = "X"\n'
+    'Attribute VB_Base = "1Normal.ThisDocument"\n'
     "Attribute VB_PredeclaredId = True\n"
     "Attribute VB_Exposed = True\n"
 )
@@ -287,7 +288,8 @@ _PREDECLARED_EXPOSED = (
         # module is standard; neither may be overridden by the attribute pair.
         ("bas", None, ModuleSymbolKind.STANDARD),
         (None, True, ModuleSymbolKind.STANDARD),
-        # Where nothing states the kind, the pair identifies document code-behind.
+        # Where nothing states the kind, the pair beside a base identifies
+        # document code-behind.
         ("cls", None, ModuleSymbolKind.DOCUMENT),
         (None, False, ModuleSymbolKind.DOCUMENT),
         (None, None, ModuleSymbolKind.DOCUMENT),
@@ -315,6 +317,35 @@ def test_the_attribute_pair_needs_both_halves(predeclared: str, exposed: str) ->
         f"Attribute VB_Exposed = {exposed}\n"
     )
     assert classify_module_kind(source, extension="cls") is ModuleSymbolKind.CLASS
+
+
+@pytest.mark.parametrize(("extension", "pyopenvba_standard"), [("cls", None), (None, False)])
+def test_the_attribute_pair_without_a_base_is_a_class(
+    extension: str | None, pyopenvba_standard: bool | None
+) -> None:
+    # A .cls export has no VB_Base line, and a class can be predeclared and
+    # exposed: '@PredeclaredId and '@Exposed written through XLIDE, or an
+    # add-in's factory class.
+    source = 'Attribute VB_Name = "X"\nAttribute VB_PredeclaredId = True\nAttribute VB_Exposed = True\n'
+    assert (
+        classify_module_kind(source, extension=extension, pyopenvba_standard=pyopenvba_standard)
+        is ModuleSymbolKind.CLASS
+    )
+
+
+def test_a_predeclared_exposed_class_on_the_class_base_is_a_class() -> None:
+    # stdVBA's stdCOM and stdWebSocket as read out of a workbook: the VBE's
+    # class base, PredeclaredId and Exposed. The base says class outright.
+    source = (
+        'Attribute VB_Name = "stdCOM"\n'
+        'Attribute VB_Base = "0{FCFB3D2A-A0FA-1068-A738-08002B3371B5}"\n'
+        "Attribute VB_GlobalNameSpace = False\n"
+        "Attribute VB_Creatable = False\n"
+        "Attribute VB_PredeclaredId = True\n"
+        "Attribute VB_Exposed = True\n"
+    )
+    assert classify_module_kind(source, pyopenvba_standard=False) is ModuleSymbolKind.CLASS
+    assert classify_module_kind(source) is ModuleSymbolKind.CLASS
 
 
 def test_an_ordinary_class_module_is_not_a_document() -> None:

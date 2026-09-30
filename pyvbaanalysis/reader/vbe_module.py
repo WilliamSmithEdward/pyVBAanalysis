@@ -43,11 +43,16 @@ _DOCUMENT_BASE_GUIDS = frozenset(
         "00020906-0000-0000-C000-000000000046",  # Word.Document (ThisDocument)
     }
 )
+# The base the VBE writes on every class module it creates. Whatever its other
+# attributes, a module on this base is a class.
+_CLASS_BASE_GUID = "FCFB3D2A-A0FA-1068-A738-08002B3371B5"
+_VB_BASE_RE = re.compile(r"^\s*Attribute\s+VB_Base\s*=", re.IGNORECASE | re.MULTILINE)
 # Host code-behind that names no CLSID: Word's ThisDocument declares
 # VB_Base = "1Normal.ThisDocument". Office marks every document module
-# PredeclaredId + Exposed and nothing else it authors gets both, so the pair is
-# the host-generic document signature (UserForms are Exposed = False and are
-# caught by the designer block before this runs).
+# PredeclaredId + Exposed, so with a base named the pair is the host-generic
+# document signature (UserForms are Exposed = False and are caught by the
+# designer block before this runs). Without a base it is not: a class can have
+# both, as stdVBA's predeclared public classes do (upstream classifyModuleType).
 _VB_PREDECLARED_TRUE_RE = re.compile(
     r'^\s*Attribute\s+VB_PredeclaredId\s*=\s*True\s*$', re.IGNORECASE | re.MULTILINE
 )
@@ -131,7 +136,8 @@ def classify_module_kind(
     ``Attribute VB_Base`` line whose GUID is a host document coclass (ThisWorkbook,
     sheet, chart, or Word ThisDocument modules); a ``.bas`` extension or a
     pyOpenVBA standard flag, each of which states outright that the module is
-    standard; the host-generic PredeclaredId + Exposed pair, which identifies
+    standard; a ``VB_Base`` naming the VBE's class base; the host-generic
+    PredeclaredId + Exposed pair beside a ``VB_Base`` line, which identifies
     document code-behind that names no CLSID (Word's ThisDocument declares
     ``VB_Base = "1Normal.ThisDocument"``); then ``.cls`` or the pyOpenVBA "other"
     bucket; falling back to the ``VERSION ... CLASS`` header. ``pyopenvba_standard``
@@ -151,7 +157,13 @@ def classify_module_kind(
     # neither statement is available (a workbook read, or a .cls file).
     if ext == "bas" or pyopenvba_standard is True:
         return ModuleSymbolKind.STANDARD
-    if _VB_PREDECLARED_TRUE_RE.search(head) and _VB_EXPOSED_TRUE_RE.search(head):
+    if base is not None and base.group(1).upper() == _CLASS_BASE_GUID:
+        return ModuleSymbolKind.CLASS
+    if (
+        _VB_BASE_RE.search(head)
+        and _VB_PREDECLARED_TRUE_RE.search(head)
+        and _VB_EXPOSED_TRUE_RE.search(head)
+    ):
         return ModuleSymbolKind.DOCUMENT
     if ext == "cls":
         return ModuleSymbolKind.CLASS
