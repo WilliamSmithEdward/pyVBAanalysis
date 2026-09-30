@@ -15,6 +15,7 @@ designer header, so a workbook and a folder of loose files go through the same c
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -137,8 +138,13 @@ def _read_access_project(
     pyopenvba: Any, file_path: Path
 ) -> tuple[list[LoadedModule], list[str] | None]:
     """Every VBA module in an Access database, and its references' libids. Read-only
-    by construction: Access executes compiled p-code, so pyOpenVBA offers no write
-    path and neither do we.
+    by construction: modules come through pyOpenVBA's AccessReader, and form and
+    report designs through an AccessDatabase opened from the file's bytes, which
+    has no path to save back to.
+
+    A form's or report's code module is a UserForm-like module whose designer
+    class is Access.Form or Access.Report, with the design's sections and
+    controls as its members, as upstream reads it.
 
     The libids come back None, UNKNOWN rather than empty, when the dir catalog cannot
     be read: a project whose reference list was not seen has not been shown to lack
@@ -153,8 +159,10 @@ def _read_access_project(
             info = database.read_project_info()
         except Exception:
             info = None
+        # By lowercased name: the catalog and the module list can spell one module
+        # in two cases (`Basket` and `basket`), and VBA names are case-insensitive.
         class_names = (
-            {entry.name for entry in info.modules if entry.is_class_module}
+            {entry.name.lower() for entry in info.modules if entry.is_class_module}
             if info is not None
             else set()
         )
@@ -163,11 +171,89 @@ def _read_access_project(
                 loaded_module_from_text(
                     database.read_vba_module_with_attributes(name),
                     name=name,
-                    pyopenvba_standard=(name not in class_names),
+                    pyopenvba_standard=(name.lower() not in class_names),
                 )
             )
+    designs = _access_designs(file_path)
+    modules = [
+        replace(
+            module,
+            kind=ModuleSymbolKind.USERFORM,
+            designer_class=designs[module.name.lower()][0],
+            implicit_members=designs[module.name.lower()][1],
+        )
+        if module.name.lower() in designs
+        else module
+        for module in modules
+    ]
     libids = _reference_libids(info.references) if info is not None else None
     return modules, libids
+
+
+# The Access library's class for a control type whose class is not simply its
+# type name (upstream ACCESS_CONTROL_CLASSES in accessDesign.ts).
+_ACCESS_CONTROL_CLASSES = {
+    "CheckBox": "Checkbox",
+    "TextBox": "Textbox",
+    "ComboBox": "Combobox",
+    "Subform": "SubForm",
+    "Tab": "TabControl",
+    "WebBrowser": "WebBrowserControl",
+    "EdgeBrowser": "Edge",
+}
+_ACCESS_DESIGN_CLASSES = {"form": "Access.Form", "report": "Access.Report"}
+_ACCESS_MODULE_PREFIXES = {"form": "Form_", "report": "Report_"}
+_ACCESS_IDENTIFIER_UNSAFE = re.compile(r"[^A-Za-z0-9_\u0080-￿]")
+
+
+def _access_vba_identifier(name: str) -> str:
+    """The name VBA knows an Access section or control by: each ASCII character
+    an identifier cannot hold becomes an underscore, and a name that then opens
+    with a digit or an underscore takes `Ctl` in front. `Order Date` is
+    `Order_Date`, `2ndBox` is `Ctl2ndBox` (upstream accessVbaIdentifier)."""
+    converted = _ACCESS_IDENTIFIER_UNSAFE.sub("_", name)
+    return f"Ctl{converted}" if re.match(r"[0-9_]", converted) else converted
+
+
+def _access_designs(file_path: Path) -> dict[str, tuple[str, tuple[ImplicitMember, ...]]]:
+    """Each form's and report's code module, by lowercased name, with the class
+    its design makes it and the sections and controls that are its members.
+
+    The database is opened from its bytes, so nothing can be written back to the
+    file. A design that cannot be read leaves its module as the dir catalog
+    classed it. Members are never the whole surface: a bound form also has one
+    for every field of its record source, which only the running database knows.
+    """
+    out: dict[str, tuple[str, tuple[ImplicitMember, ...]]] = {}
+    try:
+        from pyopenvba.access import AccessDatabase
+
+        database = AccessDatabase(file_path.read_bytes())
+        designs = [("form", design) for design in database.forms()]
+        designs += [("report", design) for design in database.reports()]
+    except Exception:
+        return out
+    for kind, design in designs:
+        taken: set[str] = set()
+        members: list[ImplicitMember] = []
+        for obj in design.objects[1:]:
+            if not obj.name:
+                continue
+            name = _access_vba_identifier(obj.name)
+            if name.lower() in taken:
+                continue
+            taken.add(name.lower())
+            if obj.is_section:
+                members.append(ImplicitMember(name, "Access.Section"))
+            elif obj.type_name:
+                members.append(
+                    ImplicitMember(name, f"Access.{_ACCESS_CONTROL_CLASSES.get(obj.type_name, obj.type_name)}")
+                )
+            else:
+                members.append(ImplicitMember(name, "Access.Control"))
+        module_name = f"{_ACCESS_MODULE_PREFIXES[kind]}{design.name}"
+        out[module_name.lower()] = (_ACCESS_DESIGN_CLASSES[kind], tuple(members))
+    return out
 
 
 def _form_controls(container: Any) -> dict[str, tuple[ImplicitMember, ...]]:
@@ -193,9 +279,14 @@ def _form_controls(container: Any) -> dict[str, tuple[ImplicitMember, ...]]:
             if not control.name or control.name.lower() in seen:
                 continue
             seen.add(control.name.lower())
-            members.append(ImplicitMember(control.name, control.kind))
+            members.append(ImplicitMember(control.name, _FORM_CONTROL_CLASSES.get(control.kind, control.kind)))
         out[form.name.lower()] = tuple(members)
     return out
+
+
+# A MultiPage's pages are sites whose class pyOpenVBA reads as the form's own,
+# MSForms.Form; to VBA each is an MSForms.Page, as upstream types it.
+_FORM_CONTROL_CLASSES = {"MSForms.Form": "MSForms.Page"}
 
 
 def _reference_libids(references: Iterable[Any]) -> list[str]:

@@ -431,6 +431,8 @@ _FORM_CODE = (
     '    RegionPick.AddItem "West"\r\n'
     '    Inner.Text = "x"\r\n'
     '    Me.Caption = "Pick"\r\n'
+    '    Page1.Caption = "First"\r\n'
+    "    Tabs.Value = 0\r\n"
     "End Sub\r\n"
     "Public Sub Dismiss()\r\n"
     "    Me.Hide\r\n"
@@ -439,13 +441,15 @@ _FORM_CODE = (
 
 
 def _workbook_with_form(tmp_path: Path) -> Path:
-    """A real .xlsm with a UserForm: a ComboBox, and a TextBox inside a Frame."""
+    """A real .xlsm with a UserForm: a ComboBox, a TextBox inside a Frame, and a
+    MultiPage with the two pages the designer gives a new one."""
     path = tmp_path / "FormBook.xlsm"
     with pyopenvba.ExcelFile.create_new(path) as book:
         form = book.add_form("FrmPick")
         form.add_control("ComboBox", "RegionPick")
         form.add_control("Frame", "Box")
         form.add_control("TextBox", "Inner", container="Box")
+        form.add_control("MultiPage", "Tabs")
         header = book.vba_project().get_module("FrmPick").source
         book.set_module("FrmPick", header + _FORM_CODE)
         book.set_module("Module1", "Option Explicit\r\nSub Go()\r\n    FrmPick.Show\r\nEnd Sub\r\n")
@@ -457,10 +461,15 @@ def test_a_userform_in_a_container_is_read_as_a_form_with_its_controls(tmp_path:
     by_name = {module.name: module for module in read_office_modules(_workbook_with_form(tmp_path))}
     form = by_name["FrmPick"]
     assert form.kind is ModuleSymbolKind.USERFORM
+    # A MultiPage's pages are MSForms.Page to VBA (pyOpenVBA reads their site
+    # class as a Form), and its internal TabStrip has no name to reach it by.
     assert [(m.name, m.type) for m in form.implicit_members or ()] == [
         ("RegionPick", "MSForms.ComboBox"),
         ("Box", "MSForms.Frame"),
         ("Inner", "MSForms.TextBox"),
+        ("Tabs", "MSForms.MultiPage"),
+        ("Page1", "MSForms.Page"),
+        ("Page2", "MSForms.Page"),
     ]
 
 
@@ -470,6 +479,85 @@ def test_a_userform_in_a_container_analyzes_clean(tmp_path: Path) -> None:
     results = analyze_office_file(_workbook_with_form(tmp_path))
     assert results["FrmPick"] == []
     assert results["Module1"] == []
+
+
+_ACCESS_FORM_CODE = (
+    "Option Compare Database\r\n"
+    "Option Explicit\r\n"
+    "Private Sub Form_Load()\r\n"
+    '    Me.Caption = "Orders"\r\n'
+    "    Me.Qty.Value = 1\r\n"
+    "    Qty.Locked = False\r\n"
+    "    Me.Order_Date.Value = Date\r\n"
+    "    Detail.Visible = True\r\n"
+    "End Sub\r\n"
+)
+
+
+def _database_with_form(tmp_path: Path) -> Path:
+    """A real .accdb with a form: a TextBox, a TextBox whose name has a space,
+    and code behind it."""
+    path = tmp_path / "Orders.accdb"
+    db = pyopenvba.access.AccessDatabase.create_new(path)
+    db.add_form("Orders")
+    db.add_control("Orders", "TextBox", "Qty")
+    db.add_control("Orders", "TextBox", "Order Date")
+    db.set_design_code("Orders", _ACCESS_FORM_CODE)
+    db.save()
+    return path
+
+
+def test_an_access_form_is_read_with_its_class_and_controls(tmp_path: Path) -> None:
+    by_name = {module.name: module for module in read_office_modules(_database_with_form(tmp_path))}
+    form = by_name["Form_Orders"]
+    assert form.kind is ModuleSymbolKind.USERFORM
+    assert form.designer_class == "Access.Form"
+    members = {(m.name, m.type) for m in form.implicit_members or ()}
+    # Access names a control for VBA by replacing what an identifier cannot
+    # hold: `Order Date` is `Order_Date`.
+    assert {("Qty", "Access.Textbox"), ("Order_Date", "Access.Textbox"), ("Detail", "Access.Section")} <= members
+
+
+def test_an_access_form_analyzes_clean(tmp_path: Path) -> None:
+    assert analyze_office_file(_database_with_form(tmp_path))["Form_Orders"] == []
+
+
+def test_an_access_class_named_in_another_case_by_the_catalog_is_a_class(tmp_path: Path) -> None:
+    """The dir catalog can spell a module `Basket` while the module list reads
+    `basket` (XLIDE's AccessFormFixture.accdb does). The class check must not
+    depend on the case."""
+    from types import SimpleNamespace
+
+    from pyvbaanalysis.reader.workbook import _read_access_project
+
+    class_text = (
+        'Attribute VB_Name = "Basket"\r\n'
+        'Attribute VB_Base = "0{FCFB3D2A-A0FA-1068-A738-08002B3371B5}"\r\n'
+        "Option Compare Database\r\nOption Explicit\r\n"
+    )
+
+    class Reader:
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def __enter__(self) -> "Reader":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def read_project_info(self) -> SimpleNamespace:
+            entry = SimpleNamespace(name="Basket", is_class_module=True)
+            return SimpleNamespace(modules=[entry], references=[])
+
+        def vba_module_names(self) -> list[str]:
+            return ["basket"]
+
+        def read_vba_module_with_attributes(self, _name: str) -> str:
+            return class_text
+
+    modules, _ = _read_access_project(SimpleNamespace(AccessReader=Reader), tmp_path / "none.accdb")
+    assert [(m.name, m.kind) for m in modules] == [("basket", ModuleSymbolKind.CLASS)]
 
 
 def test_a_word_container_reads_its_modules(tmp_path: Path) -> None:

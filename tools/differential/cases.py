@@ -49,9 +49,12 @@ def _office_case(path: Path, label: str) -> dict[str, Any] | None:
 
 
 def _office_module(module: Any) -> dict[str, Any]:
-    """One module of an Office case, with a UserForm's controls from its designer
-    storage, so both analyzers see the members its code-behind never declares."""
+    """One module of an Office case, with what its design says and its text does
+    not: a form's controls, and the class an Access design makes it. Both
+    analyzers then see the same form."""
     entry: dict[str, Any] = {"name": module.name, "type": module.kind.value, "source": module.source}
+    if module.designer_class:
+        entry["designerClass"] = module.designer_class
     if module.implicit_members:
         entry["implicitMembers"] = [{"name": m.name, "type": m.type} for m in module.implicit_members]
     return entry

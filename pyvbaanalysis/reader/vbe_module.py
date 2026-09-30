@@ -90,6 +90,9 @@ class LoadedModule:
     # reader. None when nothing read them: a loose .frm carries them in its own
     # designer block, which the project index parses.
     implicit_members: tuple[ImplicitMember, ...] | None = None
+    # The host class a design makes the module (`Access.Form`, `Access.Report`),
+    # which is what `Me` is there. None for a UserForm, always MSForms.UserForm.
+    designer_class: str | None = None
 
     def as_module_input(self) -> ModuleInput:
         """The project-analysis input for this module, with everything the
@@ -99,6 +102,7 @@ class LoadedModule:
             module_kind=self.kind,
             source=self.source,
             implicit_members=self.implicit_members,
+            designer_class=self.designer_class,
         )
 
 
