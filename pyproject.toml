@@ -72,6 +72,9 @@ exclude = [
     "docs/agentic_ai_programming_best_practices.md",
     "docs/AI-Smells-Agents-Avoid.md",
     "tools/differential/",
+    # A legacy .ppt holding VBA, for the .ppt reader test. A published package
+    # carries no macro file; the test skips when the fixture is absent.
+    "tests/fixtures/PowerPointFixture.ppt",
 ]
 
 [tool.pytest.ini_options]

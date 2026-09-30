@@ -691,8 +691,12 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 
 def test_a_legacy_ppt_reads_its_modules() -> None:
     """A .ppt keeps its project in a compressed storage inside the document;
-    pyOpenVBA 6 reads it. Upstream's readModules gives the same modules."""
-    project = read_office_project(_FIXTURES / "PowerPointFixture.ppt")
+    pyOpenVBA 6 reads it. Upstream's readModules gives the same modules. The
+    fixture holds VBA, so the sdist leaves it out and the test skips there."""
+    fixture = _FIXTURES / "PowerPointFixture.ppt"
+    if not fixture.exists():
+        pytest.skip("the .ppt fixture is not in the sdist")
+    project = read_office_project(fixture)
     assert project.host == "powerpoint"
     kinds = {m.name: m.kind for m in project.modules}
     assert kinds["Module1"] is ModuleSymbolKind.STANDARD

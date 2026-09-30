@@ -40,8 +40,10 @@ as well:
 
 Any finding fails the run, and a release is not published to PyPI until every
 check passes. Known acceptable malware-scan findings are listed, each with its
-reason, in [security/malware-allowlist.toml](security/malware-allowlist.toml);
-there are none so far. Each release carries the resulting `security-report.md`
+reason, in [security/malware-allowlist.toml](security/malware-allowlist.toml).
+There is one: ClamAV's macro heuristic on `tests/fixtures/PowerPointFixture.ppt`,
+a test file that holds VBA on purpose. It is left out of the published packages.
+Each release carries the resulting `security-report.md`
 and `malware-report.md`, the latter naming the ClamAV signature version and the YARA Forge release it scanned with,
 and the raw results as assets.
 
