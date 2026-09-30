@@ -47,16 +47,13 @@ Each release carries the resulting `security-report.md`
 and `malware-report.md`, the latter naming the ClamAV signature version and the YARA Forge release it scanned with,
 and the raw results as assets.
 
-Known acceptable findings in the other checks are suppressed at the line, each
-with its reason:
-
-- Semgrep `dynamic-urllib-use-detected` in `security/yara_forge_update.py`: the
-  updater fetches release URLs the GitHub API returns, and refuses any URL that
-  is not https on the GitHub API or the YARA Forge release download path.
+A finding in the other checks that is acceptable is suppressed at the line and
+listed here with its reason. None is suppressed today.
 
 Everything the checks run on is pinned: actions by commit SHA, the ClamAV and
-Semgrep engines by image digest, pip-audit by hash, the YARA-X engine by version
-and SHA-256, and the YARA Forge rules by release and SHA-256. Dependabot proposes
-new versions of the first three once they are a week old. A weekly workflow
-proposes the newest YARA Forge release a week old in a pull request, and the
-Malware scan workflow scans that pull request before it can be merged.
+Semgrep engines by image digest, pip-audit by hash, and the YARA-X engine and
+the YARA Forge rules by release and SHA-256 in `.github/security/yara.json`.
+Dependabot proposes new versions of the first three once they are a week old.
+A weekly workflow proposes new YARA pins in a pull request, YARA Forge's newest
+release at once and a YARA-X release once it is a week old, and the Malware
+scan workflow scans that pull request before it can be merged.

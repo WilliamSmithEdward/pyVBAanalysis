@@ -1,8 +1,9 @@
 version: 2
 # Every pin keeps an updater. A new version is proposed once it is a week old
 # (the cooldown), and each proposal runs CI, Security and Malware scan before merge.
-# Not followed here: the YARA-X release download (see malware-scan.yml) and the
-# exact Python and runner versions in the workflows, which are moved by hand.
+# Not followed here: the YARA-X and YARA Forge release downloads, which
+# update-yara-rules.yml moves in .github/security/yara.json, and the exact
+# Python and runner versions in the workflows, which are moved by hand.
 updates:
   # The GitHub Actions, pinned by commit SHA in the workflows.
   - package-ecosystem: github-actions
