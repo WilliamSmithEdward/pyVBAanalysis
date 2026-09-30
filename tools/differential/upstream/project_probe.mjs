@@ -46,6 +46,10 @@ for (const c of JSON.parse(readFileSync(process.argv[2], 'utf8'))) {
       moduleName: mod.moduleName,
       moduleKind: effectiveModuleKind(mod),
       ...projectAnalysisOptionsForModule(project, mod.moduleName, procedures),
+      // The extension's analysis worker passes the designer's class beside the
+      // project options (analysisWorkerLogic.ts); projectAnalysisOptionsForModule
+      // does not carry it, and the port's analyze_project does.
+      ...(mod.designerClass ? { designerClass: mod.designerClass } : {}),
       ...(c.host ? { host: c.host } : {}),
       // Absent means "nothing referenced" upstream; the port is given the same.
       referencedHosts: c.referenced ?? [],
