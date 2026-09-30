@@ -9,6 +9,7 @@ once runs them as one project so cross-module references resolve.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
@@ -24,31 +25,55 @@ LOOSE_EXTENSIONS = frozenset({".bas", ".cls", ".frm"})
 class LooseFileReadError(Exception):
     """A loose .bas/.cls/.frm file could not be read from disk."""
 
-# VBE exports are CP1252 by default; tolerate UTF-8 (with or without BOM) too. These
-# can fail on bytes they do not map; latin-1 (which decodes every byte and never
-# raises) is the final fallback below, so a stray byte never aborts a load.
-_VBE_ENCODINGS = ("utf-8-sig", "cp1252")
+_UTF8_BOM = b"\xef\xbb\xbf"
 
 
-def _read_text(path: Path) -> str:
-    raw = path.read_bytes()
-    for encoding in _VBE_ENCODINGS:
+def _ansi_code_page() -> int:
+    """The system ANSI code page, the one the VBE writes exports in: 1252 on a
+    Western Windows, 1251 on a Russian one, 932 on a Japanese one. Off Windows
+    there is none, and 1252 is what the files most often are."""
+    if sys.platform == "win32":
         try:
-            return raw.decode(encoding)
-        except UnicodeDecodeError:
+            import ctypes
+
+            return int(ctypes.windll.kernel32.GetACP())
+        except (AttributeError, OSError):
+            pass
+    return 1252
+
+
+def _read_text(path: Path, encoding: str | None = None) -> str:
+    """Decode an exported module. A UTF-8 byte-order mark decides first. Then
+    ``encoding`` when the caller knows the machine the file came from; else
+    strict UTF-8, which text from another editor usually is; else the machine's
+    ANSI code page, which is what the VBE on this machine exported it in.
+    latin-1 decodes every byte, so a stray byte never aborts a load."""
+    raw = path.read_bytes()
+    if raw.startswith(_UTF8_BOM):
+        return raw[len(_UTF8_BOM):].decode("utf-8", errors="replace")
+    candidates = [encoding] if encoding else ["utf-8", f"cp{_ansi_code_page()}"]
+    for candidate in candidates:
+        try:
+            return raw.decode(candidate)
+        except (UnicodeDecodeError, LookupError):
             continue
     return raw.decode("latin-1")
 
 
-def load_loose_module(path: str | Path) -> LoadedModule:
+def load_loose_module(path: str | Path, *, encoding: str | None = None) -> LoadedModule:
     """Load one .bas/.cls/.frm file into a LoadedModule (name, kind, code body).
+
+    ``encoding`` names the code page the file was exported in (``"cp1251"``,
+    ``"cp932"``), for a file from a machine whose Windows language differs from
+    this one's. Left out, the file is read as UTF-8 if it is valid UTF-8, else in
+    this machine's ANSI code page, which is what the VBE here exports in.
 
     Raises LooseFileReadError if the path cannot be read (it is a directory, is
     missing, or is not readable), so callers never see a raw OS exception.
     """
     file_path = Path(path)
     try:
-        text = _read_text(file_path)
+        text = _read_text(file_path, encoding)
     except OSError as exc:
         raise LooseFileReadError(f"could not read {file_path}: {exc}") from exc
     return loaded_module_from_text(
@@ -63,6 +88,7 @@ def analyze_loose_file(
     conditional_compilation: ConditionalCompilationEnvironment | None = None,
     whole_project: bool = False,
     inline_suppression: bool = True,
+    encoding: str | None = None,
 ) -> list[VbaDiagnostic]:
     """Analyze a single loose VBA file and return its diagnostics.
 
@@ -72,9 +98,10 @@ def analyze_loose_file(
     symbol defined in another file is not reported as undefined. Pass
     ``whole_project=True`` if this file genuinely is the entire project, or use
     analyze_loose_files to analyze several files together with shared context.
-    ``conditional_compilation`` sets the #If/#Const baseline.
+    ``conditional_compilation`` sets the #If/#Const baseline. ``encoding`` is as for
+    load_loose_module.
     """
-    module = load_loose_module(path)
+    module = load_loose_module(path, encoding=encoding)
     results = analyze_project(
         [module.as_module_input()],
         severity_overrides=severity_overrides,
@@ -93,6 +120,7 @@ def analyze_loose_files(
     conditional_compilation: ConditionalCompilationEnvironment | None = None,
     whole_project: bool = True,
     inline_suppression: bool = True,
+    encoding: str | None = None,
 ) -> dict[str, list[VbaDiagnostic]]:
     """Analyze several loose VBA files as one project with cross-module context.
 
@@ -100,9 +128,10 @@ def analyze_loose_files(
     report just the named modules while still indexing every file for context.
     ``conditional_compilation`` sets a project-wide #If/#Const baseline. ``whole_project``
     defaults to True (these files are treated as the whole project); pass False if they
-    are only a fragment, to suppress the rules that need every module.
+    are only a fragment, to suppress the rules that need every module. ``encoding``
+    is as for load_loose_module and applies to every file.
     """
-    modules = [load_loose_module(path) for path in paths]
+    modules = [load_loose_module(path, encoding=encoding) for path in paths]
     inputs = [module.as_module_input() for module in modules]
     return analyze_project(
         inputs,

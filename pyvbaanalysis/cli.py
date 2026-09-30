@@ -98,6 +98,7 @@ def _analyze_loose_group(
     severity_overrides: dict[str, str] | None,
     whole_project: bool,
     inline_suppression: bool,
+    encoding: str | None = None,
 ) -> tuple[list[_ProjectResult], list[str], list[str]]:
     if not paths:
         return [], [], []
@@ -106,7 +107,7 @@ def _analyze_loose_group(
     errors: list[str] = []
     for path in paths:
         try:
-            modules.append(load_loose_module(path))
+            modules.append(load_loose_module(path, encoding=encoding))
             loaded_paths.append(path)
         except LooseFileReadError as exc:
             errors.append(str(exc))
@@ -298,6 +299,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "even on a single file, such as a single-module distribution.",
     )
     parser.add_argument(
+        "--encoding",
+        metavar="NAME",
+        help="the code page loose .bas/.cls/.frm files were exported in, such as cp1251 "
+        "(Russian) or cp932 (Japanese), for files from a machine whose Windows language "
+        "differs from this one's. By default a file is read as UTF-8 if it is valid "
+        "UTF-8, else in this machine's ANSI code page. Office files carry their own.",
+    )
+    parser.add_argument(
         "--no-inline-suppression",
         action="store_true",
         help="ignore '@pyvba-ignore directives in the source and report every "
@@ -365,7 +374,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     inline_suppression = not args.no_inline_suppression
     loose_results, warnings, loose_errors = _analyze_loose_group(
-        loose_paths, args.only, overrides, loose_whole_project, inline_suppression
+        loose_paths, args.only, overrides, loose_whole_project, inline_suppression, args.encoding
     )
     workbook_results, workbook_errors = _analyze_workbook_group(
         workbook_paths, args.only, overrides, inline_suppression

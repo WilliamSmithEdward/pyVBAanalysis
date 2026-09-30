@@ -88,6 +88,17 @@ A path can be a workbook, a folder of exported `.bas` / `.cls` / `.frm` files, o
 single file. The command exits 1 when it finds problems and 0 when the code is
 clean, so it drops into a CI check.
 
+The VBE exports files in the Windows code page of the machine that exported them,
+and that is the page they are read in here by default, unless the file is valid
+UTF-8. For files exported on a machine in another language, name its page:
+
+```
+pyvbaanalysis ./exported_modules --encoding cp1251
+```
+
+`cp1251` is Russian, `cp1253` Greek, `cp932` Japanese, `cp936` Chinese
+(Simplified). Office files carry their own code page and need no option.
+
 ## Scope
 
 This analyzes the VBA inside Office files. It does not run macros and does not need

@@ -40,6 +40,29 @@ def test_cli_reports_diagnostics_and_exits_nonzero(tmp_path: Path, capsys: pytes
     assert "Mod1" in out
 
 
+_RUSSIAN_EXPORT = (
+    'Attribute VB_Name = "Модуль1"\r\nOption Explicit\r\n'
+    "Public Function Total() As Long\r\n"
+    "    Dim Число As Long\r\n    Число = 2\r\n    Total = Число\r\n"
+    "End Function\r\n"
+)
+
+
+def test_cli_encoding_reads_an_export_from_a_russian_windows(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyvbaanalysis.reader import loose_file
+
+    (tmp_path / "Модуль1.bas").write_bytes(_RUSSIAN_EXPORT.encode("cp1251"))
+    # On a Western Windows the default page is 1252, where Ч reads as ×: the
+    # export is garbled without --encoding and clean with it.
+    monkeypatch.setattr(loose_file, "_ansi_code_page", lambda: 1252)
+    assert main([str(tmp_path)]) == 1
+    capsys.readouterr()
+    assert main([str(tmp_path), "--encoding", "cp1251"]) == 0
+    assert "no diagnostics" in capsys.readouterr().out
+
+
 def test_cli_clean_project_exits_zero(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write(tmp_path / "Mod2.bas", _CLEAN)
     code = main([str(tmp_path)])

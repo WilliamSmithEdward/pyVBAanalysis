@@ -197,6 +197,61 @@ def test_loose_file_encoding_fallback(tmp_path: Path) -> None:
     assert module.name == "Mod1" and module.kind is ModuleSymbolKind.STANDARD
 
 
+# (encoding, module name, two local names): what the VBE writes on "Export File"
+# on a Russian, Greek, Japanese or Chinese Windows, in that system's ANSI page.
+_NATIVE_EXPORTS = [
+    ("cp1251", "Модуль1", "Число", "Счёт"),
+    ("cp1253", "Ενότητα", "Αριθμός", "Σύνολο"),
+    ("cp932", "モジュール", "数値", "ソース"),
+    ("cp936", "模块", "数值", "合计"),
+]
+
+
+def _native_export(tmp_path: Path, encoding: str, module: str, a: str, b: str) -> Path:
+    text = (
+        f'Attribute VB_Name = "{module}"\r\nOption Explicit\r\n'
+        "Public Function Total() As Long\r\n"
+        f"    Dim {a} As Long, {b} As Long\r\n"
+        f"    {a} = 2\r\n    {b} = {a} * 3\r\n    Total = {b}\r\n"
+        "End Function\r\n"
+    )
+    path = tmp_path / f"{encoding}.bas"
+    path.write_bytes(text.encode(encoding))
+    return path
+
+
+@pytest.mark.parametrize(("encoding", "module", "a", "b"), _NATIVE_EXPORTS, ids=[r[0] for r in _NATIVE_EXPORTS])
+def test_a_loose_export_decodes_in_the_encoding_given(
+    tmp_path: Path, encoding: str, module: str, a: str, b: str
+) -> None:
+    # Read as cp1252, Cyrillic Ч and ч became × and ÷, and a double-byte
+    # Japanese name broke into stray characters: false compile errors.
+    path = _native_export(tmp_path, encoding, module, a, b)
+    loaded = load_loose_module(path, encoding=encoding)
+    assert loaded.name == module and a in loaded.source and b in loaded.source
+    assert analyze_loose_file(path, whole_project=True, encoding=encoding) == []
+
+
+def test_a_loose_export_defaults_to_the_machines_ansi_code_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The VBE exports in the system ANSI code page, so on the machine that
+    exported a file, that page is the one to read it in: 1251 on a Russian
+    Windows. Only a file brought from another machine needs `encoding`."""
+    from pyvbaanalysis.reader import loose_file
+
+    monkeypatch.setattr(loose_file, "_ansi_code_page", lambda: 1251)
+    path = _native_export(tmp_path, "cp1251", "Модуль1", "Число", "Счёт")
+    assert load_loose_module(path).name == "Модуль1"
+    assert analyze_loose_file(path, whole_project=True) == []
+
+
+def test_a_utf8_byte_order_mark_wins_over_the_encoding_given(tmp_path: Path) -> None:
+    path = tmp_path / "Mod1.bas"
+    path.write_bytes(b"\xef\xbb\xbf" + 'Attribute VB_Name = "Модуль1"\r\nOption Explicit\r\n'.encode("utf-8"))
+    assert load_loose_module(path, encoding="cp1252").name == "Модуль1"
+
+
 def test_analyze_loose_file_suppresses_cross_module_rules(tmp_path: Path) -> None:
     # A single file in isolation must not report undeclared-variable / unknown-call for
     # symbols that may be declared in a module it cannot see.
