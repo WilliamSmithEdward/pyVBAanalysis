@@ -10,6 +10,7 @@ from pyvbaanalysis.conditional import (
     evaluate_conditional_expression,
     index_conditional_compilation,
     module_has_conditional_directives,
+    parse_project_conditional_constants,
 )
 from pyvbaanalysis.parser import parse_module
 from pyvbaanalysis.parser.nodes import Span
@@ -183,3 +184,18 @@ def test_index_conditional_compilation_constants() -> None:
     consts = {c.name: c.value for c in index.constants}
     assert consts == {"A": 1, "B": 2}
     assert len(index.directives) >= 4  # 2 Const, 1 If, 1 EndIf
+
+
+def test_parse_project_conditional_constants() -> None:
+    assert parse_project_conditional_constants("DEBUG_MODE = 1 : Level=-2 : Tag = beta") == {
+        "DEBUG_MODE": 1,
+        "Level": -2,
+        "Tag": "beta",
+    }
+    assert parse_project_conditional_constants(None) == {}
+    assert parse_project_conditional_constants("") == {}
+    # Not an identifier, or no `=`: skipped, as upstream skips it.
+    assert parse_project_conditional_constants("2nd = 1 : Bad Name = 1 : Loose") == {}
+    # Upstream's patterns are ASCII: an Arabic-Indic digit is text, and a
+    # non-ASCII letter makes no name.
+    assert parse_project_conditional_constants("A = ٣ : État = 1") == {"A": "٣"}

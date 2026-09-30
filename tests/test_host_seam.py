@@ -18,7 +18,7 @@ import pytest
 from oracle_support import CASES, case_codes  # type: ignore[attr-defined]
 
 from pyvbaanalysis import analyze_module, analyze_project
-from pyvbaanalysis.diagnostics import AnalyzeModuleOptions
+from pyvbaanalysis.diagnostics import AnalyzeModuleOptions, VbaDiagnostic
 from pyvbaanalysis.host import (
     EMPTY_HOST_MODEL,
     application_member_names,
@@ -556,6 +556,115 @@ def _patch_project_code_page(dir_raw: bytes, code_page: int) -> bytes:
     raise AssertionError("PROJECTCODEPAGE record not found")
 
 
+def _set_project_constants(dir_raw: bytes, text: str, *, unicode: bool = True) -> bytes:
+    """Rewrite the dir stream's PROJECTCONSTANTS record (0x000C, MBCS) and its
+    UTF-16LE partner (0x003C), as the VBE writes the project's Conditional
+    Compilation Arguments. ``unicode=False`` leaves the partner out, as older
+    writers do."""
+    import struct
+
+    out = bytearray()
+    pos = 0
+    while pos + 6 <= len(dir_raw):
+        record_id = struct.unpack_from("<H", dir_raw, pos)[0]
+        length = 12 if record_id == 0x0009 else 6 + struct.unpack_from("<I", dir_raw, pos + 2)[0]
+        if record_id == 0x000C:
+            mbcs = text.encode("cp1252")
+            out += struct.pack("<HI", 0x000C, len(mbcs)) + mbcs
+            if unicode:
+                wide = text.encode("utf-16-le")
+                out += struct.pack("<HI", 0x003C, len(wide)) + wide
+        elif record_id != 0x003C:
+            out += dir_raw[pos : pos + length]
+        pos += length
+        if record_id == 0x000F:
+            return bytes(out) + dir_raw[pos:]
+    raise AssertionError("PROJECTMODULES record not found")
+
+
+_DEBUG_BRANCHES = (
+    "Option Explicit\r\nFunction Main() As String\r\n#If DEBUG_MODE Then\r\n"
+    "    Main = DebugOnlyName\r\n#Else\r\n    Main = ReleaseOnlyName\r\n#End If\r\nEnd Function\r\n"
+)
+
+
+def _workbook_with_constants(tmp_path: Path, text: str, *, unicode: bool = True) -> Path:
+    import io
+    import zipfile
+
+    from pyopenvba.cfb import CFB
+    from pyopenvba.vba import compress, decompress
+
+    path = tmp_path / "Constants.xlsm"
+    with pyopenvba.ExcelFile.create_new(path) as book:
+        book.set_module("Module1", _DEBUG_BRANCHES)
+        book.save()
+    entry = "xl/vbaProject.bin"
+    with zipfile.ZipFile(io.BytesIO(path.read_bytes())) as zin:
+        cfb = CFB.from_bytes(zin.read(entry))
+        dir_raw = decompress(cfb.get_stream_in_storage("VBA", "dir"))
+        cfb.write_stream_in_storage("VBA", "dir", compress(_set_project_constants(dir_raw, text, unicode=unicode)))
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as zout:
+            for info in zin.infolist():
+                zout.writestr(info, cfb.to_bytes() if info.filename == entry else zin.read(info.filename))
+    path.write_bytes(out.getvalue())
+    return path
+
+
+def _undeclared_names(diagnostics: list[VbaDiagnostic]) -> set[str]:
+    return {d.message.split("'")[1] for d in diagnostics if d.code == "undeclared-variable"}
+
+
+@pytest.mark.parametrize(
+    ("text", "unicode", "reported"),
+    [
+        # Excel compiles DEBUG_MODE = 1 with only the #Else name undeclared, and
+        # DEBUG_MODE = 0 with only the #If name undeclared: the inactive branch
+        # is never compiled.
+        ("DEBUG_MODE = 1", True, {"DebugOnlyName"}),
+        ("DEBUG_MODE = 0", True, {"ReleaseOnlyName"}),
+        # An older writer's MBCS record alone, and a second constant after ':'.
+        ("OTHER = 2 : DEBUG_MODE = 1", False, {"DebugOnlyName"}),
+    ],
+    ids=["debug", "release", "mbcs-only"],
+)
+def test_a_projects_conditional_compilation_arguments_select_its_if_branch(
+    tmp_path: Path, text: str, unicode: bool, reported: set[str]
+) -> None:
+    path = _workbook_with_constants(tmp_path, text, unicode=unicode)
+    assert _undeclared_names(analyze_office_file(path)["Module1"]) == reported
+
+
+def test_a_callers_conditional_constant_overrides_the_projects(tmp_path: Path) -> None:
+    from pyvbaanalysis import ConditionalCompilationEnvironment
+
+    path = _workbook_with_constants(tmp_path, "DEBUG_MODE = 1")
+    env = ConditionalCompilationEnvironment(project_constants={"debug_mode": 0})
+    diagnostics = analyze_office_file(path, conditional_compilation=env)["Module1"]
+    assert _undeclared_names(diagnostics) == {"ReleaseOnlyName"}
+
+
+def test_a_project_without_conditional_compilation_arguments_leaves_its_if_undecided(tmp_path: Path) -> None:
+    path = tmp_path / "Plain.xlsm"
+    with pyopenvba.ExcelFile.create_new(path) as book:
+        book.set_module("Module1", _DEBUG_BRANCHES)
+        book.save()
+    assert read_office_project(path).project_constants == {}
+
+
+def test_the_cli_reads_a_projects_conditional_compilation_arguments(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from pyvbaanalysis.cli import main
+
+    path = _workbook_with_constants(tmp_path, "DEBUG_MODE = 0")
+    main([str(path), "--format", "json"])
+    out = capsys.readouterr().out
+    assert "ReleaseOnlyName" in out
+    assert "DebugOnlyName" not in out
+
+
 def _workbook_in_code_page(tmp_path: Path, code_page: int, control: str, module: str) -> Path:
     import io
     import zipfile
@@ -646,7 +755,7 @@ def test_an_access_class_named_in_another_case_by_the_catalog_is_a_class(tmp_pat
         def read_vba_module_with_attributes(self, _name: str) -> str:
             return class_text
 
-    modules, _ = _read_access_project(SimpleNamespace(AccessReader=Reader), tmp_path / "none.accdb")
+    modules, _, _ = _read_access_project(SimpleNamespace(AccessReader=Reader), tmp_path / "none.accdb")
     assert [(m.name, m.kind) for m in modules] == [("basket", ModuleSymbolKind.CLASS)]
 
 

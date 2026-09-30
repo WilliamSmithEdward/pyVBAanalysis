@@ -117,6 +117,13 @@ not reported. The keyword is accepted by `analyze_project`, `analyze_workbook`, 
 `analyze_loose_file` / `analyze_loose_files`; a per-module `ModuleInput.conditional_compilation`
 overrides it for that module.
 
+An Office file carries its own Conditional Compilation Arguments (Tools > VBA
+Project Properties in the VBE, such as `DEBUG_MODE = 1 : TRACE = 0`).
+`analyze_office_file`, `analyze_workbook` and the command line read them and
+apply them to every module, as the VBE does when it compiles the project. A
+`project_constants` entry you pass wins over the file's constant of the same name.
+`read_office_project(path).project_constants` shows what the file declares.
+
 ## Analyze files on disk
 
 ### Loose export files (.bas / .cls / .frm)

@@ -160,6 +160,7 @@ def _analyze_workbook_group(
             only=only or None,
             severity_overrides=severity_overrides or None,
             inline_suppression=inline_suppression,
+            conditional_compilation=project.conditional_compilation(),
             host=project.host,
             referenced_hosts=project.referenced_hosts,
         )

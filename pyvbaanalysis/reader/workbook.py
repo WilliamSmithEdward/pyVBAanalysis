@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from ..conditional import ConditionalCompilationEnvironment
+from ..conditional import ConditionalCompilationEnvironment, ConditionalValue, parse_project_conditional_constants
 from ..host.host_libraries import referenced_host_tokens
 from ..host.host_registry import host_token_for_file_name
 from ..diagnostics import VbaDiagnostic
@@ -134,9 +134,61 @@ def analyze_workbook(
     )
 
 
+# dir stream record ids ([MS-OVBA] 2.3.4.2). PROJECTVERSION has no size field:
+# its body is a fixed 10 bytes. PROJECTMODULES opens the module records, past
+# which no project information record occurs.
+_REC_PROJECTCODEPAGE = 0x0003
+_REC_PROJECTVERSION = 0x0009
+_REC_PROJECTCONSTANTS = 0x000C
+_REC_PROJECTMODULES = 0x000F
+_REC_PROJECTCONSTANTS_UNICODE = 0x003C
+
+
+def _project_conditional_constants_text(dir_raw: bytes) -> str | None:
+    """The project's Conditional Compilation Arguments as the VBE shows them
+    (``Name = Value : Name = Value``), read from its decompressed dir stream, or
+    None when it declares none.
+
+    The UTF-16LE record is preferred, as upstream prefers it: it holds the same
+    text and needs no code page. A writer that emits only the MBCS record gets
+    it decoded in the project's code page.
+    """
+    records: dict[int, bytes] = {}
+    pos = 0
+    while pos + 6 <= len(dir_raw):
+        record_id = int.from_bytes(dir_raw[pos : pos + 2], "little")
+        if record_id == _REC_PROJECTVERSION:
+            pos += 12
+            continue
+        size = int.from_bytes(dir_raw[pos + 2 : pos + 6], "little")
+        records.setdefault(record_id, dir_raw[pos + 6 : pos + 6 + size])
+        pos += 6 + size
+        if record_id == _REC_PROJECTMODULES:
+            break
+    unicode_text = records.get(_REC_PROJECTCONSTANTS_UNICODE)
+    if unicode_text:
+        return unicode_text.decode("utf-16-le", errors="replace")
+    mbcs_text = records.get(_REC_PROJECTCONSTANTS)
+    if not mbcs_text:
+        return None
+    code_page_record = records.get(_REC_PROJECTCODEPAGE, b"")
+    code_page = int.from_bytes(code_page_record[:2], "little") if len(code_page_record) >= 2 else 1252
+    from pyopenvba.vba import encoding_for_codepage
+
+    return mbcs_text.decode(encoding_for_codepage(code_page), errors="replace")
+
+
+def _project_constants(dir_raw: bytes | None) -> dict[str, ConditionalValue]:
+    """The parsed Conditional Compilation Arguments of a dir stream; empty when
+    it declares none or could not be read."""
+    if not dir_raw:
+        return {}
+    return parse_project_conditional_constants(_project_conditional_constants_text(dir_raw))
+
+
 def _read_access_project(
     pyopenvba: Any, file_path: Path
-) -> tuple[list[LoadedModule], list[str] | None]:
+) -> tuple[list[LoadedModule], list[str] | None, dict[str, ConditionalValue]]:
     """Every VBA module in an Access database, and its references' libids. Read-only
     by construction: modules come through pyOpenVBA's AccessReader, and form and
     report designs through an AccessDatabase opened from the file's bytes, which
@@ -174,7 +226,12 @@ def _read_access_project(
                     pyopenvba_standard=(name.lower() not in class_names),
                 )
             )
-    designs = _access_designs(file_path)
+    database = _access_database(file_path)
+    designs = _access_designs(database) if database is not None else {}
+    try:
+        dir_raw = database.dir_stream()[0] if database is not None else None
+    except Exception:
+        dir_raw = None
     modules = [
         replace(
             module,
@@ -187,7 +244,7 @@ def _read_access_project(
         for module in modules
     ]
     libids = _reference_libids(info.references) if info is not None else None
-    return modules, libids
+    return modules, libids, _project_constants(dir_raw)
 
 
 # The Access library's class for a control type whose class is not simply its
@@ -215,20 +272,27 @@ def _access_vba_identifier(name: str) -> str:
     return f"Ctl{converted}" if re.match(r"[0-9_]", converted) else converted
 
 
-def _access_designs(file_path: Path) -> dict[str, tuple[str, tuple[ImplicitMember, ...]]]:
-    """Each form's and report's code module, by lowercased name, with the class
-    its design makes it and the sections and controls that are its members.
-
-    The database is opened from its bytes, so nothing can be written back to the
-    file. A design that cannot be read leaves its module as the dir catalog
-    classed it. Members are never the whole surface: a bound form also has one
-    for every field of its record source, which only the running database knows.
-    """
-    out: dict[str, tuple[str, tuple[ImplicitMember, ...]]] = {}
+def _access_database(file_path: Path) -> Any:
+    """The database opened from its bytes, so nothing can be written back to the
+    file, or None when it cannot be opened that way."""
     try:
         from pyopenvba.access import AccessDatabase
 
-        database = AccessDatabase(file_path.read_bytes())
+        return AccessDatabase(file_path.read_bytes())
+    except Exception:
+        return None
+
+
+def _access_designs(database: Any) -> dict[str, tuple[str, tuple[ImplicitMember, ...]]]:
+    """Each form's and report's code module, by lowercased name, with the class
+    its design makes it and the sections and controls that are its members.
+
+    A design that cannot be read leaves its module as the dir catalog classed
+    it. Members are never the whole surface: a bound form also has one for
+    every field of its record source, which only the running database knows.
+    """
+    out: dict[str, tuple[str, tuple[ImplicitMember, ...]]] = {}
+    try:
         designs = [("form", design) for design in database.forms()]
         designs += [("report", design) for design in database.reports()]
     except Exception:
@@ -298,10 +362,13 @@ def _reference_libids(references: Iterable[Any]) -> list[str]:
     return [ref.libid for ref in references if isinstance(getattr(ref, "libid", None), str)]
 
 
-def _read_office_project(path: str | Path) -> tuple[list[LoadedModule], list[str] | None]:
-    """Every VBA module in an Office macro container, and the libid of every library
-    its project references, from one open of the container. The libids are None when
-    the reference list could not be read, which is different from an empty list."""
+def _read_office_project(
+    path: str | Path,
+) -> tuple[list[LoadedModule], list[str] | None, dict[str, ConditionalValue]]:
+    """Every VBA module in an Office macro container, the libid of every library
+    its project references, and its Conditional Compilation Arguments, from one
+    open of the container. The libids are None when the reference list could not
+    be read, which is different from an empty list."""
     pyopenvba = _require_pyopenvba()
     file_path = Path(path)
     suffix = file_path.suffix.lower()
@@ -332,6 +399,7 @@ def _read_office_project(path: str | Path) -> tuple[list[LoadedModule], list[str
                     )
                 )
             libids = _reference_libids(project.references)
+            constants = _project_constants(getattr(project, "dir_raw", None))
             controls = _form_controls(container)
         modules = [
             replace(module, implicit_members=controls[module.name.lower()])
@@ -339,7 +407,7 @@ def _read_office_project(path: str | Path) -> tuple[list[LoadedModule], list[str
             else module
             for module in modules
         ]
-        return modules, libids
+        return modules, libids, constants
     except WorkbookReadError:
         raise
     except Exception as exc:
@@ -357,22 +425,47 @@ class OfficeProject:
     ``referenced_hosts`` is None when the reference list could not be read, which
     is different from an empty list: a project whose references were not seen has
     not been shown to lack any library.
+
+    ``project_constants`` are the project's Conditional Compilation Arguments
+    (Tools > Project Properties in the VBE), which every module's ``#If`` sees.
     """
 
     modules: list[LoadedModule]
     host: str | None
     referenced_hosts: list[str] | None
+    project_constants: Mapping[str, ConditionalValue] = field(default_factory=dict)
+
+    def conditional_compilation(
+        self, caller: ConditionalCompilationEnvironment | None = None
+    ) -> ConditionalCompilationEnvironment | None:
+        """The #If baseline for this project: the caller's environment with the
+        project's own constants added. A constant the caller sets wins, whatever
+        case it is spelled in, since VBA names are case-insensitive."""
+        if not self.project_constants:
+            return caller
+        caller_constants = dict(caller.project_constants or {}) if caller is not None else {}
+        overridden = {name.lower() for name in caller_constants}
+        merged = {
+            name: value for name, value in self.project_constants.items() if name.lower() not in overridden
+        }
+        merged.update(caller_constants)
+        return ConditionalCompilationEnvironment(
+            compiler_constants=caller.compiler_constants if caller is not None else None,
+            project_constants=merged,
+        )
 
 
 def read_office_project(path: str | Path) -> OfficeProject:
-    """Every VBA module in an Office macro container, with its host and the other
-    Office libraries its project references, from one open of the container."""
-    modules, libids = _read_office_project(path)
+    """Every VBA module in an Office macro container, with its host, the other
+    Office libraries its project references and its Conditional Compilation
+    Arguments, from one open of the container."""
+    modules, libids, constants = _read_office_project(path)
     host = host_token_for_file_name(Path(path).name)
     return OfficeProject(
         modules=modules,
         host=host,
         referenced_hosts=referenced_host_tokens(host, libids) if libids is not None else None,
+        project_constants=constants,
     )
 
 
@@ -401,7 +494,8 @@ def analyze_office_file(
     The file's extension selects the host, so Word VBA answers to Word's model and
     never to Excel's. Returns a dict mapping module name to that module's
     diagnostics; ``only`` reports just the named modules while still indexing the
-    whole project for context.
+    whole project for context. ``conditional_compilation`` adds to, and overrides,
+    the Conditional Compilation Arguments the project itself declares.
     """
     project = read_office_project(path)
     inputs = [module.as_module_input() for module in project.modules]
@@ -409,7 +503,10 @@ def analyze_office_file(
         inputs,
         only=only,
         severity_overrides=severity_overrides,
-        conditional_compilation=conditional_compilation,
+        # The project's own Conditional Compilation Arguments decide its #If
+        # branches, as they do when the VBE compiles it; a constant the caller
+        # passes overrides the file's.
+        conditional_compilation=project.conditional_compilation(conditional_compilation),
         inline_suppression=inline_suppression,
         host=project.host,
         # The container carries the project's reference list, so a library the

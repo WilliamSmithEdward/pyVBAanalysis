@@ -143,7 +143,7 @@ _USES_WORD = "Option Explicit\nPublic Sub S()\n    Dim doc As Word.Document\n   
 
 def _analyze_with_libids(monkeypatch: pytest.MonkeyPatch, libids: list[str] | None) -> list[str]:
     module = loaded_module_from_text(_USES_WORD, name="Module1", pyopenvba_standard=True)
-    monkeypatch.setattr(workbook_mod, "_read_office_project", lambda _path: ([module], libids))
+    monkeypatch.setattr(workbook_mod, "_read_office_project", lambda _path: ([module], libids, {}))
     return [d.code for d in analyze_office_file("Book.xlsm")["Module1"]]
 
 

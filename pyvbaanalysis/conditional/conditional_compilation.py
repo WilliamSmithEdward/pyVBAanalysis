@@ -296,6 +296,31 @@ def collect_conditional_directives(module: ModuleNode) -> list[ConditionalDirect
     return out
 
 
+_PROJECT_CONSTANT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_PROJECT_CONSTANT_INTEGER_RE = re.compile(r"[+-]?[0-9]+")
+
+
+def parse_project_conditional_constants(raw: str | None) -> dict[str, ConditionalValue]:
+    """The project's conditional compilation arguments, as Project Properties
+    stores them (``"DEBUG_MODE = 1 : TRACE = 0"``, the PROJECTCONSTANTS record).
+
+    Ported from parseProjectConditionalConstants in conditionalCompilation.ts:
+    entries split on ``:``; a name that is not an identifier is skipped; an integer
+    value is a number and anything else stays text.
+    """
+    constants: dict[str, ConditionalValue] = {}
+    for entry in (raw or "").split(":"):
+        name, eq, value_text = entry.partition("=")
+        if not eq:
+            continue
+        name = name.strip()
+        value_text = value_text.strip()
+        if not name or _PROJECT_CONSTANT_NAME_RE.fullmatch(name) is None:
+            continue
+        constants[name] = int(value_text) if _PROJECT_CONSTANT_INTEGER_RE.fullmatch(value_text) else value_text
+    return constants
+
+
 def conditional_compiler_constants(
     env: ConditionalCompilationEnvironment | None = None,
 ) -> dict[str, ConditionalValue]:

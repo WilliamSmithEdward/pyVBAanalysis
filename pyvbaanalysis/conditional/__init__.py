@@ -19,6 +19,7 @@ from .conditional_compilation import (
     inactive_node_skip,
     index_conditional_compilation,
     module_has_conditional_directives,
+    parse_project_conditional_constants,
 )
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "inactive_node_skip",
     "index_conditional_compilation",
     "module_has_conditional_directives",
+    "parse_project_conditional_constants",
 ]
