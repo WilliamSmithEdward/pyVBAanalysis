@@ -26,9 +26,9 @@ updates:
     cooldown:
       default-days: 7
 
-  # pip-audit and its dependencies, hash-pinned for the Security workflow.
+  # The CI tool locks (pip-audit, build), hash-pinned in .github/requirements.
   - package-ecosystem: pip
-    directory: /security/requirements
+    directory: /.github/requirements
     schedule:
       interval: weekly
     cooldown:
@@ -37,8 +37,8 @@ updates:
   # The ClamAV and Semgrep engine images, pinned by digest.
   - package-ecosystem: docker
     directories:
-      - /security/docker/clamav
-      - /security/docker/semgrep
+      - /.github/security/clamav
+      - /.github/security/semgrep
     schedule:
       interval: weekly
     cooldown:

@@ -1,0 +1,7 @@
+# pip-audit, which the Security workflow's dependency audit runs from its own
+# venv against the runtime dependencies. Compiled to pip-audit.txt with exact
+# versions and hashes. Dependabot proposes each new release.
+#
+# Regenerate from .github/requirements/:
+#   uv pip compile pip-audit.in --universal --generate-hashes --python-version 3.12 -o pip-audit.txt
+pip-audit==2.10.1

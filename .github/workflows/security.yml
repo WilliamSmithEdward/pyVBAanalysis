@@ -59,9 +59,9 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The engine is pinned by digest (security/docker/semgrep); the registry
+      # The engine is pinned by digest (.github/security/semgrep); the registry
       # rule sets are fetched fresh on every run.
-      - run: docker build -t semgrep-pinned security/docker/semgrep
+      - run: docker build -t semgrep-pinned .github/security/semgrep
       - name: Scan (fails on any finding)
         run: >
           docker run --rm -v "$PWD:/src" -w /src semgrep-pinned
@@ -97,13 +97,13 @@ jobs:
       # The runtime tree without pyvbaanalysis itself, whose version is not on
       # PyPI until the release that ships it; frozen before pip-audit is added.
       # pip-audit runs from its own venv, installed from hash-pinned requirements
-      # (security/requirements/pip-audit.txt, which Dependabot updates).
+      # (.github/requirements/pip-audit.txt, which Dependabot updates).
       - run: |
           python -m pip install .
           python -m pip freeze --exclude pyvbaanalysis > runtime.txt
           cat runtime.txt
           python -m venv "$RUNNER_TEMP/audit"
-          "$RUNNER_TEMP/audit/bin/pip" install --require-hashes --no-deps -r security/requirements/pip-audit.txt
+          "$RUNNER_TEMP/audit/bin/python" -m pip install --require-hashes -r .github/requirements/pip-audit.txt
       - name: Audit the runtime dependencies (fails on any known vulnerability)
         run: >
           "$RUNNER_TEMP/audit/bin/pip-audit" --strict --no-deps -r runtime.txt

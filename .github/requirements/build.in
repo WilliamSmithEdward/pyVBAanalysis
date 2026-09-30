@@ -1,0 +1,8 @@
+# build and twine, which Publish and Malware scan use to build the sdist and
+# wheel and check their metadata. Compiled to build.txt with exact versions
+# and hashes. Dependabot proposes each new release.
+#
+# Regenerate from .github/requirements/:
+#   uv pip compile build.in --universal --generate-hashes --python-version 3.12 -o build.txt
+build==1.6.1
+twine==7.0.0

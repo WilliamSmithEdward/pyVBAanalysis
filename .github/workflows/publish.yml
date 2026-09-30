@@ -31,7 +31,9 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install package + dev/build tools
-        run: python -m pip install -e ".[dev,build]"
+        run: |
+          python -m pip install -e ".[dev]"
+          python -m pip install --require-hashes -r .github/requirements/build.txt
       - name: Test gate (pytest / ruff / mypy)
         run: |
           python -m pytest -q
