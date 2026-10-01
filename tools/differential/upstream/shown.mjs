@@ -12,8 +12,12 @@
 // lacks is the expected-error suppression of @xlide-test procedures.
 import { importXlide } from '../../xlide_source.mjs';
 
-const { analyzeModule } = await importXlide('src/analyzer/index.ts');
+const { analyzeModule, registerBuiltInHostModels } = await importXlide('src/analyzer/index.ts');
 const { analyzeVbaModuleSource } = await importXlide('src/vbaModuleAnalysis.ts');
+
+// XLIDE registers its Word, PowerPoint, Access and VB6 models at load, so this
+// does too. An older pin builds them in and has no such export.
+registerBuiltInHostModels?.();
 
 const key = (d) => `${d.code}:${d.span.start}:${d.span.end}`;
 

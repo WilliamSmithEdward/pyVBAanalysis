@@ -222,6 +222,7 @@ _PROJECT_INDEX_HOOK = """
 
 _VITEST_CONFIG = """// Written by pyVBAanalysis tools/differential/recorder.py and deleted after the run.
 import { configDefaults, defineConfig } from 'vitest/config';
+import upstream from './vitest.config.ts';
 
 export default defineConfig({
     // Every cache stays inside the pin.
@@ -229,9 +230,16 @@ export default defineConfig({
     test: {
         environment: 'node',
         include: ['tests/**/*.test.ts'],
-        // The browser-bundle test fails once the recorder imports node:fs, which
-        // says nothing about the analyzer.
-        exclude: [...configDefaults.exclude, 'tests/webBundle.test.ts'],
+        // Upstream's own setup, which registers its host models as XLIDE does.
+        setupFiles: upstream.test?.setupFiles ?? [],
+        // The browser-bundle tests fail once the recorder imports node:fs, which
+        // says nothing about the analyzer. The host registration test also
+        // analyzes with hosts unregistered, which the port never is.
+        exclude: [
+            ...configDefaults.exclude,
+            'tests/webBundle.test.ts',
+            'tests/vbaHostModelRegistration.test.ts',
+        ],
         testTimeout: 30000,
     },
 });
