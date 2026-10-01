@@ -65,8 +65,8 @@ A malware finding is fixed, or accepted with a written reason in
 [security/malware-allowlist.toml](security/malware-allowlist.toml). An entry
 matches the scanner, the rule and a glob over the path, and an entry for a
 single file also matches its SHA-256, so a changed file needs another
-review. An entry that no longer matches is noted in the scan log and the
-raw results; it does not yet fail the report. CodeQL and Semgrep have no
+review. An entry that no longer matches anything fails the report, naming
+the entry and its reason, until it is removed. CodeQL and Semgrep have no
 accepted list: any CodeQL finding fails Security, and a Semgrep finding can
 be accepted only by a `nosemgrep` comment at the line, listed here with its
 reason. zizmor keeps its exceptions in `.github/zizmor.yml` or inline
