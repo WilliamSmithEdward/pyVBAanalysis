@@ -1,12 +1,13 @@
 # pyVBAanalysis
 
-[![CI](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/ci.yml/badge.svg)](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/ci.yml)
-[![Security](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/security.yml/badge.svg)](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/security.yml)
-[![Malware scan](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/malware-scan.yml/badge.svg)](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/malware-scan.yml)
+[![PyPI version](https://img.shields.io/pypi/v/pyvbaanalysis)](https://pypi.org/project/pyvbaanalysis/)
+[![Python versions](https://img.shields.io/pypi/pyversions/pyvbaanalysis)](https://pypi.org/project/pyvbaanalysis/)
+[![Downloads](https://img.shields.io/pypi/dm/pyvbaanalysis)](https://pypistats.org/packages/pyvbaanalysis)
+[![CI](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/ci.yml)
+[![Security](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/security.yml)
+[![Malware scan](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/malware-scan.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAanalysis/actions/workflows/malware-scan.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/WilliamSmithEdward/pyVBAanalysis/badge)](https://scorecard.dev/viewer/?uri=github.com/WilliamSmithEdward/pyVBAanalysis)
-[![PyPI](https://img.shields.io/pypi/v/pyvbaanalysis)](https://pypi.org/project/pyvbaanalysis/)
-[![Python](https://img.shields.io/pypi/pyversions/pyvbaanalysis)](https://pypi.org/project/pyvbaanalysis/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/WilliamSmithEdward/pyVBAanalysis/blob/main/LICENSE)
 
 Static analysis for Office VBA. It reads your macros and reports likely bugs and the
 errors the VBA compiler would catch, without opening Office or running any code.
