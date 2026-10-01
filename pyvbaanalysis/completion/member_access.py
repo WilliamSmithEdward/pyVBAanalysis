@@ -1119,6 +1119,8 @@ def _build_member_surface_for_type(
                     name=m["name"],
                     kind=m.get("kind", "property"),
                     returns=m.get("returns"),
+                    writable=m.get("writable"),
+                    write_type=m.get("writeType"),
                     signature=m.get("signature"),
                 )
                 for m in (runtime_object.get("members") or [])

@@ -125,6 +125,24 @@ def test_member_readonly_assignment_fires() -> None:
     assert "readonly-member-assignment" in _member_codes(mods, "M")
 
 
+def test_vba_runtime_object_members_keep_their_writability() -> None:
+    # Err's members carry `writable` and a write type in XLIDE's runtime table,
+    # and checkMemberAssignmentTypes reads both. Measured in Excel: the VBE
+    # refuses `Err.LastDllError = 5` (read-only), `Err.Number = "abc"` raises 13,
+    # and `Set Err.Number = Nothing` is "Invalid use of property".
+    def codes(body: str) -> set[str]:
+        src = f"Option Explicit\nPublic Function Main() As Variant\n    {body}\n    Main = 1\nEnd Function\n"
+        result = analyze_project([ModuleInput("Module1", ModuleSymbolKind.STANDARD, src)])
+        return {d.code for d in result["Module1"]}
+
+    assert "readonly-member-assignment" in codes("Err.LastDllError = 5")
+    assert "assignment-type-mismatch" in codes('Err.Number = "abc"')
+    assert "assignment-type-mismatch" in codes('Err.HelpContext = "abc"')
+    assert "set-requires-object" in codes("Set Err.Number = Nothing")
+    assert not codes("Err.Number = 5") & set(_CODES)
+    assert not codes("Err.Description = 5") & set(_CODES)
+
+
 _READONLY_PERSON = (
     "Person",
     ModuleSymbolKind.CLASS,
