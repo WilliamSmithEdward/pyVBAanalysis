@@ -6,6 +6,6 @@
 #   uv pip compile fuzz.in --universal --generate-hashes --python-version 3.12 -o fuzz.txt
 # Dependabot proposes each new release.
 atheris==3.1.0
-pyopenvba==6.3.4
+pyopenvba==6.3.5
 hatchling==1.32.4
 editables==0.6
