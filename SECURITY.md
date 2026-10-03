@@ -81,7 +81,12 @@ beside the line they excuse, each with its reason. The current entries:
   confirms the `$/` self-repository syntax for reusable workflows called
   from `publish.yml`.
 
-No `nosemgrep` comment is in use.
+One `nosemgrep` comment is in use:
+
+- `dangerous-subprocess-use-tainted-env-args` in
+  `tools/hunt/post_issue.py`: a local maintenance script that passes the
+  operator's own issue title and body file to `gh` as list arguments, with
+  no shell. Taking those from the command line is what the script is for.
 
 ## Pinning and updates
 
