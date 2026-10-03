@@ -137,13 +137,14 @@ read and write their data in the current folder: work in `artifacts/hunt/`
 example `python ../../tools/hunt/table3.py ORACLE FOUND`. Never commit corpus
 data, oracle files or exported trees.
 
-As of 2026-10-03 the measured corpus, the exported upstream trees and the
-474 one-off topic generators (`gen_<topic>.py`, one per batch) are still in a
-session scratchpad, not in the repository:
-`C:\Users\William\AppData\Local\Temp\claude\F--GitHub-pyVBAanalysis\a5820d5e-30fe-411c-aedf-a3f9c40f3d5a\scratchpad\hunt\`.
-Copy `all.json`, `all_oracle.json` and the batch files from there into
-`artifacts/hunt/` to continue from it; if it is gone, the corpus has to be
-measured again.
+On the owner's machine, `artifacts/hunt/` already holds the measured corpus
+as of 2026-10-03: every batch pair (`X.json` with `X_oracle.json`), the 474
+one-off topic generators (`gen_<topic>.py`), and the merged `all.json`,
+`all_oracle.json` and `all.0.json` .. `all.5.json`. `merge_batches.py`
+rebuilds `all.json` from the batch files alone, so never delete a batch
+pair. The exported upstream trees are not kept; re-export what you need
+with `export_remote.py`. On a fresh clone the corpus has to be measured
+again.
 
 - `export_remote.py SHA DIR`: download a commit of xlide_vscode as a tarball
   through `gh api` into DIR (no fetch into the owner's checkout). Probes then
