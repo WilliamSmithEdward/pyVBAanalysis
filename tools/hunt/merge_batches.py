@@ -1,17 +1,19 @@
-"""Merge every batch with Excel verdicts (X.json beside X_oracle.json) into
-one cases file and one oracle, labels prefixed with the batch name, so a
-tree can be probed in a single run.
+"""Merge every batch with Excel verdicts (X.json beside X_oracle.json) in the
+current folder into one cases file and one oracle, labels prefixed with the
+batch name, so a tree can be probed in a single run.
 
     python merge_batches.py ALL.json ALL_oracle.json
+
+The result is rebuilt from the batch files alone, so every batch must be in
+the folder: one missing from it drops out of ALL.json.
 """
 
 import json
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
 cases_out, oracle_out = [], {}
-for oracle in sorted(HERE.glob("*_oracle.json")):
+for oracle in sorted(Path.cwd().glob("*_oracle.json")):
     path = oracle.with_name(oracle.name.replace("_oracle.json", ".json"))
     if not path.exists() or path.name == Path(sys.argv[1]).name:
         continue
