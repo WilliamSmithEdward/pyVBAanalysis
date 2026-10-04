@@ -105,12 +105,12 @@ def test_multi_arg_parens_module_qualified() -> None:
     assert "call-statement-multi-arg-parens" in codes
 
 
-def test_multi_arg_parens_unknown_module_silent() -> None:
+def test_multi_arg_parens_unknown_member_fires() -> None:
     codes = _project_codes(
         'Sub mySub()\n    Unknownz.Helper("a", "b")\nEnd Sub\n',
         "Public Sub Helper(a As String, b As String)\nEnd Sub\n",
     )
-    assert "call-statement-multi-arg-parens" not in codes
+    assert "call-statement-multi-arg-parens" in codes
 
 
 def test_multi_arg_parens_excluded_forms_silent() -> None:
@@ -137,8 +137,8 @@ def test_multi_arg_parens_excluded_forms_silent() -> None:
     )
     # An unknown bare name (array-index / external-reference safety).
     assert "call-statement-multi-arg-parens" not in _codes('Sub T()\n    Maybe("a", "b")\nEnd Sub\n')
-    # An object member/property call is deferred to oracle evidence.
-    assert "call-statement-multi-arg-parens" not in _codes("Sub T()\n    obj.Method(1, 2)\nEnd Sub\n")
+    # A member call has the same parenthesis restriction even without its type.
+    assert "call-statement-multi-arg-parens" in _codes("Sub T()\n    obj.Method(1, 2)\nEnd Sub\n")
 
 
 def test_invalid_operator_sequence() -> None:

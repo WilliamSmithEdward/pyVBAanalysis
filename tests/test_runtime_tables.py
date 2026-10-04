@@ -72,4 +72,6 @@ def test_application_member_names() -> None:
     assert "range" in names
     assert "calculate" in names
     assert "cells" in names
-    assert len(names) > 100
+    assert len(names) == 39
+    assert "name" not in names
+    assert "screenupdating" not in names

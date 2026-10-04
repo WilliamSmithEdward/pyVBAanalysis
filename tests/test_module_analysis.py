@@ -101,13 +101,13 @@ def test_a_compile_error_under_resume_next_is_still_reported() -> None:
 
 
 def test_findings_with_one_code_and_span_are_merged_keeping_the_later() -> None:
-    # Three string-arithmetic-coercion findings land on the same "abc" in a
+    # Two string-arithmetic-coercion findings land on the same "abc" in a
     # one-line If; XLIDE shows the last, which names the assignment's target.
     source = (
         "Option Explicit\n"
         "Sub Demo()\n"
         "    Dim x As Long, y As Double\n"
-        "    x = 2\n"
+        "    x = 1\n"
         '    If x = 1 Then y = "abc" + 1\n'
         "    Debug.Print y\n"
         "End Sub\n"
@@ -119,7 +119,7 @@ def test_findings_with_one_code_and_span_are_merged_keeping_the_later() -> None:
     ]
     assert len(shown) == 1
     assert shown[0].startswith("Assignment to 'y' expects Double")
-    assert len(_lines_with(source, "string-arithmetic-coercion", raw=True)) == 3
+    assert len(_lines_with(source, "string-arithmetic-coercion", raw=True)) == 2
 
 
 # Upstream tests/diagnostics/errorHandlerResumeNext.test.ts (XLIDE issues #199,

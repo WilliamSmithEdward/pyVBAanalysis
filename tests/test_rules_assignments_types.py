@@ -242,10 +242,10 @@ def test_member_compatible_assignment_silent() -> None:
     assert not (_member_codes(mods, "M") & set(_CODES))
 
 
-def test_host_member_assignment_silent() -> None:
-    # Host members carry no writability proof, so assignment typing stays silent.
+def test_readonly_host_member_assignment_fires() -> None:
+    # The host model now carries the property's writability.
     src = 'Public Sub S()\n    ThisWorkbook.Name = "x"\nEnd Sub\n'
-    assert not (_codes(src) & set(_CODES))
+    assert (_codes(src) & set(_CODES)) == {"readonly-member-assignment"}
 
 
 def _excel_project_codes(source: str) -> set[str]:

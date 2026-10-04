@@ -80,7 +80,8 @@ def test_a_host_member_expression_has_its_return_type() -> None:
     source = 'Sub T()\n    Dim wb As Workbook\n    Set wb = ActiveSheet.Range("A1")\nEnd Sub\n'
     assert _messages(source, "assignment-object-type-mismatch") == [
         "Object assignment to 'wb' expects Workbook, but got ActiveSheet.Range(\"A1\") As "
-        "Excel.Range. This object type is not compatible with Workbook."
+        "Excel.Range. This object type is not compatible with Workbook. "
+        "This will raise Run-time error '13': Type mismatch."
     ]
 
 
@@ -92,11 +93,11 @@ def test_a_mixed_element_collection_yields_a_late_bound_object() -> None:
 
 def test_a_constant_is_no_object() -> None:
     source = "Sub T()\n    Dim target As Object\n    Set target = vbFalse\n    Set target = VBA.vbFalse\nEnd Sub\n"
-    assert _messages(source, "assignment-object-type-mismatch") == [
-        "Object assignment to 'target' expects Object, but got vbFalse As VbTriState. "
-        "An object assignment requires an object value.",
-        "Object assignment to 'target' expects Object, but got VBA.vbFalse As VbTriState. "
-        "An object assignment requires an object value.",
+    assert _messages(source, "set-requires-object") == [
+        "Set assigns an object to 'target', which expects Object, but vbFalse As VbTriState "
+        "is not an object. This is a VBE compile error: Type mismatch.",
+        "Set assigns an object to 'target', which expects Object, but VBA.vbFalse As VbTriState "
+        "is not an object. This is a VBE compile error: Type mismatch.",
     ]
 
 
@@ -113,7 +114,8 @@ def test_the_statements_a_single_line_if_carries_are_read() -> None:
     )
     assert _messages(source, "assignment-object-type-mismatch") == [
         "Object assignment to 'ws' expects Worksheet, but got r As Range. "
-        "This object type is not compatible with Worksheet."
+        "This object type is not compatible with Worksheet. "
+        "This will raise Run-time error '13': Type mismatch."
     ]
 
 

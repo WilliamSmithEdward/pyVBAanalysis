@@ -8,6 +8,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from pyvbaanalysis import analyze_module_options_for
+from pyvbaanalysis.conditional import ConditionalCompilationEnvironment
 from pyvbaanalysis.diagnostics import analyze_module
 from pyvbaanalysis.evidence import OracleCase, load_audit, load_oracle_cases
 from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
@@ -39,7 +40,8 @@ def case_codes(case: OracleCase) -> frozenset[str]:
 
     Every case was run in a default Excel workbook, so the host is named as Excel,
     and the reference list is known to name no other application's library rather
-    than unknown.
+    than unknown. The fresh projects also have known-empty Conditional Compilation
+    Arguments, so an undefined #If name is provably zero rather than unknown.
 
     Cases are immutable. Reuse their full findings across rule-specific assertions
     so enlarging the corpus does not repeat the same complete analysis per rule.
@@ -50,7 +52,8 @@ def case_codes(case: OracleCase) -> frozenset[str]:
     out: set[str] = set()
     for module in case.modules:
         opts = analyze_module_options_for(
-            index, module.name, _kind(module.module_type), host="excel", referenced_hosts=[]
+            index, module.name, _kind(module.module_type), host="excel", referenced_hosts=[],
+            conditional_compilation=ConditionalCompilationEnvironment(project_constants={}),
         )
         for diag in analyze_module(module.source, opts):
             out.add(diag.code)

@@ -177,7 +177,7 @@ def test_a_set_between_interfaces_of_one_class_compiles() -> None:
             "assignment-object-type-mismatch",
             "a",
             "Object assignment to 'o' expects Other, but got a As IFoo. This object type is not "
-            "compatible with Other.",
+            "compatible with Other. This will raise Run-time error '13': Type mismatch.",
         )
     ]
 

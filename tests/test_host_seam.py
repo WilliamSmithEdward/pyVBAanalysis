@@ -192,10 +192,12 @@ def test_injected_globals_type_per_host(global_name: str, host: str | None, expe
 def test_application_members_are_injected_per_model() -> None:
     excel = application_member_names(None)
     word = application_member_names(host_object_model_for_token("word"))
-    # Volatile is an Excel Application member, so a bare `Volatile` call is known
-    # under Excel and unknown under Word.
-    assert "volatile" in excel
-    assert "volatile" not in word
+    # Only Application members also exposed by Global are callable bare.
+    assert "calculate" in excel
+    assert "calculate" not in word
+    assert "volatile" not in excel
+    assert "activedocument" in word
+    assert "activedocument" not in excel
     # An unmodelled host injects nothing at all.
     assert application_member_names(EMPTY_HOST_MODEL) == frozenset()
 
