@@ -15,6 +15,13 @@ from pyvbaanalysis.diagnostics import (
     rule_metadata_by_code,
 )
 from pyvbaanalysis.diagnostics.model import VbaDiagnostic
+from pyvbaanalysis.diagnostics.rule_metadata import (
+    all_diagnostic_rule_metadata,
+    diagnostic_source_for_code,
+    is_xlide_diagnostic_source,
+    normalize_diagnostic_rule_code,
+    normalize_diagnostic_severity_overrides,
+)
 from pyvbaanalysis.evidence import DATA_DIR, load_audit, load_manifest
 from pyvbaanalysis.parser.nodes import Span
 
@@ -27,15 +34,15 @@ _STRUCTURAL_ONLY_CODES = {
 }
 
 
-def test_catalogue_loads_165_rules() -> None:
+def test_catalogue_loads_219_rules() -> None:
     rules = load_rule_metadata()
-    assert len(rules) == 165
+    assert len(rules) == 219
     assert rules == DIAGNOSTIC_RULES  # the eager catalogue matches a fresh load
 
 
 def test_codes_are_unique() -> None:
     codes = [meta.code for meta in DIAGNOSTIC_RULES.values()]
-    assert len(codes) == len(set(codes)) == 165
+    assert len(codes) == len(set(codes)) == 219
 
 
 def test_fields_are_typed_enums() -> None:
@@ -51,7 +58,7 @@ def test_fields_are_typed_enums() -> None:
 
 def test_rule_metadata_by_code() -> None:
     by_code = rule_metadata_by_code()
-    assert len(by_code) == 165
+    assert len(by_code) == 219
     assert by_code["unterminated-string"].rule_name == "unterminatedString"
     assert by_code["unterminated-string"].default_severity is DiagnosticSeverity.ERROR
 
@@ -65,7 +72,7 @@ def test_codes_align_with_audit() -> None:
 
 def test_manifest_records_rule_metadata() -> None:
     manifest = load_manifest()
-    assert manifest["ruleCount"] == 165
+    assert manifest["ruleCount"] == 219
     assert "rule_metadata.json" in manifest["files"]
     assert sorted(manifest["ruleNames"]) == sorted(DIAGNOSTIC_RULES.keys())
 
@@ -117,3 +124,38 @@ def test_vba_diagnostic_shape() -> None:
     d = VbaDiagnostic(code="x", message="m", severity=DiagnosticSeverity.WARNING, span=Span(0, 1))
     assert d.spec_reference is None and d.data is None
     assert d.severity is DiagnosticSeverity.WARNING
+
+
+def test_all_rule_metadata_is_sorted_by_code_and_holds_the_structural_rules() -> None:
+    codes = [meta.code for meta in all_diagnostic_rule_metadata()]
+    assert codes == sorted(codes)
+    assert len(codes) == 219 + 3
+    assert "missing-block-closer" in codes
+
+
+def test_normalize_severity_overrides_keeps_only_allowed_values_sorted() -> None:
+    assert normalize_diagnostic_severity_overrides(
+        {
+            " Option-Explicit-Missing ": "off",
+            "assignment-type-mismatch": "off",  # an error that may not be turned off
+            "not-a-code": "off",
+            "duplicate-procedure": "loud",
+        }
+    ) == {"option-explicit-missing": "off"}
+    assert normalize_diagnostic_severity_overrides(["off"]) == {}
+    assert normalize_diagnostic_rule_code("  ") is None
+    assert normalize_diagnostic_rule_code(5) is None
+
+
+def test_diagnostic_source_labels() -> None:
+    assert diagnostic_source_for_code("duplicate-procedure") == "XLIDE/VBE"
+    assert diagnostic_source_for_code("not-a-code") == "XLIDE"
+    runtime = next(
+        meta.code
+        for meta in DIAGNOSTIC_RULES.values()
+        if meta.diagnostic_kind is DiagnosticEvidenceKind.DETERMINISTIC_RUNTIME_ERROR and not meta.vbe_compile_equivalent
+    )
+    assert diagnostic_source_for_code(runtime) == "XLIDE/runtime"
+    assert is_xlide_diagnostic_source("XLIDE/style")
+    assert not is_xlide_diagnostic_source("XLIDEx")
+    assert not is_xlide_diagnostic_source(None)

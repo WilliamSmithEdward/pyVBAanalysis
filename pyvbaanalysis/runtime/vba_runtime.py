@@ -32,6 +32,8 @@ class VbaRuntimeParam:
     # Measured in Excel 16.0 (build 20326), XLIDE issue #104. False means Null
     # passes through, which is what Left, Trim, Len and UCase do.
     null_raises: bool = False
+    # An array parameter of `type_` elements: IRR's `ValueArray() As Double`.
+    is_array: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +69,7 @@ def _function_from(raw: Mapping[str, Any]) -> VbaRuntimeFunction:
                     bool(p.get("optional")),
                     bool(p.get("paramArray")),
                     bool(p.get("nullRaises")),
+                    bool(p.get("isArray")),
                 )
                 for p in params
             )
@@ -125,14 +128,19 @@ class VbaRuntimeObject(TypedDict, total=False):
     members: list[VbaRuntimeObjectMember]
 
 
+# The runtime constants (vbCrLf, vbObjectError, ...) and global objects (Err,
+# Debug, UserForms), in upstream's order. Shared read-only data.
+VBA_RUNTIME_CONSTANTS: tuple[VbaRuntimeConstant, ...] = tuple(_raw_runtime_tables()["constants"])
+VBA_RUNTIME_OBJECTS: tuple[VbaRuntimeObject, ...] = tuple(_raw_runtime_tables()["objects"])
+
+
 @lru_cache(maxsize=1)
 def _runtime_tables() -> tuple[
     dict[str, VbaRuntimeConstant], dict[str, VbaRuntimeObject], dict[str, VbaRuntimeObject]
 ]:
-    raw = _raw_runtime_tables()
-    constants_by_lower = {c["name"].lower(): c for c in raw["constants"]}
-    objects_by_lower = {o["name"].lower(): o for o in raw["objects"]}
-    objects_by_type_lower = {o["type"].lower(): o for o in raw["objects"]}
+    constants_by_lower = {c["name"].lower(): c for c in VBA_RUNTIME_CONSTANTS}
+    objects_by_lower = {o["name"].lower(): o for o in VBA_RUNTIME_OBJECTS}
+    objects_by_type_lower = {o["type"].lower(): o for o in VBA_RUNTIME_OBJECTS}
     return constants_by_lower, objects_by_lower, objects_by_type_lower
 
 
@@ -199,12 +207,3 @@ def resolve_vba_library_qualifier(name: str) -> VbaLibraryQualifier | None:
     the name when a host library has one too, Excel's Constants enum among them.
     """
     return _library_qualifiers_by_lower().get(name.lower())
-
-
-# --- sync stubs (2f49b93): replaced as each group is ported ---
-
-
-VBA_RUNTIME_CONSTANTS: object = None
-
-
-VBA_RUNTIME_OBJECTS: object = None

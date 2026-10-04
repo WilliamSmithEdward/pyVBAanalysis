@@ -7,21 +7,30 @@ and the statement classifiers several rules use.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
 from ...call.call_context import bare_call_statement_target as call_statement_target
 from ...completion import MemberCompletionContext
-from ...completion.member_access import ExhaustiveMemberSurface, resolve_exhaustive_member_surface_at
+from ...completion.member_access import (
+    ExhaustiveMemberSurface,
+    project_class_members_index,
+    resolve_exhaustive_member_surface_at,
+)
 from ...conditional import ConditionalActivityTracker, collect_conditional_directives, inactive_node_skip
+from ...constants.integer_constant_expression import bankers_round
+from ...js_compat import js_trim
 from ...lexer.keyword_table import is_reserved_identifier
+from ...lexer.token_helpers import is_decimal_line_number
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import (
     BodyNode,
     ConditionalDirectiveKind,
     ConditionalDirectiveNode,
     DoBlockNode,
+    ForBlockNode,
     ModuleNode,
     Span,
     is_leaf_statement,
@@ -35,6 +44,7 @@ from ..walker import (
     block_footer_line_span,
     block_header_line_span,
     first_executable_token_index,
+    raw_expression_tokens,
     statement_tokens_after_leading_label,
     token_name,
     token_text,
@@ -286,6 +296,12 @@ def _undeclared_reference_skip_indexes(
         return skip
     if token_raw(_at(toks, 1)) == ":" or _is_line_label_only_statement(source, span, toks):
         skip.add(0)  # line label declaration
+    elif (
+        len(toks) == 2
+        and is_decimal_line_number(toks[0])
+        and _is_line_label_only_statement(source, span, toks[1:])
+    ):
+        skip.add(1)  # `10 L1:`, a line number and a label (XLIDE issue #230)
     first_executable = first_executable_token_index(toks)
     if module_declaration_statement_in_procedure(source, span):
         for i in range(first_executable, len(toks)):
@@ -332,6 +348,14 @@ def _undeclared_reference_skip_indexes(
             _at(toks, i + 1)
         ):
             skip.add(i + 1)
+        # `On n GoTo A, B, C` and `On n GoSub A, B` name a label in every slot of
+        # the list, not only the first (XLIDE issue #185).
+        if (word == "goto" or word == "gosub") and _is_on_selector_jump(toks, i):
+            j = i + 1
+            while j < len(toks) and toks[j].raw_text != ":":
+                if _is_potential_variable_reference_token(toks[j]):
+                    skip.add(j)
+                j += 1
         if word == "raiseevent" and _is_potential_variable_reference_token(_at(toks, i + 1)):
             skip.add(i + 1)
         if word == "addressof" and _is_potential_variable_reference_token(_at(toks, i + 1)):
@@ -409,15 +433,9 @@ def _is_qualified_project_member_qualifier(
     member = token_name(toks[index + 2])
     if not qualifier or not member:
         return False
-    qualifier_lower = qualifier.lower()
     member_lower = member.lower()
-    surface: VbaProjectClassMembers | None = None
-    for candidate in project_members:
-        if candidate.name.lower() != qualifier_lower:
-            continue
-        if surface is not None:
-            return False
-        surface = candidate
+    # An ambiguous qualifier is absent from the index, so it is not skipped.
+    surface = project_class_members_index(project_members).get(qualifier.lower())
     if surface is None:
         return False
     if surface.kind == "standardModule":
@@ -548,6 +566,19 @@ def _is_label_reference_keyword(word: str) -> bool:
     return word == "goto" or word == "gosub" or word == "resume"
 
 
+def _is_on_selector_jump(toks: Sequence[VbaToken], index: int) -> bool:
+    """Whether the GoTo or GoSub at `index` belongs to `On expression GoTo`, not
+    `On Error GoTo`."""
+    for k in range(index - 1, -1, -1):
+        word = token_text(toks[k])
+        if word == "on":
+            following = token_text(_at(toks, k + 1))
+            return following != "error" and following != "local"
+        if word == "then" or word == "else" or toks[k].raw_text == ":":
+            return False
+    return False
+
+
 def _is_named_argument_label(toks: Sequence[VbaToken], index: int) -> bool:
     if not _is_potential_variable_reference_token(_at(toks, index)):
         return False
@@ -609,31 +640,191 @@ def scan_conditional_compilation_branch_order(mod: ModuleNode) -> ConditionalBra
     return ConditionalBranchOrderScan(issues=issues, malformed_block_spans=malformed_block_spans)
 
 
-# --- sync stubs (2f49b93): replaced as each group is ported ---
+# -- names a statement or a procedure mentions --------------------------------
 
 
-class RepeatedKeyRule:
-    pass
+def names_in(source: str, span: Span) -> set[str]:
+    """The lowercased names a statement mentions, which a block containing it may
+    change (XLIDE issue #237)."""
+    out: set[str] = set()
+    for tok in statement_tokens_after_leading_label(source, span):
+        name = token_name(tok)
+        if name:
+            out.add(name.lower())
+    return out
 
 
-def names_in(*args: object, **kwargs: object) -> None:
+class _HasBody(Protocol):
+    @property
+    def body(self) -> Sequence[BodyNode]: ...
+
+
+def name_mentions(
+    source: str, procedure: _HasBody, activity: ConditionalActivityTracker | None
+) -> dict[str, int]:
+    """How many times each name appears in the procedure's active code: its
+    statements, and the header and footer lines of its blocks, where
+    `For Each v In c` assigns v."""
+    procedure_body = procedure.body
+    out: dict[str, int] = {}
+
+    def count(span: Span) -> None:
+        for tok in statement_tokens(source, span):
+            name = token_name(tok)
+            if name:
+                lower = name.lower()
+                out[lower] = out.get(lower, 0) + 1
+
+    for node in iter_body_nodes(procedure_body, inactive_node_skip(activity)):
+        if is_leaf_statement(node):
+            count(node.span)
+        elif isinstance(getattr(node, "body", None), list):
+            count(block_header_line_span(source, node.span))
+            count(block_footer_line_span(source, node.span))
+    return out
+
+
+# -- For Each's source and the array bound reads -------------------------------
+
+# Words that open no variable, member or call.
+_NON_SOURCE_WORDS: frozenset[str] = frozenset({"null", "true", "false", "nothing", "empty", "new", "not", "typeof"})
+
+# Words that join two operands.
+_OPERATOR_WORDS: frozenset[str] = frozenset({"and", "or", "xor", "eqv", "imp", "mod", "like", "is"})
+
+_LITERAL_KINDS = frozenset(
+    {TokenKind.INTEGER_LITERAL, TokenKind.FLOAT_LITERAL, TokenKind.STRING_LITERAL, TokenKind.DATE_LITERAL}
+)
+
+
+def source_expression_syntax_problem(source_expression: str) -> str | None:
+    """Why an expression cannot stand where the grammar wants a variable, a member
+    chain or a call, or None: For Each's source (XLIDE issue #239) and the array
+    UBound and LBound read, each measured in Excel 16.0. `In 5`, `In "abc"`,
+    `In (c)`, `In New Collection`, `In -v`, `In v & v`, `In Len("abc")`, Len being a
+    special form, and `UBound(5)` are each "Syntax error". `In Split("a" & "b")`,
+    `In [A1:B2]` and `UBound(Array(1))` compile."""
+    # Lexed alone, a leading '#' reads as a directive: `#1/1/2000#`.
+    text = js_trim(source_expression)
+    if _DATE_LITERAL_TEXT_RE.fullmatch(text):
+        return f"the literal {text}"
+    significant = [
+        tok
+        for tok in raw_expression_tokens(text)
+        if tok.kind is not TokenKind.COMMENT and tok.kind is not TokenKind.NEWLINE
+    ]
+    if not significant:
+        return None
+    first = significant[0]
+    first_word = token_text(first)
+    if first.kind in _LITERAL_KINDS:
+        return f"the literal {first.raw_text}"
+    if first.raw_text in ("(", "-", "+"):
+        return f"an expression that opens with '{first.raw_text}'"
+    if first.kind is TokenKind.KEYWORD and (
+        first_word in _NON_SOURCE_WORDS
+        or (first_word == "len" and len(significant) > 1 and significant[1].raw_text == "(")
+    ):
+        return f"'{first.raw_text}'"
+    depth = 0
+    for tok in significant[1:]:
+        if tok.raw_text in ("(", "["):
+            depth += 1
+        elif tok.raw_text in (")", "]"):
+            depth -= 1
+        elif depth == 0 and (
+            (tok.kind is TokenKind.OPERATOR and tok.raw_text != "!")
+            or (tok.kind is TokenKind.KEYWORD and token_text(tok) in _OPERATOR_WORDS)
+        ):
+            return f"an expression joined by '{tok.raw_text}'"
     return None
 
 
-def name_mentions(*args: object, **kwargs: object) -> None:
-    return None
+# /^#[^#]*#$/
+_DATE_LITERAL_TEXT_RE = re.compile(r"#[^#]*#")
 
 
-def source_expression_syntax_problem(*args: object, **kwargs: object) -> None:
-    return None
+# -- loops that may be left -----------------------------------------------------
+
+_LOOP_LEAVES: frozenset[str] = frozenset({"for", "sub", "function", "property"})
 
 
-def body_may_leave_loop(*args: object, **kwargs: object) -> None:
-    return None
+def body_may_leave_loop(source: str, body: Sequence[BodyNode]) -> bool:
+    """True when a statement in the loop's body can leave the loop before its last
+    pass: `Exit For` (not one belonging to a nested For), `Exit Sub`/`Function`/
+    `Property`, `GoTo`, or `End` (XLIDE issues #145, #356). Walked on an explicit
+    stack; the answer does not depend on the order statements are seen in."""
+    stack: list[tuple[Sequence[BodyNode], bool]] = [(body, False)]
+    while stack:
+        nodes, inside_nested_for = stack.pop()
+        for node in nodes:
+            if is_leaf_statement(node):
+                toks = statement_tokens_after_leading_label(source, node.span)
+                for i, tok in enumerate(toks):
+                    word = token_text(tok)
+                    if word == "goto" or (word == "end" and len(toks) == 1):
+                        return True
+                    if word == "exit":
+                        target = token_text(_at(toks, i + 1))
+                        if target in _LOOP_LEAVES and (target != "for" or not inside_nested_for):
+                            return True
+            else:
+                inner = getattr(node, "body", None)
+                if isinstance(inner, list):
+                    stack.append((inner, inside_nested_for or isinstance(node, ForBlockNode)))
+    return False
 
 
-ONE_VALUE_BUILTINS: object = None
+# -- built-ins that read their argument's value ----------------------------------
+
+# VBA built-ins that read their argument's value: on an object still Nothing that
+# raises 91 (XLIDE issue #415, measured in Excel 16.0 with CStr and Len).
+ONE_VALUE_BUILTINS: frozenset[str] = frozenset(
+    {"cstr", "len", "lenb", "clng", "cint", "cdbl", "csng", "ccur", "cbool", "cdate", "val", "trim", "ucase", "lcase"}
+)
 
 
-def builtin_name_before(*args: object, **kwargs: object) -> None:
-    return None
+def builtin_name_before(toks: Sequence[VbaToken], index: int) -> int:
+    """The index of the name whose argument list holds toks[index], `$` spellings
+    included, or -1."""
+    depth = 0
+    for i in range(index - 1, -1, -1):
+        raw = toks[i].raw_text
+        if raw == ")":
+            depth += 1
+        elif raw == "(":
+            if depth == 0:
+                at = i - 2 if token_raw(_at(toks, i - 1)) == "$" else i - 1
+                if token_raw(_at(toks, at - 1)) == "." and token_text(_at(toks, at - 2)) != "vba":
+                    return -1
+                return at
+            depth -= 1
+    return -1
+
+
+__all__ = [
+    "DEFTYPE_KEYWORDS",
+    "ONE_VALUE_BUILTINS",
+    "ConditionalBranchOrderIssue",
+    "ConditionalBranchOrderScan",
+    "NameTokenHit",
+    "ValueReadReference",
+    "bankers_round",
+    "body_may_leave_loop",
+    "builtin_name_before",
+    "declaration_name_hit",
+    "for_each_undeclared_reference_span",
+    "is_bare_or_vba_qualified_intrinsic_call",
+    "leading_declaration_modifier_count",
+    "module_declaration_statement_in_procedure",
+    "name_mentions",
+    "name_token_hit",
+    "names_in",
+    "report_repeated_keys",
+    "resolve_exhaustive_member_surface",
+    "scan_conditional_compilation_branch_order",
+    "source_expression_syntax_problem",
+    "token_raw",
+    "value_read_references",
+]
+

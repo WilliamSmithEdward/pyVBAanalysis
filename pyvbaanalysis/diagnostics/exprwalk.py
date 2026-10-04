@@ -27,7 +27,7 @@ from ..parser.nodes import (
     UnaryExpr,
     iter_body_nodes,
 )
-from .walker import active_module_members
+from .walker import ProcedureWalkHooks, active_module_members
 
 # A rule's per-procedure expression visitor: the factory does per-member setup and
 # returns a callback invoked for every expression node in that member's body.
@@ -48,12 +48,18 @@ def walk_procedure_expressions(
     mod: ModuleNode,
     activity: ConditionalActivityTracker | None,
     factories: Sequence[ProcedureExpressionVisitor],
+    hooks: ProcedureWalkHooks | None = None,
 ) -> None:
     """Run ONE shared expression walk per active procedure, dispatching to each visitor."""
     if len(factories) == 0:
         return
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
+            continue
+        if hooks is not None and hooks.before_member is not None:
+            hooks.before_member(member)
+        # Skipped before its visitors are built, as in walk_procedure_statements.
+        if hooks is not None and hooks.skip_body is not None and hooks.skip_body(member):
             continue
         visitors = [factory(member) for factory in factories]
         for_each_expression_in_body(member.body, activity, _fan_out_expressions(visitors))

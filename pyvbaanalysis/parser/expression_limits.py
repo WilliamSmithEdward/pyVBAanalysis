@@ -2,8 +2,5 @@
 
 from __future__ import annotations
 
-
-# --- sync stubs (2f49b93): replaced as each group is ported ---
-
-
-MAX_EXPRESSION_DEPTH: object = None
+# Shared recovery limit for recursive expression parsing, value folding and array shapes.
+MAX_EXPRESSION_DEPTH = 256

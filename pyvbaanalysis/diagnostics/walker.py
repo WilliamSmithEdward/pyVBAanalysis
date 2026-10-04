@@ -1,14 +1,18 @@
 """Shared AST/statement traversal utilities for the diagnostics engine.
 
 Ported from walker.ts. Pure: no rule logic, no diagnostics. The dataflow-coupled
-helper tracked_locals_named_whole lives in the dataflow module, not here.
+helper tracked_locals_named_whole lives in the dataflow module; locals_named_whole
+here reaches it through a function-local import. for_each_statement lives in
+parser/statement_walk.py and is re-exported.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
-from typing import Protocol
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
+from dataclasses import dataclass, replace
+from typing import Protocol, cast
 
 from ..conditional import ConditionalActivityTracker, inactive_node_skip
 from ..lexer.token_helpers import match_paren_from, token_word
@@ -16,15 +20,19 @@ from ..lexer.token_helpers import statement_tokens as lex_statement_tokens
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..parser.nodes import (
     BodyNode,
+    IfBlockNode,
     LeafStatementNode,
     ModuleMember,
     ModuleNode,
     ProcedureNode,
     Span,
+    StatementNode,
     VariableGroupNode,
     is_leaf_statement,
     iter_body_nodes,
 )
+from ..parser.statement_walk import for_each_statement
+from .block_headers import block_header_statements
 from .context import statement_tokens
 
 # Re-export the lexer helpers under the walker's names so the diagnostics engine
@@ -38,8 +46,13 @@ __all__ = [
     "is_inactive_node",
     "active_module_members",
     "for_each_statement",
+    "for_each_statement_with_headers",
+    "block_header_statements",
     "ProcedureStatementVisitor",
+    "ProcedureWalkHooks",
+    "StatementHeaders",
     "walk_procedure_statements",
+    "locals_named_whole",
     "for_each_variable_group",
     "for_each_body_statement",
     "for_each_procedure_body_line",
@@ -64,6 +77,7 @@ __all__ = [
 ]
 
 _DECIMAL_RE = re.compile(r"^\d+$")
+_LEADING_HASH_RE = re.compile(r"^[ \t]*#")
 
 
 class _HasSpan(Protocol):
@@ -83,15 +97,61 @@ def active_module_members(
     return [member for member in mod.members if not is_inactive_node(activity, member)]
 
 
-def for_each_statement(
+def for_each_statement_with_headers(
+    source: str,
     body: Sequence[BodyNode],
     visit: Callable[[LeafStatementNode], None],
     activity: ConditionalActivityTracker | None = None,
 ) -> None:
-    """Walk every leaf statement in a body, descending into nested blocks."""
-    for node in iter_body_nodes(body, inactive_node_skip(activity)):
-        if is_leaf_statement(node):
-            visit(node)
+    """for_each_statement, with each block's header line visited as a statement of
+    its own before the body, and a Do's `Loop While` line after it
+    (block_header_statements, XLIDE issue #233). For a rule that judges an
+    expression wherever it stands."""
+    _walk_with_headers(
+        body, activity, visit, visit, lambda node: block_header_statements(source, node)
+    )
+
+
+def _walk_with_headers(
+    body: Sequence[BodyNode],
+    activity: ConditionalActivityTracker | None,
+    visit: Callable[[LeafStatementNode], None],
+    visit_header: Callable[[LeafStatementNode], None],
+    headers_of: Callable[[BodyNode], tuple[StatementNode | None, StatementNode | None]],
+    opening_of: Callable[[BodyNode], StatementNode | None] | None = None,
+) -> None:
+    """Every leaf statement of a body, with each block's headers around its body:
+    `before` and the `opening_of` line ahead of it, `after` behind it. On an
+    explicit stack, where upstream recurses once per block: a block pushes its
+    `after` line and then its body, so the body is walked first."""
+    stack: list[Iterator[BodyNode] | StatementNode] = [iter(body)]
+    while stack:
+        top = stack[-1]
+        if isinstance(top, StatementNode):
+            stack.pop()
+            visit_header(top)
+            continue
+        for node in top:
+            if is_inactive_node(activity, node):
+                continue
+            if is_leaf_statement(node):
+                visit(node)
+                continue
+            child = getattr(node, "body", None)
+            if isinstance(child, list):
+                before, after = headers_of(node)
+                if before is not None:
+                    visit_header(before)
+                if opening_of is not None:
+                    opening = opening_of(node)
+                    if opening is not None:
+                        visit_header(opening)
+                if after is not None:
+                    stack.append(after)
+                stack.append(iter(child))
+                break
+        else:
+            stack.pop()
 
 
 # A per-procedure visitor of the shared statement walk: given a procedure, returns
@@ -99,35 +159,95 @@ def for_each_statement(
 ProcedureStatementVisitor = Callable[[ProcedureNode], "Callable[[LeafStatementNode], None] | None"]
 
 
-def _fan_out_statements(
-    callbacks: list[Callable[[LeafStatementNode], None]],
-) -> Callable[[LeafStatementNode], None]:
-    def visit(stmt: LeafStatementNode) -> None:
-        for callback in callbacks:
-            callback(stmt)
+@dataclass(frozen=True, slots=True)
+class ProcedureWalkHooks:
+    """Hooks of the shared statement and expression walks."""
 
-    return visit
+    # Called before a procedure's factories run (incremental attribution).
+    before_member: Callable[[ProcedureNode], None] | None = None
+    # When it returns true, the member is skipped before its visitors are built.
+    skip_body: Callable[[ProcedureNode], bool] | None = None
+
+
+# Upstream's `{ source, takes }`: the module's text, and for each visitor whether
+# it also takes block headers (block_header_statements). Without it no visitor does.
+StatementHeaders = tuple[str, Sequence[bool]]
 
 
 def walk_procedure_statements(
     mod: ModuleNode,
     activity: ConditionalActivityTracker | None,
     visitors: Sequence[ProcedureStatementVisitor],
+    hooks: ProcedureWalkHooks | None = None,
+    headers: StatementHeaders | None = None,
 ) -> None:
     """Run every per-statement rule on ONE walk over active procedures/statements."""
+    takes_headers: Sequence[bool] = headers[1] if headers is not None else ()
     if len(visitors) == 0:
         return
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
+        if hooks is not None and hooks.before_member is not None:
+            hooks.before_member(member)
+        # Skipped before its visitors are built: an incremental pass walks the
+        # edited procedure only, and asking every rule for a visitor for each of
+        # the others cost a large module tens of milliseconds a keystroke. A
+        # visitor is per member (cross-member state belongs in a run rule), so a
+        # skipped one had nothing to contribute.
+        if hooks is not None and hooks.skip_body is not None and hooks.skip_body(member):
+            continue
         callbacks: list[Callable[[LeafStatementNode], None]] = []
-        for visitor in visitors:
+        header_callbacks: list[Callable[[LeafStatementNode], None]] = []
+        for k, visitor in enumerate(visitors):
             callback = visitor(member)
             if callback is not None:
                 callbacks.append(callback)
+                if k < len(takes_headers) and takes_headers[k]:
+                    header_callbacks.append(callback)
         if len(callbacks) == 0:
             continue
-        for_each_statement(member.body, _fan_out_statements(callbacks), activity)
+        _walk_procedure_body(member.body, activity, callbacks, header_callbacks, headers)
+
+
+def _walk_procedure_body(
+    body: Sequence[BodyNode],
+    activity: ConditionalActivityTracker | None,
+    callbacks: list[Callable[[LeafStatementNode], None]],
+    header_callbacks: list[Callable[[LeafStatementNode], None]],
+    headers: StatementHeaders | None,
+) -> None:
+    def visit(stmt: LeafStatementNode) -> None:
+        for callback in callbacks:
+            callback(stmt)
+
+    if headers is None or not header_callbacks:
+        for_each_statement(body, visit, activity)
+        return
+    source = headers[0]
+
+    def visit_header(stmt: LeafStatementNode) -> None:
+        # A header line goes to the visitors that take headers only.
+        for callback in header_callbacks:
+            callback(stmt)
+
+    def opening_of(node: BodyNode) -> StatementNode | None:
+        # A block If's own line: `If 10 / d > 1 Then` evaluates its condition as a
+        # statement does (XLIDE issue #492). Its ElseIf lines are statements of the
+        # body already.
+        if not isinstance(node, IfBlockNode) or not node.branches:
+            return None
+        opening = node.branches[0].header_span
+        return StatementNode(span=opening, raw=source[opening.start : opening.end])
+
+    _walk_with_headers(
+        body,
+        activity,
+        visit,
+        visit_header,
+        lambda node: block_header_statements(source, node),
+        opening_of,
+    )
 
 
 def for_each_variable_group(
@@ -196,7 +316,15 @@ def raw_expression_tokens(text: str) -> list[VbaToken]:
     of them, and each distinct raw string sent there evicted the module, so the next
     ordinary statement re-lexed the whole module (XLIDE issue #139, a 17x slowdown
     on real projects)."""
-    return lex_statement_tokens(text, 0, len(text))
+    # A `#` that opens a line is a directive to the lexer, and an expression never
+    # opens one: `#12/31/9999#` is a date (XLIDE issue #255). It is lexed behind an
+    # `=` and moved back, so every offset stays the text's.
+    if not _LEADING_HASH_RE.match(text):
+        return lex_statement_tokens(text, 0, len(text))
+    return [
+        replace(tok, start=tok.start - 1, end=tok.end - 1)
+        for tok in lex_statement_tokens(f"={text}", 0, len(text) + 1)[1:]
+    ]
 
 
 def statement_tokens_after_leading_label(source: str, span: Span) -> list[VbaToken]:
@@ -319,11 +447,54 @@ def set_assignment_target(
     )
 
 
+def locals_named_whole(
+    source: str,
+    span: Span,
+    tracked: Mapping[str, object] | AbstractSet[str],
+    read_only_intrinsics: AbstractSet[str],
+) -> dict[str, int]:
+    """Every tracked local the statement names whole - bare, not the statement's
+    own head, not a member access, not indexed - in an argument position: a call
+    statement's argument, an argument to a function inside an expression, or an
+    argument to a qualified member call. VBA passes by reference by default, so
+    the callee may have assigned or allocated the caller's variable and its state
+    is unknown from that point on (XLIDE #70). A mention the callee provably only
+    reads is left out: the operand of `Is`, and the argument of an intrinsic in
+    `read_only_intrinsics`. The value is the first such mention's absolute
+    offset, so a rule can tell an access before the pass from one after it within
+    the same statement."""
+    from .callee_arguments import callee_keeps_argument
+    from .dataflow import tracked_locals_named_whole
+
+    # A procedure of the module that cannot change the argument keeps what is
+    # known about it (XLIDE issue #449).
+    keeps: object = callee_keeps_argument(source)
+    return tracked_locals_named_whole(
+        statement_tokens_after_leading_label(source, span),
+        span.start,
+        lambda lower: lower in tracked,
+        read_only_intrinsics,
+        frozenset(),
+        cast("Callable[[str, int, str | None], bool]", keeps),
+    )
+
+
 def block_header_line_span(source: str, span: Span) -> Span:
+    """The block's header line, with the lines a ` _` continues it onto."""
     nl = first_line_break_at_or_after(source, span.start)
+    while 0 <= nl <= span.end and _ends_in_continuation(source, span.start, nl):
+        nxt = nl + 2 if source[nl] == "\r" and nl + 1 < len(source) and source[nl + 1] == "\n" else nl + 1
+        nl = first_line_break_at_or_after(source, nxt)
     if nl < 0 or nl > span.end:
         return span
     return Span(span.start, nl)
+
+
+def _ends_in_continuation(source: str, start: int, nl: int) -> bool:
+    i = nl - 1
+    while i >= start and source[i] in (" ", "\t"):
+        i -= 1
+    return i > start and source[i] == "_" and source[i - 1] in (" ", "\t")
 
 
 def block_footer_line_span(source: str, span: Span) -> Span:
@@ -360,18 +531,3 @@ def physical_line_span_at_offset(source: str, offset: int) -> Span:
     if end > start and source[end - 1] == "\r":
         end -= 1
     return Span(start, end)
-
-
-# --- sync stubs (2f49b93): replaced as each group is ported ---
-
-
-def for_each_statement_with_headers(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("forEachStatementWithHeaders not ported yet")
-
-
-class ProcedureWalkHooks:
-    pass
-
-
-def locals_named_whole(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("localsNamedWhole not ported yet")

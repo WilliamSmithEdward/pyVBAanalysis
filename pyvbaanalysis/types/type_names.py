@@ -53,17 +53,12 @@ def is_string_concatenation_operand_type(type_name: str) -> bool:
     )
 
 
-_HAS_DIGIT = re.compile(r"[0-9]")
-_BOOLEAN_STRING = re.compile(r"^(true|false|0|-?1)$", re.IGNORECASE)
-
-
 def is_provably_non_numeric_string(value: str) -> bool:
-    trimmed = value.strip()
-    return bool(trimmed) and _HAS_DIGIT.search(trimmed) is None
+    """Whether no locale converts the string to a number (see string_conversion)."""
+    # Function-local: diagnostics/ imports this module while it initializes.
+    from ..diagnostics.string_conversion import is_invalid_numeric_string
 
-
-def is_boolean_string(value: str) -> bool:
-    return _BOOLEAN_STRING.match(value.strip()) is not None
+    return is_invalid_numeric_string(value)
 
 
 @dataclass(frozen=True, slots=True)

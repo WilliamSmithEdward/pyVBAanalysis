@@ -9,6 +9,7 @@ from pyvbaanalysis import line_col, validate_severity_overrides
 
 _ROOT_EXPORTS = [
     "analyze_module",
+    "AnalysisFailure",
     "analyze_project",
     "analyze_workbook",
     "analyze_loose_file",

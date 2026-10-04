@@ -28,13 +28,14 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from ...completion.event_handlers import event_handler_procedure_for_name
 from ...conditional import ConditionalActivityTracker
 from ...docs.doc_comment import attached_comments_start, whole_line_span
-from ...lexer.token_helpers import identifier_words
+from ...js_compat import JS_WHITESPACE
+from ...lexer.token_helpers import first_token_at_or_after, identifier_words
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import (
@@ -233,7 +234,7 @@ def _collect_references(
     have been classified as a read or a write, and on a large module that work
     cost more than the rest of the rule."""
     out: dict[str, list[_Reference]] = {}
-    first = _first_token_at_or_after(tokens, start)
+    first = first_token_at_or_after(tokens, start)
     prev = tokens[first - 1] if first >= 1 else None
     prev2 = tokens[first - 2] if first >= 2 else None
     for i in range(first, len(tokens)):
@@ -264,19 +265,6 @@ def _collect_references(
             prev2 = prev
             prev = token
     return out
-
-
-def _first_token_at_or_after(tokens: Sequence[VbaToken], offset: int) -> int:
-    """Index of the first token starting at or after `offset` (tokens are in source
-    order)."""
-    low, high = 0, len(tokens)
-    while low < high:
-        mid = (low + high) >> 1
-        if tokens[mid].start < offset:
-            low = mid + 1
-        else:
-            high = mid
-    return low
 
 
 def _is_member_name(prev: VbaToken | None) -> bool:
@@ -434,6 +422,22 @@ class _UnreachableRun:
     nodes: Iterator[BodyNode]
     terminator: str | None = None
     dead: Span | None = None
+    # A Dim, Static or Const is not run: it names the variable for the whole
+    # procedure, so code after it still compiles with it. The fix must not
+    # delete one (issue #466, measured in Excel 16.0).
+    declarations: list[Span] = field(default_factory=list)
+    declares_inside: bool = False
+
+
+# Under On Error Resume Next a Resume with no error pending raises 20, which is
+# skipped, so the next line runs (issue #446, measured in Excel 16.0).
+# Upstream's /\bon\s+(?:local\s+)?error\s+resume\s+next\b/i, with JavaScript's
+# ASCII word boundary and Unicode-aware `\s` spelled out.
+_JS_S = "[" + re.escape(JS_WHITESPACE) + "]"
+_ON_ERROR_RESUME_NEXT_RE = re.compile(
+    rf"(?<![A-Za-z0-9_])on{_JS_S}+(?:local{_JS_S}+)?error{_JS_S}+resume{_JS_S}+next(?![A-Za-z0-9_])",
+    re.IGNORECASE | re.ASCII,
+)
 
 
 def check_unreachable_code(
@@ -441,19 +445,29 @@ def check_unreachable_code(
 ) -> None:
     """Statements after an unconditional exit in the same block, until a landing
     point."""
+    resume_runs = False
 
-    def flush(run: _UnreachableRun) -> None:
+    def report(run: _UnreachableRun) -> None:
         if run.dead is not None and run.terminator is not None:
             start, end = whole_line_span(source, run.dead.start, run.dead.end)
+            keeps = run.declares_inside or any(
+                decl.start < end and decl.end > start for decl in run.declarations
+            )
             push(
                 "unreachableCode",
                 f"Unreachable code after '{run.terminator}'.",
                 run.dead,
-                VbaDiagnosticData(
+                None
+                if keeps
+                else VbaDiagnosticData(
                     remove_unreachable_code=VbaRemoveUnreachableCodeData(VbaEdit(Span(start, end), ""))
                 ),
             )
         run.dead = None
+        run.declares_inside = False
+
+    def flush(run: _UnreachableRun) -> None:
+        report(run)
         run.terminator = None
 
     def walk_body(body: Sequence[BodyNode]) -> None:
@@ -471,6 +485,10 @@ def check_unreachable_code(
                 if isinstance(node, ConditionalDirectiveNode):
                     flush(run)
                     continue
+                if run.terminator is not None and _is_declaration(source, node):
+                    report(run)
+                    run.declarations.append(node.span)
+                    continue
                 if is_leaf_statement(node) and node.single_line_if_tail:
                     # It runs only with its single-line If's branch (MS-VBAL 5.4.2.9):
                     # an Exit there ends nothing, and it is dead when its If is.
@@ -481,14 +499,14 @@ def check_unreachable_code(
                     toks = statement_tokens(source, node.span)
                     if _is_landing_point(source, node, toks):
                         flush(run)
-                        exit_text = _terminal_statement(_tokens_after_line_number(toks))
+                        exit_text = _terminal_statement(_tokens_after_line_number(toks), resume_runs)
                         if exit_text is not None:
                             run.terminator = exit_text
                         continue
                     if run.terminator is not None:
                         run.dead = Span(run.dead.start if run.dead is not None else node.span.start, node.span.end)
                         continue
-                    exit_text = _terminal_statement(toks)
+                    exit_text = _terminal_statement(toks, resume_runs)
                     if exit_text is not None:
                         run.terminator = exit_text
                     continue
@@ -496,6 +514,7 @@ def check_unreachable_code(
                 if run.terminator is not None:
                     if not _block_has_landing_point(source, node):
                         run.dead = Span(run.dead.start if run.dead is not None else node.span.start, node.span.end)
+                        run.declares_inside = run.declares_inside or _block_declares(source, node)
                         continue
                     flush(run)
                 runs.extend(_UnreachableRun(iter(nested)) for nested in reversed(_block_bodies(node)))
@@ -507,6 +526,9 @@ def check_unreachable_code(
 
     for member in active_module_members(mod, activity):
         if isinstance(member, ProcedureNode):
+            resume_runs = (
+                _ON_ERROR_RESUME_NEXT_RE.search(source, member.span.start, member.span.end) is not None
+            )
             walk_body(member.body)
 
 
@@ -534,7 +556,7 @@ def _tokens_after_line_number(toks: Sequence[VbaToken]) -> Sequence[VbaToken]:
     return toks[1:] if toks and toks[0].kind is TokenKind.INTEGER_LITERAL else toks
 
 
-def _terminal_statement(toks: Sequence[VbaToken]) -> str | None:
+def _terminal_statement(toks: Sequence[VbaToken], resume_runs: bool = False) -> str | None:
     if not toks:
         return None
     head = token_text(toks[0])
@@ -543,13 +565,38 @@ def _terminal_statement(toks: Sequence[VbaToken]) -> str | None:
         return f"Exit {toks[1].canonical_text or toks[1].raw_text}"
     if head == "goto" and len(toks) >= 2:
         return f"GoTo {toks[1].raw_text}"
-    if head == "resume":
+    if head == "resume" and not resume_runs:
         return "Resume" if len(toks) == 1 else f"Resume {toks[1].canonical_text or toks[1].raw_text}"
     if head == "end" and len(toks) == 1:
         return "End"
     if head == "return" and len(toks) == 1:
         return "Return"
     return None
+
+
+def _is_declaration(source: str, node: BodyNode) -> bool:
+    """A Dim, Static or Const statement."""
+    if isinstance(node, VariableGroupNode):
+        return True
+    if not is_leaf_statement(node):
+        return False
+    after = _tokens_after_line_number(statement_tokens(source, node.span))
+    head = token_text(after[0] if after else None)
+    return head in ("dim", "static", "const")
+
+
+def _block_declares(source: str, node: BodyNode) -> bool:
+    """Whether a block holds a declaration at any depth.
+
+    Upstream recurses per nested block; the bodies still to search wait on a stack
+    here, so nesting depth is not bounded by Python's recursion limit."""
+    pending = _block_bodies(node)
+    while pending:
+        for child in pending.pop():
+            if _is_declaration(source, child):
+                return True
+            pending.extend(_block_bodies(child))
+    return False
 
 
 def _block_bodies(node: BodyNode) -> list[Sequence[BodyNode]]:

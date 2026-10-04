@@ -21,6 +21,7 @@ from __future__ import annotations
 from oracle_support import (  # type: ignore[attr-defined]
     accepted_cases,
     asserted_cases,
+    case_codes,
     oracle_false_positives,
 )
 
@@ -224,9 +225,9 @@ def test_oracle_asserted_cases() -> None:
     for case in cases:
         if case.id in _SKIP_IDS:
             continue
-        emitted: set[str] = set()
-        for module in case.modules:
-            emitted |= _codes(module.source, _STD)
+        # With the project context: XLIDE issue #490's cases put the Private
+        # Type in another module, which only the project index can see.
+        emitted = case_codes(case)
         if case.expected == "rejected":
             assert _CODE in emitted, f"{case.id}: expected {_CODE}, got {sorted(emitted)}"
         elif case.expected == "accepted":

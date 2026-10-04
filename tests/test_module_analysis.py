@@ -120,3 +120,33 @@ def test_findings_with_one_code_and_span_are_merged_keeping_the_later() -> None:
     assert len(shown) == 1
     assert shown[0].startswith("Assignment to 'y' expects Double")
     assert len(_lines_with(source, "string-arithmetic-coercion", raw=True)) == 3
+
+
+# Upstream tests/diagnostics/errorHandlerResumeNext.test.ts (XLIDE issues #199,
+# #313 and #486, measured in Excel 16.0), and #556's handler no error reaches.
+_RAISE = "    On Error GoTo Handler\n    Err.Raise 5\n    Exit Function\nHandler:\n"
+
+
+def _divisions(body: str) -> list[int]:
+    source = f"Option Explicit\nFunction Main() As String\n    Dim x As Double, d As Long\n{body}\nEnd Function\n"
+    return _lines_with(source, "division-by-zero")
+
+
+def test_resume_next_in_a_running_handler_hides_nothing() -> None:
+    assert _divisions(f"{_RAISE}    On Error Resume Next\n    x = 1 / 0") == [9]
+
+
+def test_resume_next_after_goto_minus_1_in_a_handler_hides_its_stretch() -> None:
+    assert _divisions(f"{_RAISE}    On Error GoTo -1\n    On Error Resume Next\n    x = 1 / 0") == []
+
+
+def test_goto_minus_1_does_not_end_a_resume_next_stretch() -> None:
+    assert _divisions("    On Error Resume Next\n    On Error GoTo -1\n    x = 1 / d") == []
+
+
+def test_a_resume_next_that_never_runs_hides_nothing() -> None:
+    assert _divisions("    If False Then\n        On Error Resume Next\n    End If\n    x = 1 / d") == [7]
+
+
+def test_a_handler_no_error_reaches_is_not_reported() -> None:
+    assert _divisions("    On Error GoTo H\n    Exit Function\nH:\n    x = 1 / 0") == []

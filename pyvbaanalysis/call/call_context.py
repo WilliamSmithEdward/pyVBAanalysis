@@ -17,6 +17,7 @@ from ..lexer.token_helpers import (
     cached_raw_statement_tokens,
     cached_statement_tokens,
     match_paren_from,
+    starts_physical_line,
     token_name,
     token_word,
     tokens_without_leading_line_number,
@@ -125,7 +126,8 @@ def bare_call_statement_target(source: str, span: Span) -> BareCallStatementTarg
             j = span.start + callee.end
             while j < len(source) and source[j] in (" ", "\t"):
                 j += 1
-            if j < len(source) and source[j] == ":":
+            # `Name:` is a label only at the start of its line; `10: L1:` calls L1.
+            if j < len(source) and source[j] == ":" and starts_physical_line(source, span.start):
                 return None
         return result
 
@@ -391,38 +393,3 @@ def _top_level_token_index(tokens: list[VbaToken], raw_text: str) -> int:
         elif depth == 0 and raw == raw_text:
             return i
     return -1
-
-
-# --- sync stubs (2f49b93): replaced as each group is ported ---
-
-
-class VbaCallSite:
-    pass
-
-
-class VbaTextSpan:
-    pass
-
-
-class ExplicitCallStatementBareRuntimeRewrite:
-    pass
-
-
-def explicit_call_statement_bare_runtime_rewrite(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("explicitCallStatementBareRuntimeRewrite not ported yet")
-
-
-def explicit_call_statement_argument_list_without_parens(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("explicitCallStatementArgumentListWithoutParens not ported yet")
-
-
-def find_active_call_site(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("findActiveCallSite not ported yet")
-
-
-def callable_completion_should_insert_parens(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("callableCompletionShouldInsertParens not ported yet")
-
-
-def is_explicit_call_target_completion_context(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("isExplicitCallTargetCompletionContext not ported yet")

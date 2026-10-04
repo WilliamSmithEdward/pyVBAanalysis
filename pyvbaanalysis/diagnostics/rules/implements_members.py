@@ -34,8 +34,9 @@ from ...symbols.symbol_model import (
     VbaSymbol,
     VbaSymbolKind,
     is_procedure_kind,
+    procedure_params_from_symbol,
 )
-from ...types.type_names import normalize_type
+from ...types.type_names import is_known_scalar_type, normalize_type
 from ..context import PushFn, is_object_module_kind
 from ..walker import (
     absolute_span,
@@ -56,8 +57,8 @@ _S = "[" + JS_WHITESPACE + "]"
 _DOT = "[^\n\r" + chr(0x2028) + chr(0x2029) + "]"
 _FLAGS = re.IGNORECASE | re.ASCII
 
-# /^(Optional|ByVal|ByRef|ParamArray)\s+/gi
-_PASSING_PREFIX_RE = re.compile(rf"^(Optional|ByVal|ByRef|ParamArray){_S}+", _FLAGS)
+# /^(?:(?:Optional|ByVal|ByRef|ParamArray)\s+)+/i
+_PASSING_PREFIX_RE = re.compile(rf"^(?:(?:Optional|ByVal|ByRef|ParamArray){_S}+)+", _FLAGS)
 # /\s*=.*$/
 _DEFAULT_VALUE_RE = re.compile(rf"{_S}*={_DOT}*\Z")
 # /\sAs\s+(.+)$/i
@@ -118,9 +119,32 @@ def check_implements_members(
         if contract is None:
             continue
         for required in contract.members:
-            if required.kind == "event":
+            # A Friend member is no part of the interface (issue #291, measured).
+            if required.kind == "event" or required.visibility == "Friend":
                 continue
             implementations = procedures.get(f"{contract.name}_{required.name}".lower(), [])
+            variable = (
+                _variable_implementation_problem(required, implementations)
+                if required.kind == "property" and required.procedure_params is None and len(implementations) > 0
+                else None
+            )
+            if variable is not None:
+                if variable.missing:
+                    push(
+                        "implementsMemberMissing",
+                        f"Object module needs to implement '{required.name}' for interface "
+                        f"'{contract.name}': {variable.message}.",
+                        absolute_span(member.span, name_token),
+                    )
+                else:
+                    push(
+                        "implementsMemberSignature",
+                        f"'{variable.at.name}' does not match '{contract.name}.{required.name}': "
+                        f"{variable.message}. The procedure declaration must match the interface "
+                        "member it implements.",
+                        variable.at.name_span,
+                    )
+                continue
             if len(implementations) == 0:
                 push(
                     "implementsMemberMissing",
@@ -151,6 +175,8 @@ def check_implements_members(
                     )
             for implementation in implementations:
                 problem = _signature_mismatch(required, implementation)
+                if problem is None:
+                    problem = _passing_mismatch(required, implementation)
                 if problem:
                     push(
                         "implementsMemberSignature",
@@ -169,6 +195,129 @@ def _contract_named(
         if candidate.kind == "class" and candidate.exhaustive is True and candidate.name.lower() == lower:
             return candidate
     return None
+
+
+def _passing_mismatch(required: VbaProjectClassMember, implementation: VbaSymbol) -> str | None:
+    """What else the VBE matches between an interface procedure and its
+    implementation (issue #291, measured in Excel 16.0): a Function is not
+    implemented by a Sub, and each parameter keeps its passing, ByVal or ByRef (a
+    plain one is ByRef), its Optional, and its default."""
+    # Upstream's truthiness tests: an empty list or mapping is still present.
+    declared = required.procedure_params
+    if declared is None:
+        return None
+    if declared.get("function") is not None and implementation.kind is VbaSymbolKind.SUB:
+        return "the interface member is a Function, and a Sub returns nothing"
+    expected = declared.get(implementation.kind.value)
+    if expected is None:
+        return None
+    actual = procedure_params_from_symbol(implementation, include_passing=True)
+    for i in range(min(len(expected), len(actual))):
+        want = expected[i]
+        got = actual[i]
+        if want.param_array or got.param_array:
+            continue
+        if bool(want.by_val) != bool(got.by_val):
+            return (
+                f"parameter {i + 1} is {'ByVal' if got.by_val else 'ByRef'} here and "
+                f"{'ByVal' if want.by_val else 'ByRef'} on the interface"
+            )
+        if want.optional != got.optional:
+            return (
+                f"parameter {i + 1} is {'Optional' if got.optional else 'required'} here and "
+                f"{'Optional' if want.optional else 'required'} on the interface"
+            )
+        if want.optional and js_trim(want.default_raw or "").lower() != js_trim(got.default_raw or "").lower():
+            got_default = js_trim(got.default_raw) if got.default_raw is not None else ""
+            want_default = js_trim(want.default_raw) if want.default_raw is not None else ""
+            return (
+                f"parameter {i + 1} defaults to {got_default or 'nothing'} here and "
+                f"{want_default or 'nothing'} on the interface"
+            )
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class _VariableProblem:
+    missing: bool
+    message: str
+    at: VbaSymbol
+
+
+def _variable_implementation_problem(
+    required: VbaProjectClassMember, implementations: Sequence[VbaSymbol]
+) -> _VariableProblem | None:
+    """A Public variable of the interface, implemented by Property procedures
+    (issue #291, measured in Excel 16.0). A value type needs a Get and a Let whose
+    value is ByVal and of the variable's type; an object type a Get and a Set whose
+    value is ByVal; a Variant a Get, a Let and a Set, neither value ByVal."""
+    type_ = _normalized_or_variant(
+        required.write_type if required.write_type is not None else required.returns
+    )
+    is_object = type_ == "object" or (type_ != "variant" and not is_known_scalar_type(type_))
+
+    def by_kind(kind: VbaSymbolKind) -> VbaSymbol | None:
+        return next((impl for impl in implementations if impl.kind is kind), None)
+
+    get = by_kind(VbaSymbolKind.PROPERTY_GET)
+    letter = by_kind(VbaSymbolKind.PROPERTY_LET)
+    setter = by_kind(VbaSymbolKind.PROPERTY_SET)
+    name = implementations[0].name
+
+    def needs(what: str) -> _VariableProblem:
+        return _VariableProblem(True, f"add a Property {what} '{name}'", implementations[0])
+
+    if get is None:
+        return needs("Get")
+    lacking = (
+        (letter is None or setter is None)
+        if type_ == "variant"
+        else (setter is None if is_object else letter is None)
+    )
+    if lacking:
+        if type_ == "variant":
+            return needs("Set" if letter is not None else "Let")
+        return needs("Set" if is_object else "Let")
+    write_type_text = required.write_type if required.write_type is not None else "undefined"
+    for procedure in (letter, setter):
+        if procedure is None:
+            continue
+        params = procedure_params_from_symbol(procedure, include_passing=True)
+        value = params[-1] if params else None
+        if value is None:
+            continue
+        by_val = bool(value.by_val)
+        if by_val if type_ == "variant" else not by_val:
+            shown = (
+                "Variant"
+                if type_ == "variant"
+                else _capitalize(required.write_type if required.write_type is not None else type_)
+            )
+            return _VariableProblem(
+                False,
+                f"its value is {'ByVal' if by_val else 'ByRef'}, and a Public {shown} of the "
+                f"interface takes it {'ByRef' if by_val else 'ByVal'}",
+                procedure,
+            )
+        if not is_object and type_ != "variant" and _normalized_or_variant(value.type_) != type_:
+            return _VariableProblem(
+                False,
+                f"its value is {value.type_ if value.type_ is not None else 'Variant'}, and the "
+                f"interface's variable is {write_type_text}",
+                procedure,
+            )
+    if not is_object and type_ != "variant" and _normalized_or_variant(get.as_type) != type_:
+        return _VariableProblem(
+            False,
+            f"it returns {get.as_type if get.as_type is not None else 'Variant'}, and the "
+            f"interface's variable is {write_type_text}",
+            get,
+        )
+    return None
+
+
+def _capitalize(type_name: str) -> str:
+    return type_name[:1].upper() + type_name[1:]
 
 
 def _expected_procedure_label(interface_name: str, member: VbaProjectClassMember) -> str:
@@ -223,7 +372,11 @@ def _parse_signature(signature: str | None) -> _ParsedSignature | None:
 
 
 def _parse_param(part: str) -> _ParsedParam:
-    text = _DEFAULT_VALUE_RE.sub("", _PASSING_PREFIX_RE.sub("", js_trim(part)), count=1)
+    # Project signature labels wrap optional parameters in brackets. Those delimiters
+    # are presentation, not part of the type (otherwise Date becomes "Date]").
+    label = js_trim(part)
+    parameter = label[1:-1] if label.startswith("[") and label.endswith("]") else label
+    text = _DEFAULT_VALUE_RE.sub("", _PASSING_PREFIX_RE.sub("", parameter, count=1), count=1)
     as_match = _AS_CLAUSE_RE.search(text)
     return _ParsedParam(
         type_=_normalized_or_variant(js_trim(as_match.group(1)) if as_match else None),

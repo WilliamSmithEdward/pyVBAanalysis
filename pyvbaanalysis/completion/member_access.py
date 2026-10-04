@@ -1,17 +1,18 @@
-"""Member-access type/surface resolver (the diagnostics half of memberAccess.ts).
+"""Member-access type/surface resolver (memberAccess.ts).
 
 Given VBA source and an offset just after a member-access dot, this resolves the
 type of the receiver expression and returns the verified member surface available
-on it. The diagnostics consume two seams: ``resolve_member_surface_at`` (wrapped by
-``resolve_exhaustive_member_surface`` in ``rules/shared``) for member-not-found, and
-``resolve_exact_member_completion`` for the one member a call or assignment names,
-with its returns, writability and call signature.
+on it. The diagnostics consume the exhaustive surface (member-not-found),
+``resolve_exact_member_completion`` / ``resolve_member_completion_named`` for the one
+member a call or assignment names, with its returns, writability and call
+signature, and the project-surface lookups (private members, project types and
+class members at a receiver). The object-assignment type resolution of
+typeInference.ts lives here too, below the surfaces it reads.
 
-The completion-UX paths of memberAccess.ts are not ported: completion rows, the
-typed-prefix filter, documentation rendering, definition lookup, and the implicit
-control members an editor passes for the form being edited (the diagnostics context
-never carries them). The EXHAUSTIVE flag is never synthesized: host surfaces use the
-host model's ``exhaustive`` flag and project surfaces use
+Documentation rendering is not ported, and neither are the implicit control
+members an editor passes for the form being edited (the diagnostics context never
+carries them). The EXHAUSTIVE flag is never synthesized: host surfaces use the host
+model's ``exhaustive`` flag and project surfaces use
 ``VbaProjectClassMembers.exhaustive`` verbatim.
 """
 
@@ -19,8 +20,9 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_left, bisect_right
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from typing import cast
 
 from ..host import (
     HostObjectModel,
@@ -54,10 +56,13 @@ from ..parser.nodes import (
 )
 from ..parser.parse_module import parse_module
 from ..runtime import resolve_runtime_object, resolve_runtime_object_type, resolve_vba_library_qualifier
+from ..host.host_default_members import HOST_DEFAULT_MEMBERS
 from ..symbols.symbol_model import (
     VbaProjectClassMember,
+    VbaProjectClassMemberDefinition,
     VbaProjectClassMembers,
-    is_data_bound_designer_class,
+    VbaSymbolAttribute,
+    is_access_designer_class,
 )
 from ..types.type_names import is_known_scalar_type, normalize_type
 from .cursor_context import completion_significant_tokens
@@ -132,6 +137,38 @@ class MemberCompletionEntry:
     # members.
     let_accessor: bool | None = None
     set_accessor: bool | None = None
+    # The type a host property declares, when it is not a chainable object.
+    declared_type: str | None = None
+    # The read/write contract the type library states for a host property.
+    access: str | None = None
+    # A user-defined type's field that holds an array (XLIDE issue #417).
+    is_array: bool | None = None
+    # Qualified type the member belongs to. Filled in when a member is resolved
+    # (resolve_member_completion_named and resolve_member_completions); a raw
+    # surface entry carries "".
+    owner: str = ""
+    # True when the owner member surface is complete enough to prove absence.
+    surface_exhaustive: bool | None = None
+    # Source declaration locations, when this member comes from project code.
+    definitions: Sequence[VbaProjectClassMemberDefinition] | None = None
+    # True when exported source marks this member as the VBA default member.
+    default_member: bool | None = None
+    # A project method declared as a Sub, which gives no value (XLIDE issue #414).
+    sub: bool | None = None
+    # How many parameters a project property's Let declares, the value's
+    # included (XLIDE issue #414).
+    let_param_count: int | None = None
+    # What a project class member is known to hold or return: "nothing", "empty"
+    # or "scalar" (XLIDE issue #414).
+    known_value: str | None = None
+    # Exported attribute lines attached to this member.
+    attributes: Sequence[VbaSymbolAttribute] | None = None
+    # Marked hidden in the type library: resolved, but never offered.
+    hidden: bool | None = None
+
+
+# Upstream's name for one resolved member.
+MemberCompletion = MemberCompletionEntry
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +190,9 @@ class _ReceiverChainSegment:
 class _ReceiverChain:
     segments: list[_ReceiverChainSegment]
     start_index: int
+
+
+ReceiverChain = _ReceiverChain
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,7 +279,12 @@ def resolve_member_surface_at(
     if surface is None:
         return None
     return ResolvedMemberSurface(
-        owner=surface.owner, members=list(surface.members), exhaustive=surface.exhaustive
+        owner=surface.owner,
+        members=[
+            _completion_from_surface_member(current_type, surface, member, ctx)
+            for member in surface.members
+        ],
+        exhaustive=surface.exhaustive,
     )
 
 
@@ -254,18 +299,232 @@ def resolve_exact_member_completion(
     surface. The assignment-type rule uses the member's writable/write_type to decide
     read-only and value-type compatibility (the no-FP gate: an unresolved member or a
     member whose writability is unknown yields no diagnostic)."""
-    ctx = ctx if ctx is not None else MemberCompletionContext()
-    current_type = resolve_receiver_type_at(source, member_end_offset, ctx)
-    if current_type is None:
+    return resolve_member_completion_named(source, member_end_offset, member_name, ctx)
+
+
+@dataclass(frozen=True, slots=True)
+class _SurfaceHit:
+    current_type: str
+    surface: _MemberSurface
+    typed_prefix: str
+
+
+def _member_surface_at_dot(
+    source: str,
+    offset: int,
+    ctx: MemberCompletionContext,
+    prefix_tokens: Sequence[VbaToken] | None = None,
+) -> _SurfaceHit | None:
+    # Keep newline tokens: they mark statement boundaries so a dangling
+    # member-access dot on a previous line is not merged into this chain.
+    tokens = prefix_tokens if prefix_tokens is not None else _prefix_significant_tokens(source, offset, ctx)
+    if len(tokens) == 0:
+        return None
+    i = len(tokens) - 1
+    typed_prefix = ""
+    if is_ident_like(tokens[i]) and i > 0 and tokens[i - 1].raw_text == ".":
+        typed_prefix = tokens[i].raw_text
+        i -= 1
+    if i < 0 or tokens[i].raw_text != ".":
+        return None
+    current_type = _receiver_type_from_tokens(tokens, i, source, offset, ctx)
+    if not current_type:
         return None
     surface = _member_surface_for_type(current_type, ctx)
     if surface is None:
         return None
-    member = _surface_member_named(surface, member_name)
-    if member is None or member.signature is not None:
-        return member
-    signature = _signature_for_member(current_type, member.name, ctx)
-    return replace(member, signature=signature) if signature is not None else member
+    return _SurfaceHit(current_type, surface, typed_prefix)
+
+
+def _completion_from_surface_member(
+    current_type: str,
+    surface: _MemberSurface,
+    member: MemberCompletionEntry,
+    ctx: MemberCompletionContext,
+) -> MemberCompletionEntry:
+    """A surface member as a resolved completion: its owner, the surface's
+    exhaustiveness, and its call signature. Documentation is not ported."""
+    signature = (
+        member.signature
+        if member.signature is not None
+        else _signature_for_member(current_type, member.name, ctx)
+    )
+    return replace(
+        member, signature=signature, owner=surface.owner, surface_exhaustive=surface.exhaustive
+    )
+
+
+def resolve_member_completions(
+    source: str, offset: int, ctx: MemberCompletionContext | None = None
+) -> list[MemberCompletionEntry]:
+    """The member completions available at ``offset``: the surface's members whose
+    names start with the typed prefix, hidden ones left out (XLIDE issue #56)."""
+    ctx = ctx if ctx is not None else MemberCompletionContext()
+    hit = _member_surface_at_dot(source, offset, ctx)
+    if hit is None:
+        return []
+    lower_prefix = hit.typed_prefix.lower()
+    return [
+        _completion_from_surface_member(hit.current_type, hit.surface, member, ctx)
+        for member in hit.surface.members
+        if member.name.lower().startswith(lower_prefix) and not member.hidden
+    ]
+
+
+def resolve_member_completion_named(
+    source: str, offset: int, member_name: str, ctx: MemberCompletionContext | None = None
+) -> MemberCompletionEntry | None:
+    """The single member named ``member_name`` at ``offset``, without building rows
+    for the whole member surface."""
+    ctx = ctx if ctx is not None else MemberCompletionContext()
+    hit = _member_surface_at_dot(source, offset, ctx)
+    if hit is None:
+        return None
+    member = _surface_member_named(hit.surface, member_name)
+    return (
+        _completion_from_surface_member(hit.current_type, hit.surface, member, ctx)
+        if member is not None
+        else None
+    )
+
+
+def resolve_host_member_kind_at(
+    source: str, offset: int, member_name: str, ctx: MemberCompletionContext | None = None
+) -> str | None:
+    """The kind of the HOST member named ``member_name`` ending at ``offset``, or
+    None when the receiver is not a host object or carries no such member."""
+    ctx = ctx if ctx is not None else MemberCompletionContext()
+    hit = _member_surface_at_dot(source, offset, ctx)
+    if hit is None or not any(
+        get_host_type(type_, ctx.model) for type_ in _host_receiver_types_of(hit.current_type)
+    ):
+        return None
+    lower_name = member_name.lower()
+    member = next((m for m in hit.surface.members if m.name.lower() == lower_name), None)
+    return member.kind if member is not None else None
+
+
+def _host_receiver_types_of(receiver_type: str) -> list[str]:
+    """The host types a receiver key denotes (XLIDE issue #44)."""
+    union = _parse_union_type_key(receiver_type)
+    if union is not None:
+        return [host for item in union for host in _host_receiver_types_of(item)]
+    combined = _parse_combined_type_key(receiver_type)
+    if combined is not None:
+        return [combined[1]]
+    return [] if receiver_type.startswith(_PROJECT_TYPE_PREFIX) else [receiver_type]
+
+
+def resolve_member_definitions_at(
+    source: str,
+    offset: int,
+    member_name: str,
+    ctx: MemberCompletionContext | None = None,
+    prefix_tokens: Sequence[VbaToken] | None = None,
+) -> Sequence[VbaProjectClassMemberDefinition]:
+    """The source definition locations of the member named ``member_name`` ending
+    at ``offset``. Bails on a cheap character scan when no member-access dot
+    precedes the name."""
+    ctx = ctx if ctx is not None else MemberCompletionContext()
+    safe_offset = max(0, min(offset, len(source)))
+    if not preceded_by_member_access_dot(source, safe_offset - len(member_name)):
+        return []
+    # Only trust supplied tokens that end exactly with the member name.
+    last = prefix_tokens[-1] if prefix_tokens else None
+    tokens = (
+        prefix_tokens
+        if last is not None
+        and last.end == safe_offset
+        and last.raw_text.lower() == member_name.lower()
+        else None
+    )
+    hit = _member_surface_at_dot(source, safe_offset, ctx, tokens)
+    if hit is None:
+        return []
+    lower_name = member_name.lower()
+    member = next((m for m in hit.surface.members if m.name.lower() == lower_name), None)
+    return (member.definitions if member is not None else None) or []
+
+
+def preceded_by_member_access_dot(source: str, name_start: int) -> bool:
+    """True when the identifier starting at ``name_start`` is preceded by a
+    member-access dot, allowing for whitespace and `_` line continuations."""
+    i = name_start - 1
+    while True:
+        while i >= 0 and source[i] in (" ", "\t"):
+            i -= 1
+        if i < 0:
+            return False
+        ch = source[i]
+        if ch == ".":
+            return True
+        if ch in ("\n", "\r"):
+            if ch == "\n" and i > 0 and source[i - 1] == "\r":
+                i -= 1
+            i -= 1
+            while i >= 0 and source[i] in (" ", "\t"):
+                i -= 1
+            if i < 0 or source[i] != "_":
+                return False
+            i -= 1
+            continue
+        return False
+
+
+def _project_key_of_receiver(current_type: str) -> str | None:
+    combined = _parse_combined_type_key(current_type)
+    if combined is not None:
+        return combined[0]
+    if current_type.startswith(_PROJECT_TYPE_PREFIX):
+        return current_type[len(_PROJECT_TYPE_PREFIX) :]
+    return None
+
+
+def private_member_owner_at(
+    source: str, offset: int, member_name: str, ctx: MemberCompletionContext | None = None
+) -> str | None:
+    """The owner to name when a reference reaches a Private member of a project
+    module through an object (`Sheet1.Secret()`, `Me.Secret()`), where the rest of
+    the surface cannot prove absence: VBA refuses each, "Method or data member not
+    found" (XLIDE issue #219). None when the member is not Private there, or the
+    surface has a public member of that name."""
+    ctx = ctx if ctx is not None else MemberCompletionContext()
+    current_type = resolve_receiver_type_at(source, offset, ctx)
+    if not current_type:
+        return None
+    project_key = _project_key_of_receiver(current_type)
+    project_type = _project_class_members_by_name(ctx).get(project_key) if project_key else None
+    lower = member_name.lower()
+    if project_type is None or not any(
+        name.lower() == lower for name in (project_type.private_members or [])
+    ):
+        return None
+    surface = _member_surface_for_type(current_type, ctx)
+    return None if surface is not None and _surface_member_named(surface, member_name) else project_type.name
+
+
+def project_type_at(
+    source: str, offset: int, ctx: MemberCompletionContext | None = None
+) -> VbaProjectClassMembers | None:
+    """The project type (class, form, document) a receiver resolves to, if any."""
+    ctx = ctx if ctx is not None else MemberCompletionContext()
+    current_type = resolve_receiver_type_at(source, offset, ctx)
+    if not current_type:
+        return None
+    project_key = _project_key_of_receiver(current_type)
+    return _project_class_members_by_name(ctx).get(project_key) if project_key else None
+
+
+def project_class_member_at(
+    source: str, offset: int, member_name: str, ctx: MemberCompletionContext | None = None
+) -> VbaProjectClassMember | None:
+    """The member of a project class module a reference reaches, if the receiver
+    is one."""
+    project_type = project_type_at(source, offset, ctx)
+    if project_type is None or project_type.kind != "class":
+        return None
+    lower = member_name.lower()
+    return next((m for m in project_type.members if m.name.lower() == lower), None)
 
 
 def resolve_exhaustive_member_surface_at(
@@ -437,9 +696,13 @@ def _advance_receiver_type(
     # (e.g. ws.ChartObjects(1).Chart), so it must not be gated on kind. But
     # Item/_Default/Add already return the resolved element/result, so they are
     # not re-indexed (avoids over-resolving SparklineGroups.Item(1) one level).
+    # A member that takes an argument of its own is what it returns:
+    # Shapes.Range(Array("A")) is a ShapeRange, not a Shape (XLIDE issue #197).
     return _apply_default_member_return_type(
         resolved.type,
-        segment.has_arguments and not is_explicit_element_accessor(segment.name),
+        segment.has_arguments
+        and not is_explicit_element_accessor(segment.name)
+        and not member_takes_own_arguments(_signature_for_member(current_type, segment.name, ctx)),
         ctx,
     )
 
@@ -471,6 +734,12 @@ def _receiver_type_from_parenthesized_receiver(
         return None
     open_index = _match_paren_left(tokens, end_index)
     if open_index < 0:
+        return None
+    # After a name or another list the parentheses hold arguments, not a grouped
+    # receiver: `k.Wrap(r).Caption` with k late-bound is Wrap's result, whatever r
+    # is (XLIDE issue #594).
+    before = _at(tokens, open_index - 1)
+    if before is not None and (is_ident_like(before) or before.raw_text in (")", "]")):
         return None
     expression_tokens = list(tokens[open_index + 1 : end_index])
     return _receiver_type_from_expression_tokens(
@@ -616,13 +885,14 @@ def _receiver_segment_ending_at(
         return _ReceiverChainSegment(_word(tokens[i]), has_arguments), i
 
 
-# `Me` is the only VBA keyword that can terminate a receiver expression (`Me.`);
-# every other keyword before a dot (In, To, Then, ...) introduces a fresh
-# expression, so the dot is a leading implicit-With member access.
-_RECEIVER_TAIL_KEYWORDS: frozenset[str] = frozenset({"me"})
+# `Me` and `Debug` are the VBA keywords that can terminate a receiver expression
+# (`Me.`, `Debug.Print` inside a With, XLIDE issue #184); every other keyword
+# before a dot (In, To, Then, ...) introduces a fresh expression, so the dot is a
+# leading implicit-With member access.
+_RECEIVER_TAIL_KEYWORDS: frozenset[str] = frozenset({"me", "debug"})
 
 
-def _precedes_leading_member_dot(token: VbaToken) -> bool:
+def precedes_leading_member_dot(token: VbaToken) -> bool:
     """True when ``token`` (the token immediately before a ``.``) means the dot is
     a LEADING implicit-With member-access dot rather than ``receiver.member``. A
     dot is explicit only when preceded by something that terminates a receiver
@@ -644,7 +914,7 @@ def _precedes_leading_member_dot(token: VbaToken) -> bool:
 def _collect_implicit_with_chain(
     tokens: Sequence[VbaToken], end_index: int
 ) -> list[_ReceiverChainSegment] | None:
-    if end_index < 0 or _precedes_leading_member_dot(tokens[end_index]):
+    if end_index < 0 or precedes_leading_member_dot(tokens[end_index]):
         return []
     segments: list[_ReceiverChainSegment] = []
     i = end_index
@@ -670,7 +940,7 @@ def _collect_implicit_with_chain(
         i -= 1
         if i >= 0 and tokens[i].raw_text == ".":
             prior = i - 1
-            if prior < 0 or _precedes_leading_member_dot(tokens[prior]):
+            if prior < 0 or precedes_leading_member_dot(tokens[prior]):
                 return segments
             i = prior
             continue
@@ -754,7 +1024,16 @@ def _resolve_root(
     # Enum name: forms carry a default instance, factory-style classes are
     # addressed by name as a matter of course, and `Corner.TopLeft` is ordinary
     # VBA. Misusing a class that is not predeclared is the diagnostics' concern.
-    if project_surface is not None and project_surface.kind in ("standardModule", "class", "userform", "enum"):
+    # A document module whose host type is unknown (no code name reached the
+    # analyzer) still reaches its own code. Its surface is never exhaustive, so
+    # only a Private member is provably out of reach.
+    if project_surface is not None and project_surface.kind in (
+        "standardModule",
+        "class",
+        "userform",
+        "enum",
+        "document",
+    ):
         return _project_type_key(lower)
     return (
         None
@@ -1059,9 +1338,11 @@ def _build_member_surface_for_type(
             # as ThisWorkbook is the project's own class, and the VBE refuses a
             # member it lacks even though Excel's Workbook interface is extensible
             # (oracle case workbook_unknown_member_compile).
+            # So does an Access form's or report's, whose list is its TypeInfo
+            # stream's (XLIDE issue #206).
             exhaustive=(
                 project_type is not None and project_type.exhaustive is True
-                if forms_members is not None
+                if forms_members is not None or is_access_designer_class(host_type_name)
                 else _project_source_surface_complete_when_merged_with_host(project_type)
                 and host_type is not None
                 and host_type.get("exhaustive") is True
@@ -1073,19 +1354,35 @@ def _build_member_surface_for_type(
         )
         if project_type is None:
             return None
-        if project_type.kind == "userform" and is_data_bound_designer_class(project_type.designer_class):
+        designer_class = project_type.designer_class
+        designer_members = (
+            get_host_members(designer_class, ctx.model)
+            if project_type.kind in ("userform", "document") and designer_class
+            else []
+        )
+        if designer_class and len(designer_members) > 0:
             # An Access form or report is its own library's class, not a UserForm:
             # `Form_Orders.Requery` reaches Access.Form's members, and Show and Hide
-            # are not among them. Never exhaustive: its record-source fields are
-            # members no list here can name.
-            designer_class = project_type.designer_class or ""
+            # are not among them. Exhaustive when the index holds the design's
+            # member list (XLIDE issue #206). So is a VB6 form: `Form1.Cls` reaches
+            # VB.Form (#358). A worksheet reaches Excel.Worksheet's, a closed
+            # interface, so `Sheet1.Nope` is refused while compiling (#225).
+            designer_type = get_host_type(designer_class, ctx.model)
             return _MemberSurface(
                 owner=project_type.name,
                 members=_merge_completion_members(
                     _project_member_entries(project_type),
-                    _host_member_entries(get_host_members(designer_class, ctx.model)),
+                    _host_member_entries(designer_members),
                 ),
-                exhaustive=False,
+                exhaustive=project_type.exhaustive is True
+                and (
+                    project_type.kind != "document"
+                    or (
+                        designer_type is not None
+                        and designer_type.get("exhaustive") is True
+                        and host_type_resolves_when_compiling(designer_class)
+                    )
+                ),
             )
         if project_type.kind == "userform":
             # A form IS an MSForms.UserForm wherever it is reached from, so a
@@ -1162,9 +1459,18 @@ def _host_member_entries(members: Sequence[HostMember]) -> list[MemberCompletion
             kind=m.get("kind", "property"),
             returns=m.get("returns"),
             signature=m.get("signature"),
+            declared_type=m.get("declaredType"),
+            access=_host_member_access(m),
+            hidden=m.get("hidden"),
         )
         for m in members
     ]
+
+
+def _host_member_access(member: HostMember) -> str | None:
+    """The read/write contract a host member's metadata states, if any."""
+    access = cast("Mapping[str, object]", member).get("access")
+    return access if isinstance(access, str) else None
 
 
 def _project_member_entries(
@@ -1182,9 +1488,22 @@ def _project_member_entries(
             signature=m.signature,
             let_accessor=m.let_accessor,
             set_accessor=m.set_accessor,
+            is_array=True if m.is_array else None,
+            definitions=m.definitions,
+            default_member=m.default_member,
+            sub=m.sub,
+            let_param_count=_let_params_of(m),
+            known_value=m.known_value,
+            attributes=m.attributes,
         )
         for m in project_type.members
     ]
+
+
+def _let_params_of(member: VbaProjectClassMember) -> int | None:
+    """How many parameters a project property's Let declares, if the member says."""
+    params = (member.procedure_params or {}).get("propertyLet")
+    return len(params) if params is not None else None
 
 
 def _signature_for_member(
@@ -1483,17 +1802,29 @@ def _project_source_surface_complete_when_merged_with_host(
 _PROJECT_TYPES_BY_NAME_CACHE = IdentityLru()
 
 
+_NO_PROJECT_CLASS_MEMBERS: tuple[VbaProjectClassMembers, ...] = ()
+
+
 def _project_class_members_by_name(
     ctx: MemberCompletionContext,
 ) -> dict[str, VbaProjectClassMembers]:
-    """The project's types by lowercased name. A name two types share answers
-    neither, since it cannot be told which one a reference means."""
-    cached = _PROJECT_TYPES_BY_NAME_CACHE.get(ctx.project_class_members)
+    return project_class_members_index(
+        ctx.project_class_members if ctx.project_class_members is not None else _NO_PROJECT_CLASS_MEMBERS
+    )
+
+
+def project_class_members_index(
+    project_class_members: Sequence[VbaProjectClassMembers],
+) -> dict[str, VbaProjectClassMembers]:
+    """The project's surfaces by lowercased name, indexed once per list. A name two
+    surfaces share answers neither, since it cannot be told which one a reference
+    means. Callers treat the result as read-only."""
+    cached = _PROJECT_TYPES_BY_NAME_CACHE.get(project_class_members)
     if cached is not None:
         return cached  # type: ignore[no-any-return]
     out: dict[str, VbaProjectClassMembers] = {}
     ambiguous: set[str] = set()
-    for type_ in ctx.project_class_members or []:
+    for type_ in project_class_members:
         key = type_.name.lower()
         if key in ambiguous:
             continue
@@ -1502,7 +1833,7 @@ def _project_class_members_by_name(
             ambiguous.add(key)
             continue
         out[key] = type_
-    return _PROJECT_TYPES_BY_NAME_CACHE.put(out, ctx.project_class_members)  # type: ignore[no-any-return]
+    return _PROJECT_TYPES_BY_NAME_CACHE.put(out, project_class_members)  # type: ignore[no-any-return]
 
 
 def _project_member_by_name(
@@ -1744,14 +2075,21 @@ class KnownObjectAssignmentType:
     implements: tuple[str, ...] = ()
 
 
+ProjectTypeLookup = Callable[[str], VbaProjectClassMembers | None]
+
+
 def resolve_known_object_assignment_type(
-    type_name: str | None, ctx: MemberCompletionContext
+    type_name: str | None,
+    ctx: MemberCompletionContext,
+    project_type_lookup: ProjectTypeLookup | None = None,
 ) -> KnownObjectAssignmentType | None:
     """The object class a declared type names, when it names one that Set-binds and
     supports members: the generic `Object`, VBA's `Collection`, a host alias
-    resolved through the host model, or an unambiguous project class, document or
-    form. None for Variant, the scalar types and anything unknown. Ported from
-    resolveKnownObjectAssignmentType (typeInference.ts)."""
+    resolved through the host model, a DAO type, or an unambiguous project class,
+    document or form. None for Variant, the scalar types and anything unknown.
+    Ported from resolveKnownObjectAssignmentType (typeInference.ts);
+    ``project_type_lookup`` is the per-pass index create_object_assignment_type_resolver
+    passes."""
     if not type_name:
         return None
     normalized = normalize_type(type_name)
@@ -1769,25 +2107,33 @@ def resolve_known_object_assignment_type(
     host = resolve_host_alias(type_name, ctx.model)
     if host:
         return KnownObjectAssignmentType(kind="host", display=type_name, key=host.lower())
+    library = library_object_type(type_name)
+    if library:
+        return KnownObjectAssignmentType(kind="host", display=type_name, key=library.lower())
     simple = simple_type_name_for_assignment(type_name)
     if not simple:
         return None
     lower = simple.lower()
-    matches = [
-        project_type
-        for project_type in (ctx.project_class_members or [])
-        # userType and enum are VALUE types: `Dim c As Corner` is a Long, not an
-        # object, so neither can make an assignment require Set.
-        if project_type.kind not in ("userType", "enum", "standardModule")
-        and project_type.name.lower() == lower
-    ]
-    if len(matches) != 1:
+    match: VbaProjectClassMembers | None
+    if project_type_lookup is not None:
+        match = project_type_lookup(lower)
+    else:
+        matches = [
+            project_type
+            for project_type in (ctx.project_class_members or [])
+            # userType and enum are VALUE types: `Dim c As Corner` is a Long, not
+            # an object, so neither can make an assignment require Set.
+            if project_type.kind not in ("userType", "enum", "standardModule")
+            and project_type.name.lower() == lower
+        ]
+        match = matches[0] if len(matches) == 1 else None
+    if match is None:
         return None
     return KnownObjectAssignmentType(
         kind="project",
-        display=matches[0].name,
+        display=match.name,
         key=lower,
-        implements=tuple(matches[0].implements or []),
+        implements=tuple(match.implements or []),
     )
 
 
@@ -1806,68 +2152,83 @@ def simple_type_name_for_assignment(type_text: str) -> str | None:
     return trimmed if is_identifier(trimmed) else None
 
 
-# --- sync stubs (2f49b93): replaced as each group is ported ---
+_DAO_QUALIFIED_RE = re.compile(r"^dao\.", re.IGNORECASE)
+_LIBRARY_TYPES_BY_LOWER: dict[str, str] | None = None
 
 
-class MemberCompletion:
-    pass
+def library_object_type(type_name: str | None) -> str | None:
+    """A DAO type named with its library, `DAO.Recordset`, as the default-member
+    table keys it. DAO has no host model, so this is how a variable of a DAO type is
+    known to hold an object whose default member the table gives (XLIDE issue
+    #464). Port of typeInference.ts' private libraryObjectType, kept here so the
+    object-assignment resolver above can reach it."""
+    global _LIBRARY_TYPES_BY_LOWER
+    if not type_name or _DAO_QUALIFIED_RE.match(type_name.strip()) is None:
+        return None
+    if _LIBRARY_TYPES_BY_LOWER is None:
+        _LIBRARY_TYPES_BY_LOWER = {
+            key.lower(): key for key in HOST_DEFAULT_MEMBERS if key.startswith("DAO.")
+        }
+    return _LIBRARY_TYPES_BY_LOWER.get(type_name.strip().lower())
 
 
-class ReceiverChain:
-    pass
+# -- member signatures -----------------------------------------------------
+
+_DECLARED_RETURN_RE = re.compile(r"\)\s+As\s+([A-Za-z0-9_.]+)\s*$", re.IGNORECASE)
+_LATE_BOUND_RETURN_RE = re.compile(r"^(?:Object|Variant)$", re.IGNORECASE)
 
 
-def resolve_member_completions(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("resolveMemberCompletions not ported yet")
+def member_takes_own_arguments(signature: str | None) -> bool:
+    """Whether a member called with arguments takes them itself, so the call is
+    what the member declares it returns: a member that declares a parameter and a
+    specific return type. GetSpellingSuggestions("helo") is a SpellingSuggestions,
+    Shapes.Range(Array("A")) a ShapeRange (XLIDE issue #197). A member with no
+    parameters passes the arguments to what it returns: Shapes.Placeholders(1) is a
+    Shape. So does one the library declares As Object."""
+    if not signature_declares_parameters(signature):
+        return False
+    match = _DECLARED_RETURN_RE.search(signature or "")
+    declared = match.group(1) if match is not None else None
+    return declared is not None and _LATE_BOUND_RETURN_RE.match(declared) is None
 
 
-def resolve_member_completion_named(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("resolveMemberCompletionNamed not ported yet")
+def signature_declares_parameters(signature: str | None) -> bool:
+    """Whether a member signature label declares at least one parameter."""
+    return len(_signature_parameters(signature)) > 0
 
 
-def resolve_host_member_kind_at(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("resolveHostMemberKindAt not ported yet")
+def is_late_bound_type_key(type_key: str) -> bool:
+    """Whether a receiver type key is late bound: a value the library declares
+    Object, whose members bind when the code runs (`Worksheets(1)`), so the VBE
+    checks nothing about them at compile time."""
+    return type_key.startswith(_UNION_TYPE_PREFIX)
 
 
-def resolve_member_definitions_at(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("resolveMemberDefinitionsAt not ported yet")
+def _signature_parameters(signature: str | None) -> list[str]:
+    """The parameters of a member signature label, trimmed, in order."""
+    open_index = signature.find("(") if signature else -1
+    if not signature or open_index < 0:
+        return []
+    depth = 0
+    start = open_index + 1
+    params: list[str] = []
+    for i in range(open_index, len(signature)):
+        ch = signature[i]
+        if ch in ("(", "["):
+            depth += 1
+        elif ch in (")", "]"):
+            depth -= 1
+            if depth == 0 and ch == ")":
+                params.append(signature[start:i])
+                break
+        elif ch == "," and depth == 1:
+            params.append(signature[start:i])
+            start = i + 1
+    return [param.strip() for param in params if param.strip()]
 
 
-def preceded_by_member_access_dot(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("precededByMemberAccessDot not ported yet")
-
-
-def private_member_owner_at(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("privateMemberOwnerAt not ported yet")
-
-
-def project_type_at(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("projectTypeAt not ported yet")
-
-
-def project_class_member_at(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("projectClassMemberAt not ported yet")
-
-
-def member_takes_own_arguments(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("memberTakesOwnArguments not ported yet")
-
-
-def signature_declares_parameters(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("signatureDeclaresParameters not ported yet")
-
-
-def is_late_bound_type_key(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("isLateBoundTypeKey not ported yet")
-
-
-def precedes_leading_member_dot(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("precedesLeadingMemberDot not ported yet")
-
-
-def ms_forms_control_members(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("msFormsControlMembers not ported yet")
-
-
-def project_class_members_index(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("projectClassMembersIndex not ported yet")
+def ms_forms_control_members(type_name: str) -> list[HostMember] | None:
+    """Members of `MSForms.ComboBox` and friends, and of `MSForms.UserForm` for the
+    form itself (upstream's msFormsControlMembers; the port keeps it in
+    host/msforms.py)."""
+    return msforms_control_members(type_name)

@@ -11,6 +11,7 @@ reads it, so it is intentionally omitted from this port.
 from __future__ import annotations
 
 import enum
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from ..parser.nodes import Span
@@ -177,6 +178,9 @@ class VbaProjectClassMember:
     signature: str | None = None
     writable: bool | None = None
     write_type: str | None = None
+    # A field of a user-defined type that holds an array: its type is the
+    # element's (XLIDE issue #417).
+    is_array: bool | None = None
     visibility: SymbolVisibility | None = None
     definitions: list[VbaProjectClassMemberDefinition] | None = None
     default_member: bool | None = None
@@ -185,16 +189,35 @@ class VbaProjectClassMember:
     # measured in Excel 16.0: the other pairing is "Invalid use of property").
     let_accessor: bool | None = None
     set_accessor: bool | None = None
+    # A method declared as a Sub, which returns no value (XLIDE issue #369).
+    sub: bool | None = None
+    # What the class's own code shows the member always gives (XLIDE issue
+    # #414): "nothing" for an object field it never assigns or a Function it
+    # only sets to Nothing, "empty" for a Variant field it never assigns,
+    # "scalar" for a Get that only returns one literal.
+    known_value: str | None = None
+    # The parameters each procedure of the member declares, ByVal and ByRef
+    # kept, by procedure kind ("sub", "function", "propertyGet", "propertyLet",
+    # "propertySet"): an implementation must pass each as the interface does
+    # (XLIDE issue #291). None for a variable.
+    procedure_params: dict[str, list[VbaProcedureParam]] | None = None
     attributes: list[VbaSymbolAttribute] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ImplicitMember:
     """A member a module has that its own text never declares: a UserForm's
-    designer-declared control, with the type a member lookup resolves it against."""
+    designer-declared control, with the type a member lookup resolves it against
+    ("MSForms.ListBox"), and what the designer knows of its contents where the
+    native reader got it (XLIDE issue #315). Upstream's FormControlInfo; absent
+    facts are unknown."""
 
     name: str
     type: str
+    # A MultiPage's page names, in page order.
+    pages: tuple[str, ...] | None = None
+    # A ListBox or ComboBox with no RowSource: its list starts empty.
+    list_starts_empty: bool | None = None
 
 
 @dataclass(slots=True)
@@ -217,6 +240,11 @@ class VbaProjectClassMembers:
     # The host class the module's designer makes it: an Access form's
     # `Access.Form`. None for a UserForm, which is always an MSForms.UserForm.
     designer_class: str | None = None
+    # The names of the module's Private members, which `members` leaves out.
+    # No reference through an object reaches one, `Me.` included: that is
+    # "Method or data member not found" wherever the rest of the surface
+    # cannot prove absence (XLIDE issue #219).
+    private_members: list[str] | None = None
 
 
 @dataclass(slots=True)
@@ -229,6 +257,13 @@ class ModuleSymbols:
     root: VbaSymbol
     # Flat list of every symbol in the module, including nested ones.
     all: list[VbaSymbol]
+    # The type a DefType line gives names declared with no type, by their
+    # lowercased first letter (XLIDE issue #285). None with no DefType line.
+    def_types: Mapping[str, str] | None = None
+    # With a DefType line and no Option Explicit: the names each procedure
+    # assigns without declaring them, by the procedure's start offset. Each is
+    # a local the DefType types (XLIDE issue #285).
+    implicit_locals: Mapping[int, frozenset[str]] | None = None
 
 
 def procedure_kind_keyword(kind: VbaSymbolKind) -> str:
@@ -289,14 +324,19 @@ def procedure_declaration_signature(procedure: VbaProcedureSignature) -> str:
     return f"{procedure_kind_keyword(procedure.kind)} {procedure_signature_label(procedure)}"
 
 
-def is_data_bound_designer_class(designer_class: str | None) -> bool:
-    """True for an Access form or report. Beside its sections and controls, Access
-    gives one a member for every field of its record source, and only the running
-    database knows those. So where a UserForm's control list proves a name absent,
-    an Access design's never does: a bare `CustomerID` in a bound form is a field,
-    not a missing declaration."""
+def is_access_designer_class(designer_class: str | None) -> bool:
+    """Whether a designer's class is an Access form's or report's. Its module is
+    a form module as a UserForm's is, but its base is the Access library's
+    class, with Access events, and its member list comes from the design's
+    TypeInfo stream: the sections, the controls, and on a bound design the
+    fields of its record source."""
     lower = designer_class.lower() if designer_class else None
     return lower in ("access.form", "access.report")
+
+
+# Upstream renamed isDataBoundDesignerClass to isAccessDesignerClass; the old
+# name stays until every caller has moved to the new one.
+is_data_bound_designer_class = is_access_designer_class
 
 
 def qualified_procedure_key(module_name: str, name: str) -> str:
@@ -397,16 +437,10 @@ __all__ = [
     "format_procedure_param_label",
     "procedure_signature_label",
     "procedure_declaration_signature",
+    "is_access_designer_class",
     "qualified_procedure_key",
     "is_bare_callable_kind",
     "procedure_params_from_symbol",
     "procedure_signature_from_symbol",
     "is_procedure_kind",
 ]
-
-
-# --- sync stubs (2f49b93): replaced as each group is ported ---
-
-
-def is_access_designer_class(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("isAccessDesignerClass not ported yet")

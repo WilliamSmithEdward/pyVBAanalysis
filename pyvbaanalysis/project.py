@@ -21,10 +21,14 @@ rule suite is validated against.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING
 
 from .conditional import ConditionalCompilationEnvironment
 from .diagnostics import AnalyzeModuleOptions, VbaDiagnostic, analyze_module
 from .symbols import ModuleInput, ModuleSymbolKind, ProjectIndex, ProjectIndexOptions
+
+if TYPE_CHECKING:
+    from .symbols.sheet_changes import WorkbookSheetInfo
 
 
 def analyze_module_options_for(
@@ -38,6 +42,8 @@ def analyze_module_options_for(
     inline_suppression: bool = True,
     host: str | None = None,
     referenced_hosts: Sequence[str] | None = None,
+    referenced_libraries: Sequence[str] | None = None,
+    workbook_sheets: Sequence[WorkbookSheetInfo] | None = None,
 ) -> AnalyzeModuleOptions:
     """Build the AnalyzeModuleOptions for one module from a populated ProjectIndex.
 
@@ -54,10 +60,16 @@ def analyze_module_options_for(
     "access"); absent means Excel, exactly as before. ``referenced_hosts`` names the
     other Office libraries the project references, in declaration order; None means
     the reference list is unknown, [] that it is known to name nothing else.
+    ``referenced_libraries`` names every library the project references as its dir
+    stream records them (`Scripting`, `MSForms`); None means unknown.
+    ``workbook_sheets`` lists the sheets of the workbook the project lives in, in
+    tab order, for an Excel file.
     """
     return AnalyzeModuleOptions(
         host=host,
         referenced_hosts=referenced_hosts,
+        referenced_libraries=referenced_libraries,
+        workbook_sheets=workbook_sheets,
         module_name=module_name,
         module_kind=module_kind,
         whole_project=whole_project,
@@ -74,8 +86,14 @@ def analyze_module_options_for(
         known_procedures=index.visible_procedure_names(module_name),
         known_identifiers=index.visible_identifier_names(module_name),
         known_non_type_names=index.visible_non_type_names(module_name),
+        hidden_type_names=index.hidden_type_names(module_name),
         implemented_interfaces=index.implemented_interface_names(),
         project_string_literal_words=index.string_literal_words(),
+        project_runnable_procedures=index.runnable_procedure_names(),
+        project_written_names=index.written_names(),
+        project_name_mentions=index.name_mentions(),
+        project_sheet_changes=index.sheet_changes(),
+        project_opened_file_numbers=index.opened_file_numbers(),
         # A UserForm's controls are members its own text never declares. The index
         # knows them when the caller supplied them with the module or the source
         # carries a `.frm` header that lists them; otherwise the form's control
@@ -132,6 +150,8 @@ def analyze_project(
     inline_suppression: bool = True,
     host: str | None = None,
     referenced_hosts: Sequence[str] | None = None,
+    referenced_libraries: Sequence[str] | None = None,
+    workbook_sheets: Sequence[WorkbookSheetInfo] | None = None,
 ) -> dict[str, list[VbaDiagnostic]]:
     """Analyze a whole VBA project with full cross-module context.
 
@@ -185,64 +205,9 @@ def analyze_project(
             inline_suppression=inline_suppression,
             host=host,
             referenced_hosts=referenced_hosts,
+            referenced_libraries=referenced_libraries,
+            workbook_sheets=workbook_sheets,
         )
         results[module.module_name] = analyze_module(module.source, opts)
     return results
 
-
-# --- sync stubs (2f49b93): replaced as each group is ported ---
-
-
-class VbaProjectModuleInput:
-    pass
-
-
-class VbaProjectLiveOverride:
-    pass
-
-
-class VbaProjectIndexBuildOptions:
-    pass
-
-
-VbaProjectAnalysisOptions = object
-
-
-class VbaProjectEditorSymbolContext:
-    pass
-
-
-def module_kind_from_type(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("moduleKindFromType not ported yet")
-
-
-def effective_module_kind(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("effectiveModuleKind not ported yet")
-
-
-def build_vba_project_index(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("buildVbaProjectIndex not ported yet")
-
-
-def build_live_vba_project_index(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("buildLiveVbaProjectIndex not ported yet")
-
-
-def build_vba_project_index_async(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("buildVbaProjectIndexAsync not ported yet")
-
-
-def build_live_vba_project_index_async(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("buildLiveVbaProjectIndexAsync not ported yet")
-
-
-def project_procedure_signatures(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("projectProcedureSignatures not ported yet")
-
-
-def project_analysis_options_for_module(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("projectAnalysisOptionsForModule not ported yet")
-
-
-def project_editor_symbol_context_for_module(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("projectEditorSymbolContextForModule not ported yet")

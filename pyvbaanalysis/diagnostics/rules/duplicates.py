@@ -52,8 +52,9 @@ from ...types.type_inference import (
     source_identifier_bound,
 )
 from ..callable_signatures import callable_type_signatures_for
-from ..context import PushFn
-from ..walker import active_module_members
+from ...lexer.token_kinds import TokenKind
+from ..context import PushFn, statement_tokens
+from ..walker import active_module_members, statement_and_branch_spans
 from .shared import (
     declaration_name_hit,
     for_each_undeclared_reference_span,
@@ -111,16 +112,25 @@ def _report_repeated_names(
             report(sym)
 
 
+def _is_callable_kind(kind: VbaSymbolKind) -> bool:
+    """A Sub, Function, Property or Declare: a name the module calls (issue #254)."""
+    return is_procedure_kind(kind) or kind is VbaSymbolKind.DECLARE
+
+
 def _procedures_collide(a: VbaSymbol, b: VbaSymbol) -> bool:
     """Distinct accessors of one property share their name legitimately; every
-    other repeat is the ambiguity error."""
+    other repeat is the ambiguity error. An Event collides with another Event only:
+    an Event and a Sub of one name compile (issue #266, measured in Excel 16.0)."""
+    if a.kind is VbaSymbolKind.EVENT or b.kind is VbaSymbolKind.EVENT:
+        return a.kind is b.kind
     return a.kind not in _PROPERTY_KINDS or b.kind not in _PROPERTY_KINDS or a.kind is b.kind
 
 
 def check_duplicate_procedures(
     members: Sequence[VbaSymbol], activity: ConditionalActivityTracker | None, push: PushFn
 ) -> None:
-    """A name may be one Sub/Function OR a set of distinct Property accessors."""
+    """A name may be one Sub/Function OR a set of distinct Property accessors. A
+    Declare is one of them (issue #254, measured in Excel 16.0)."""
     def report(sym: VbaSymbol) -> None:
         push(
             "duplicateProcedure",
@@ -129,7 +139,11 @@ def check_duplicate_procedures(
         )
 
     _report_repeated_names(
-        members, activity, lambda sym: is_procedure_kind(sym.kind), _procedures_collide, report
+        members,
+        activity,
+        lambda sym: _is_callable_kind(sym.kind) or sym.kind is VbaSymbolKind.EVENT,
+        _procedures_collide,
+        report,
     )
 
 
@@ -187,10 +201,43 @@ def check_variable_procedure_name_clash(
         members,
         activity,
         lambda sym: sym.kind in (VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.CONSTANT)
-        or is_procedure_kind(sym.kind),
+        or _is_callable_kind(sym.kind),
         # Only a variable-against-procedure pair is this rule's; repeats within one
         # kind belong to the duplicate rules above.
-        lambda a, b: is_procedure_kind(a.kind) != is_procedure_kind(b.kind),
+        lambda a, b: _is_callable_kind(a.kind) != _is_callable_kind(b.kind),
+        report,
+    )
+
+
+def check_enum_member_name_clash(
+    members: Sequence[VbaSymbol], activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    """An Enum member may not share its name with a procedure, a module-level
+    variable or a Const of the same module: "Ambiguous name detected" (issue #436,
+    measured in Excel 16.0). Two Enums sharing a member, and a local of the same
+    name, compile."""
+    flattened: list[VbaSymbol] = []
+    for sym in members:
+        if sym.kind is VbaSymbolKind.ENUM:
+            flattened.extend(sym.children or [])
+        else:
+            flattened.append(sym)
+
+    def report(repeat: VbaSymbol) -> None:
+        push(
+            "duplicateProcedure",
+            f"Ambiguous name detected: '{repeat.name}' names an Enum member and another "
+            "declaration in this module.",
+            repeat.name_span,
+        )
+
+    _report_repeated_names(
+        flattened,
+        activity,
+        lambda sym: sym.kind
+        in (VbaSymbolKind.ENUM_MEMBER, VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.CONSTANT)
+        or _is_callable_kind(sym.kind),
+        lambda a, b: (a.kind is VbaSymbolKind.ENUM_MEMBER) != (b.kind is VbaSymbolKind.ENUM_MEMBER),
         report,
     )
 
@@ -423,6 +470,7 @@ def _ambiguous_enum_member_definitions(
 def _ambiguous_project_procedure_owners(
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None,
     module_name: str,
+    project_visible_symbols: Sequence[VbaSymbol] | None = None,
 ) -> dict[str, list[str]]:
     """Names exported by more than one OTHER module, mapped to those module names.
 
@@ -430,19 +478,30 @@ def _ambiguous_project_procedure_owners(
     name before the project is consulted.
     """
     out: dict[str, list[str]] = {}
-    if not project_procedures:
+    # Upstream's `!projectProcedures`: an empty Map is still truthy there.
+    if project_procedures is None:
         return out
     self_name = module_name.lower()
+    owners_by_name: dict[str, list[str]] = {}
+
+    def add(name: str, owner: str) -> None:
+        owners = owners_by_name.get(name.lower(), [])
+        if not any(known.lower() == owner.lower() for known in owners):
+            owners.append(owner)
+        owners_by_name[name.lower()] = owners
+
     for name, signatures in project_procedures.items():
-        owners: list[str] = []
         for signature in signatures:
             # A Private procedure is not exported, so it cannot collide.
-            if signature.visibility is SymbolVisibility.PRIVATE:
-                continue
-            if not any(owner.lower() == signature.module_name.lower() for owner in owners):
-                owners.append(signature.module_name)
+            if signature.visibility != SymbolVisibility.PRIVATE:
+                add(name, signature.module_name)
+    # A Public variable or Const collides as a procedure does (issue #290).
+    for symbol in project_visible_symbols or []:
+        if symbol.kind in (VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.CONSTANT) and symbol.module_name:
+            add(symbol.name, symbol.module_name)
+    for key, owners in owners_by_name.items():
         if len(owners) > 1 and not any(owner.lower() == self_name for owner in owners):
-            out[name.lower()] = owners
+            out[key] = owners
     return out
 
 
@@ -467,8 +526,12 @@ def check_ambiguous_bare_procedure_calls(
     scope wins); a local, parameter or module-level symbol shadows it; or only one
     module in the project exports it.
     """
-    ambiguous_names = _ambiguous_project_procedure_owners(project_procedures, module_name)
+    ambiguous_names = _ambiguous_project_procedure_owners(
+        project_procedures, module_name, project_visible_symbols
+    )
     same_module_signatures = same_module_callable_signatures(symbols)
+    # The module's own names settle a name before the project is asked.
+    own_names = {child.name.lower() for child in symbols.root.children or []}
 
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
         # No name in this project is exported twice: nothing here can be
@@ -476,35 +539,61 @@ def check_ambiguous_bare_procedure_calls(
         if not ambiguous_names:
             return None
         source_names = source_name_scope_for(symbols, member, project_visible_symbols)
+        proc_sym = procedure_symbol_for(symbols, member)
+        locals_ = {param.name.lower() for param in member.params} | {
+            child.name.lower() for child in (proc_sym.children if proc_sym is not None else None) or []
+        }
+
+        def ambiguous(name: str) -> list[str] | None:
+            lower = name.lower()
+            owners = ambiguous_names.get(lower)
+            return (
+                owners
+                if owners
+                and lower not in same_module_signatures
+                and lower not in own_names
+                and lower not in locals_
+                and not bare_callable_source_shadowed(name, source_names)
+                else None
+            )
 
         def visitor(stmt: LeafStatementNode) -> None:
             call = extract_call(source, stmt.span)
-            if call is None or call.qualifier:
-                return
-            lower = call.name.lower()
-            owners = ambiguous_names.get(lower)
-            if owners is None:
-                return
-            # This module declares it, so VBA binds locally and never asks.
-            if lower in same_module_signatures:
-                return
-            if bare_callable_source_shadowed(call.name, source_names):
-                return
-            push(
-                "ambiguousProjectProcedure",
-                f"Ambiguous name detected: '{call.name}' is exported by "
-                f"{' and '.join(owners)}. VBA refuses to compile the project until this "
-                "call is qualified with a module name.",
-                call.name_span,
-            )
+            call_owners = ambiguous(call.name) if call is not None and not call.qualifier else None
+            if call is not None and call_owners:
+                push(
+                    "ambiguousProjectProcedure",
+                    f"Ambiguous name detected: '{call.name}' is exported by "
+                    f"{' and '.join(call_owners)}. VBA refuses to compile the project until this "
+                    "call is qualified with a module name.",
+                    call.name_span,
+                )
+            # `Main = Foo()`, `Main = gX`: a bare read of the name (issue #290,
+            # measured in Excel 16.0).
+            for span in statement_and_branch_spans(stmt):
+                toks = statement_tokens(source, span)
+                for i, tok in enumerate(toks):
+                    before = toks[i - 1].raw_text if i >= 1 else ""
+                    after = toks[i + 1].raw_text if i + 1 < len(toks) else None
+                    owners = (
+                        ambiguous(tok.raw_text)
+                        if tok.kind is TokenKind.IDENTIFIER
+                        and before not in (".", "!")
+                        and after != ":="
+                        and after != "."
+                        else None
+                    )
+                    at = span.start + tok.start
+                    if not owners or (call is not None and at == call.name_span.start):
+                        continue
+                    push(
+                        "ambiguousProjectProcedure",
+                        f"Ambiguous name detected: '{tok.raw_text}' is declared Public by "
+                        f"{' and '.join(owners)}. VBA refuses to compile the project until this "
+                        "name is qualified with a module name.",
+                        Span(at, span.start + tok.end),
+                    )
 
         return visitor
 
     return factory
-
-
-# --- sync stubs (2f49b93): replaced as each group is ported ---
-
-
-def check_enum_member_name_clash(*args: object, **kwargs: object) -> None:
-    return None

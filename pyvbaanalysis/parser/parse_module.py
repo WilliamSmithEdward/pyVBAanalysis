@@ -67,7 +67,13 @@ from .nodes import (
     WithBlockNode,
 )
 from .parse_expression import ExprParseResult, parse_expression, parse_parenless_arguments
-from .parser_state import LogicalStatement, StatementCursor, code_tokens, split_logical_statements
+from .parser_state import (
+    LogicalStatement,
+    StatementCursor,
+    code_tokens,
+    is_comment_line,
+    split_logical_statements,
+)
 from .type_declaration_suffix import is_type_declaration_suffix, type_name_for_declaration_suffix
 
 
@@ -174,7 +180,7 @@ _END_CLOSERS: dict[str, str] = {
     "enum": "endenum",
 }
 
-_VB_MEMBER_ATTR_RE = re.compile(r"^VB_[A-Za-z0-9_]+$", re.IGNORECASE)
+_VB_MEMBER_ATTR_RE = re.compile(r"^VB_[A-Za-z0-9_]+(?:\.VB_[A-Za-z0-9_]+)*\Z", re.IGNORECASE)
 _VB_CLASS_ATTR_RE = re.compile(r"^VB_(Exposed|Creatable|PredeclaredId)$", re.IGNORECASE)
 
 
@@ -797,9 +803,15 @@ class _Parser:
         closed = False
         end_stmt: LogicalStatement | None = None
         saw_conditional_directive = False
+        # A member Attribute line stands right after the header, before any comment.
+        saw_comment = False
         while not self._cursor.at_end():
             stmt = self._cursor.peek()
             assert stmt is not None
+            if is_comment_line(stmt):
+                saw_comment = True
+                self._cursor.next()
+                continue
             ck = self._closer_kind(stmt)
             if ck == expected:
                 end_stmt = self._cursor.next()
@@ -822,7 +834,9 @@ class _Parser:
                 break
             stmt_tokens = code_tokens(stmt)
             if self._is_attribute(stmt_tokens):
-                if self._is_exported_procedure_attribute(stmt, stmt_tokens, name, len(body) == 0):
+                if self._is_exported_procedure_attribute(
+                    stmt, stmt_tokens, name, len(body) == 0 and not saw_comment
+                ):
                     self._cursor.next()
                     attributes.append(self._parse_attribute(stmt, stmt_tokens))
                     continue
@@ -1189,6 +1203,9 @@ class _Parser:
                 return None
             stmt = self._cursor.peek()
             assert stmt is not None
+            if is_comment_line(stmt):
+                self._cursor.next()
+                continue
             ck = self._closer_kind(stmt)
             if ck == frame.expected and self._restates_arm_zero_closer():
                 # `End If` in the #Else arm of a chain whose #If arm already
@@ -1492,6 +1509,8 @@ class _Parser:
             return False
         target = self._strip_brackets(attr_name[:dot])
         member_attribute_name = attr_name[dot + 1 :]
+        # A shortcut key is a dotted name: Excel exports
+        # `Attribute Name.VB_ProcData.VB_Invoke_Func = "k\n14"` (XLIDE issue #186).
         return (
             target.lower() == procedure_name.lower()
             and _VB_MEMBER_ATTR_RE.match(member_attribute_name) is not None

@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from ..call.call_context import bare_call_statement_target
+from ..js_compat import js_trim
 from ..lexer.token_helpers import match_paren_from
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..parser.nodes import Span
@@ -42,6 +43,42 @@ class CallableTypeSignature:
     name: str
     params: list[CallableParamType] = field(default_factory=list)
     return_type: str | None = None
+    # A Function or Property Get, which gives a value; None where unknown.
+    valued: bool | None = None
+
+
+_SCALAR_RESULT_TYPES = frozenset(
+    (
+        "string",
+        "boolean",
+        "date",
+        "byte",
+        "integer",
+        "long",
+        "longlong",
+        "longptr",
+        "single",
+        "double",
+        "currency",
+        "decimal",
+    )
+)
+_EMPTY_PARENS_END_RE = re.compile(r"\(\s*\)$")
+_VBA_PREFIX_RE = re.compile(r"^vba\.")
+
+
+def call_then_index(sig: CallableTypeSignature, call: CallArguments) -> bool:
+    """`Arr(1)` with `Function Arr() As Variant`: a call that takes no argument,
+    then an index into what it returns, when that is a Variant or an object. VBA
+    compiles it and indexes the result, as a statement too, `Arr 1` and
+    `Call Arr(1)` (XLIDE issue #609, measured in Excel 16.0). A scalar or a typed
+    array result refuses the argument at compile."""
+    if sig.valued is not True or len(sig.params) > 0 or len(call.slots) == 0:
+        return False
+    type_ = js_trim(sig.return_type).lower() if sig.return_type is not None else None
+    if type_ is None or type_ == "variant":
+        return True
+    return not _EMPTY_PARENS_END_RE.search(type_) and _VBA_PREFIX_RE.sub("", type_) not in _SCALAR_RESULT_TYPES
 
 
 @dataclass(slots=True)
@@ -56,6 +93,12 @@ class InferredArgumentType:
     # rather than a literal, so overflow messages can name the constant instead
     # of calling its display name a "numeric literal".
     numeric_constant_name: str | None = None
+    # A float literal's value (`3000000000#`, `2.5`). Kept apart from
+    # numeric_value, whose range checks assume a whole number exactly held.
+    float_value: float | None = None
+    # The local whose known value numeric_value or float_value is, so the range
+    # checks say whose value it is rather than call it a literal (XLIDE #332).
+    held_by: str | None = None
 
 
 @dataclass(slots=True)
@@ -315,6 +358,8 @@ def validate_arity(
     attaches is editor-only and is deferred (it does not affect which diagnostics
     fire), so this passes no diagnostic data.
     """
+    if call_then_index(sig, call):
+        return
     display_name = _call_display_name(sig, call)
     params = sig.params
     required = len(params)
@@ -328,6 +373,7 @@ def validate_arity(
     named = [slot for slot in call.slots if is_named_slot(slot)]
     if named:
         saw_named = False
+        slot_order_reported = False
         for i, slot in enumerate(call.slots):
             if is_named_slot(slot):
                 saw_named = True
@@ -348,8 +394,29 @@ def validate_arity(
                     f"call to '{display_name}'.",
                     call.slot_spans[i] if call.slot_spans else call.name_span,
                 )
+            slot_order_reported = True
             break  # one syntax error per call, matching VBE
         param_names = {strip_header_brackets(p.name).lower() for p in params}
+        # A procedure with a ParamArray takes no named argument at all, its fixed
+        # parameters' names included: `PA(p0:=1)` (XLIDE issue #647, measured in
+        # Excel 16.0).
+        param_array = next((p for p in params if p.param_array), None)
+        first_name = strip_header_brackets(named[0][0].raw_text).lower()
+        if (
+            param_array is not None
+            and first_name
+            and first_name in param_names
+            and first_name != strip_header_brackets(param_array.name).lower()
+        ):
+            push(
+                "argumentCount",
+                f"'{display_name}' has a ParamArray, "
+                f"'{strip_header_brackets(param_array.name)}', so no argument to it may "
+                f"be named. This is a VBE compile error: Argument in ParamArray may not "
+                f"be named.",
+                Span(call.slice_start + named[0][0].start, call.slice_start + named[0][0].end),
+            )
+            return
         seen: set[str] = set()
         for slot in named:
             raw = strip_header_brackets(slot[0].raw_text)
@@ -358,6 +425,19 @@ def validate_arity(
                 push(
                     "argumentCount",
                     f"Named argument not found: '{raw}' is not a parameter of '{display_name}'.",
+                    Span(call.slice_start + slot[0].start, call.slice_start + slot[0].end),
+                )
+                continue
+            # `Many(p:=1)`: a ParamArray takes no name (XLIDE issue #223, measured).
+            named_param = next(
+                (p for p in params if strip_header_brackets(p.name).lower() == lower), None
+            )
+            if named_param is not None and named_param.param_array:
+                push(
+                    "argumentCount",
+                    f"'{raw}' is the ParamArray of '{display_name}', which may not be "
+                    f"named. This is a VBE compile error: Argument in ParamArray may not "
+                    f"be named.",
                     Span(call.slice_start + slot[0].start, call.slice_start + slot[0].end),
                 )
                 continue
@@ -370,9 +450,45 @@ def validate_arity(
                 )
                 continue
             seen.add(lower)
+        # `TTwo a:=1` leaves b out: every parameter that is not Optional needs an
+        # argument, by position or by name (XLIDE issue #410, measured in Excel
+        # 16.0). The names were all good, or a report above stands instead.
+        if not slot_order_reported and len(seen) == len(named):
+            first_named = next((k for k, s in enumerate(call.slots) if is_named_slot(s)), -1)
+            missing = next(
+                (
+                    p
+                    for k, p in enumerate(params)
+                    if not p.optional
+                    and not p.param_array
+                    and not (k < first_named and len(call.slots[k]) > 0)
+                    and strip_header_brackets(p.name).lower() not in seen
+                ),
+                None,
+            )
+            if missing is not None:
+                push(
+                    "argumentCount",
+                    f"Parameter '{strip_header_brackets(missing.name)}' of '{display_name}' "
+                    f"is not Optional, and the call gives it no argument, by position or by "
+                    f"name. This is a VBE compile error: Argument not optional.",
+                    call.name_span,
+                )
         return  # positional count is not validated alongside named arguments
 
     n = len(call.slots)
+    # `Opt(1, )`, `Many(1, )`, `Two(1, 2, )`: a list may not end in an empty
+    # argument, whatever the parameters (XLIDE issue #223, measured in Excel
+    # 16.0). `TwoSub 1,` and `Call TwoSub(1, )` too. Print is the exception:
+    # `Debug.Print n,` ends in a separator of its own syntax.
+    if n > 1 and len(call.slots[n - 1]) == 0 and sig.name.lower() != "print":
+        push(
+            "argumentCount",
+            f"The call to '{display_name}' ends in an empty argument. This is a VBE "
+            f"compile error: Syntax error.",
+            call.slot_spans[n - 1] if call.slot_spans else call.name_span,
+        )
+        return
     # Per-slot 'Argument not optional' is only reported when the slot count is
     # in range: when it already violates min/max, the count check below emits the
     # single arity diagnostic instead, matching the named-arg path's one-error
@@ -388,6 +504,16 @@ def validate_arity(
                     call.slot_spans[i] if call.slot_spans else call.name_span,
                 )
 
+    # A parameterless Function of the project named Left, InStr, InStrB or StrComp
+    # does not hide VBA's when the call gives VBA's argument count:
+    # `Left("abc", 1)` gives "a" (XLIDE issue #645, measured in Excel 16.0). Every
+    # other VBA name, and Left with one or three arguments, is refused.
+    if (
+        len(params) == 0
+        and not call.qualifier
+        and n in _BUILT_INS_PAST_PARAMETERLESS.get(sig.name.lower(), ())
+    ):
+        return
     if n < required or n > maximum:
         push(
             "argumentCount",
@@ -397,8 +523,11 @@ def validate_arity(
         )
 
 
-# --- sync stubs (2f49b93): replaced as each group is ported ---
-
-
-def call_then_index(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("callThenIndex not ported yet")
+# VBA functions a parameterless project Function does not hide, by the argument
+# counts that reach them (XLIDE issue #645).
+_BUILT_INS_PAST_PARAMETERLESS: Mapping[str, tuple[int, ...]] = {
+    "left": (2,),
+    "instr": (2, 3),
+    "instrb": (2,),
+    "strcomp": (2,),
+}

@@ -89,7 +89,11 @@ def test_in_same_branch_is_stricter_than_not_exclusive() -> None:
     ],
 )
 def test_one_name_per_arm_is_not_a_duplicate(label: str, body: str) -> None:
-    assert _codes(f"Option Explicit\n\n#If CUSTOMFLAG Then\n{body}\n#End If\n") == []
+    # The Declare without PtrSafe is reported by declare-missing-ptrsafe, which
+    # reads Win64 with the default compiler constants since XLIDE 44c5af98
+    # (issue #215); the claim here is only that no duplicate is reported.
+    codes = _codes(f"Option Explicit\n\n#If CUSTOMFLAG Then\n{body}\n#End If\n")
+    assert [code for code in codes if code != "declare-missing-ptrsafe"] == []
 
 
 def test_a_local_per_arm_is_not_a_duplicate_declaration() -> None:

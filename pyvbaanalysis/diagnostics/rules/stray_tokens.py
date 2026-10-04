@@ -9,7 +9,12 @@ Excel 16.0 (build 20326, 2026-09-26):
   between tokens it is a Syntax error and at the start of a line it becomes part of
   the name ("Variable not defined"). The lexer gives all of these the `unknown`
   kind, and `;` the punctuation kind.
-- line-too-long: a physical line of 1024 characters is refused; 1023 compiles.
+- line-too-long: the VBE reads a physical line in pieces of 1023 characters, each
+  its own line (issue #187, measured 2026-09-29). A 1024-character statement is
+  refused. A line long only because of blanks compiles: 2635 spaces, a statement
+  with 1100 trailing blanks, or one after 1100 leading blanks, since the other
+  pieces are blank lines. So the rule is that the code between the first and last
+  non-blank character fits one piece.
 """
 
 from __future__ import annotations
@@ -142,13 +147,21 @@ def check_stray_characters(
             visible_end -= 1
         length = visible_end - line_start
         if length > _MAX_LINE_LENGTH:
-            span = Span(line_start + _MAX_LINE_LENGTH, visible_end)
-            if not (activity is not None and activity.is_inactive(span)):
+            first = line_start
+            while first < visible_end and source[first] in " \t":
+                first += 1
+            last = visible_end - 1
+            while last >= first and source[last] in " \t":
+                last -= 1
+            piece = (first - line_start) // _MAX_LINE_LENGTH
+            crosses = first <= last and (last - line_start) // _MAX_LINE_LENGTH != piece
+            span = Span(line_start + (piece + 1) * _MAX_LINE_LENGTH, last + 1)
+            if crosses and not (activity is not None and activity.is_inactive(span)):
                 push(
                     "lineTooLong",
-                    f"Line {line_index + 1} is {length} characters long; the VBE accepts "
-                    f"{_MAX_LINE_LENGTH}. Break it with a line continuation. This is a VBE "
-                    "compile error.",
+                    f"Line {line_index + 1} is {length} characters long. The VBE reads a line in "
+                    f"pieces of {_MAX_LINE_LENGTH} characters, and this line's code runs past the "
+                    "end of one. Break it with a line continuation. This is a VBE compile error.",
                     span,
                 )
         if line_end >= len(source):

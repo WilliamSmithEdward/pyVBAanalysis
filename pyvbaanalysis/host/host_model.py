@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from ..identity_cache import IdentityLru
 
@@ -34,12 +34,43 @@ class HostMember(TypedDict, total=False):
     # The type the type library declares, where the model repairs `returns` from
     # the reference prose: most Item accessors are declared `As Object`.
     declaredType: str
+    # The read/write contract the type library states for a property:
+    # 'read-only' | 'read/write' | 'write-only'. Methods carry none.
+    access: str
+    # What the host's oracle (twinBASIC, for VB6) says of the member:
+    # 'implemented' | 'unimplemented' | 'absent'. Absent for hosts with none.
+    oracle: str
+
+
+# A member's kind as the model states it.
+HostMemberKind = Literal["property", "method", "event"]
 
 
 class HostConstant(TypedDict, total=False):
     name: str
     type: str
     value: str | int
+    source: str
+
+
+class HostEnum(TypedDict, total=False):
+    """An enumeration the host library declares. Its members are the constants
+    whose `type` names it; this carries the name, which VBA accepts as a declared
+    type (`Dim k As XlAxisType`) and as a qualifier (`XlAxisType.xlCategory`)."""
+
+    # Bare display name, e.g. "XlAxisType".
+    displayName: str
+    # The library it came from, stamped when models are merged. Absent in a
+    # single host's own model, where the model's host is the answer.
+    library: str
+
+
+class DispatchOnlyLibrary(TypedDict):
+    """A library whose interfaces are dispatch-only rather than dual, by its type
+    prefix, with the bare names of the types in it that are dual."""
+
+    prefix: str
+    dualTypes: list[str]
 
 
 class HostType(TypedDict, total=False):
@@ -74,7 +105,12 @@ class HostObjectModel(_HostObjectModelCore, total=False):
     globalType: str | None
     # Enumerations by name. In a merged model, a referenced library's entries
     # carry a `library` key naming where they came from.
-    enums: Mapping[str, Mapping[str, object]]
+    enums: Mapping[str, HostEnum]
+    # The VBE refuses a Let to a read-only property of a dispatch-only type with
+    # "Wrong number of arguments or invalid property assignment", not "Can't
+    # assign to read-only property" (XLIDE issue #198). Only Excel's library has
+    # them; a merged model does not carry it.
+    dispatchOnlyLibrary: DispatchOnlyLibrary
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,7 +173,9 @@ class _HostModelIndex:
     members_by_type: dict[str, _HostTypeIndex]
     type_keys_by_lower: dict[str, str]
     globals_by_lower: dict[str, str]
-    enums_by_lower: dict[str, Mapping[str, object]]
+    # Every member name in the model, lowercased, across every type.
+    member_names: set[str]
+    enums_by_lower: dict[str, HostEnum]
     constants_by_enum: dict[str, list[HostConstant]]
 
 
@@ -180,10 +218,13 @@ def _host_model_index(model: HostObjectModel) -> _HostModelIndex:
         key_lower = key.lower()
         if key_lower not in globals_by_lower:
             globals_by_lower[key_lower] = global_type
-    enums_by_lower: dict[str, Mapping[str, object]] = {}
+    member_names: set[str] = set()
+    for type_index in members_by_type.values():
+        member_names.update(type_index.raw_by_lower_name)
+    enums_by_lower: dict[str, HostEnum] = {}
     for entry in (model.get("enums") or {}).values():
-        lower = str(entry.get("displayName", "")).lower()
-        if lower and lower not in enums_by_lower:
+        lower = entry["displayName"].lower()
+        if lower not in enums_by_lower:
             enums_by_lower[lower] = entry
     # An enum's members are the constants that name it, so the two can never
     # disagree and the generated tables stay a single list.
@@ -193,7 +234,12 @@ def _host_model_index(model: HostObjectModel) -> _HostModelIndex:
         if enum_type:
             constants_by_enum.setdefault(enum_type.lower(), []).append(constant)
     index = _HostModelIndex(
-        members_by_type, type_keys_by_lower, globals_by_lower, enums_by_lower, constants_by_enum
+        members_by_type,
+        type_keys_by_lower,
+        globals_by_lower,
+        member_names,
+        enums_by_lower,
+        constants_by_enum,
     )
     return _MODEL_INDEX_CACHE.put(index, model)  # type: ignore[no-any-return]
 
@@ -211,6 +257,30 @@ def get_host_type(qualified: str, model: HostObjectModel | None = None) -> HostT
     return _default(model)["types"].get(qualified)
 
 
+def bare_type_name(qualified: str) -> str:
+    """Bare type name from a qualified one: 'Excel.Range' -> 'Range'."""
+    dot = qualified.rfind(".")
+    return qualified[dot + 1 :] if dot >= 0 else qualified
+
+
+def host_display_name(model: HostObjectModel | None = None) -> str:
+    """The application name origin labels use ('Excel host method', 'Word type').
+    An absent model answers Excel, the default model when no host is named, and so
+    does a model without a hostName (XLIDE issue #28)."""
+    if model is None:
+        return "Excel"
+    host_name = model.get("hostName")
+    return host_name if host_name is not None else "Excel"
+
+
+def host_library_display_name(qualified: str | None, model: HostObjectModel | None = None) -> str:
+    """The library to put on a label for something the model keys by a qualified
+    name: `Word.Application` is Word's, whichever host the project is. Anything the
+    model does not qualify falls back to the model's host (XLIDE issue #77)."""
+    dot = qualified.find(".") if qualified is not None else -1
+    return qualified[:dot] if qualified is not None and dot > 0 else host_display_name(model)
+
+
 def resolve_host_member(
     qualified: str, member_name: str, model: HostObjectModel | None = None
 ) -> HostMember | None:
@@ -225,6 +295,37 @@ def get_host_members(qualified: str, model: HostObjectModel | None = None) -> li
     """The object-access members of a qualified type, or an empty list if unknown."""
     type_index = _host_model_index(_default(model)).members_by_type.get(qualified)
     return type_index.members if type_index is not None else []
+
+
+_DUAL_TYPES_BY_MODEL = IdentityLru(capacity=8)
+
+
+def is_dispatch_only_host_type(qualified: str, model: HostObjectModel | None = None) -> bool:
+    """Whether a qualified type is a dispatch-only interface rather than a dual one
+    (see HostObjectModel.dispatchOnlyLibrary): `Excel.Range` is, and
+    `Excel.Workbook` and every Word type are not."""
+    resolved = _default(model)
+    library = resolved.get("dispatchOnlyLibrary")
+    dot = qualified.find(".")
+    if not library or dot < 0 or qualified[:dot].lower() != library["prefix"].lower():
+        return False
+    dual = _DUAL_TYPES_BY_MODEL.get(resolved)
+    if dual is None:
+        dual = _DUAL_TYPES_BY_MODEL.put(
+            frozenset(name.lower() for name in library["dualTypes"]), resolved
+        )
+    return qualified[dot + 1 :].lower() not in dual
+
+
+def get_host_events(qualified: str, model: HostObjectModel | None = None) -> list[HostMember]:
+    """The events a qualified type raises, in declaration order. Events are not
+    object-access members, so get_host_members leaves them out. Empty for a type
+    the model does not carry or whose events it does not model."""
+    resolved = _default(model)
+    key = _host_model_index(resolved).type_keys_by_lower.get(qualified.lower())
+    type_ = resolved["types"].get(key) if key is not None else None
+    members = (type_.get("members") or []) if type_ is not None else []
+    return [member for member in members if member.get("kind") == "event"]
 
 
 _HOST_MEMBER_NAMES_CACHE = IdentityLru(capacity=8)
@@ -262,7 +363,12 @@ def resolve_host_constant(name: str, model: HostObjectModel | None = None) -> Ho
     return _host_constant_index(_default(model)).get(name.lower())
 
 
-def resolve_host_enum(name: str, model: HostObjectModel | None = None) -> Mapping[str, object] | None:
+def get_host_enums(model: HostObjectModel | None = None) -> list[HostEnum]:
+    """The enumerations the host library declares, for type positions."""
+    return list((_default(model).get("enums") or {}).values())
+
+
+def resolve_host_enum(name: str, model: HostObjectModel | None = None) -> HostEnum | None:
     """The enumeration named `name`, case-insensitively. VBA accepts an enum name as
     a declared type (`Dim k As XlAxisType`) and as a qualifier
     (`XlAxisType.xlCategory`)."""
@@ -274,6 +380,12 @@ def resolve_host_enum(name: str, model: HostObjectModel | None = None) -> Mappin
 def get_host_enum_members(enum_name: str, model: HostObjectModel | None = None) -> list[HostConstant]:
     """The constants belonging to one enumeration, in declaration order."""
     return _host_model_index(_default(model)).constants_by_enum.get(enum_name.lower(), [])
+
+
+def is_host_member_name_anywhere(name: str, model: HostObjectModel | None = None) -> bool:
+    """True when any type in the model carries a member of this name, events
+    included. Case-insensitive."""
+    return name.lower() in _host_model_index(_default(model)).member_names
 
 
 def resolve_host_global_member(name: str, model: HostObjectModel | None = None) -> HostMember | None:
@@ -288,6 +400,20 @@ def resolve_host_global_member(name: str, model: HostObjectModel | None = None) 
         return None
     type_index = _host_model_index(resolved).members_by_type.get(global_type)
     return type_index.by_lower_name.get(name.lower()) if type_index is not None else None
+
+
+def get_host_global_members(model: HostObjectModel | None = None) -> list[HostMember]:
+    """All object-access members of the host's hidden Global interface, without
+    the `_`-prefixed dispatch internals (XLIDE issue #41)."""
+    resolved = _default(model)
+    global_type = resolved.get("globalType")
+    if not global_type:
+        return []
+    return [
+        member
+        for member in get_host_members(global_type, resolved)
+        if not member["name"].startswith("_")
+    ]
 
 
 def resolve_host_member_signature(
@@ -375,38 +501,3 @@ def application_member_names(model: HostObjectModel | None = None) -> frozenset[
         ),
         resolved,
     )
-
-
-# --- sync stubs (2f49b93): replaced as each group is ported ---
-
-
-def get_host_enums(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("getHostEnums not ported yet")
-
-
-def is_host_member_name_anywhere(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("isHostMemberNameAnywhere not ported yet")
-
-
-def bare_type_name(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("bareTypeName not ported yet")
-
-
-def host_display_name(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("hostDisplayName not ported yet")
-
-
-def host_library_display_name(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("hostLibraryDisplayName not ported yet")
-
-
-def is_dispatch_only_host_type(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("isDispatchOnlyHostType not ported yet")
-
-
-def get_host_events(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("getHostEvents not ported yet")
-
-
-def get_host_global_members(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("getHostGlobalMembers not ported yet")

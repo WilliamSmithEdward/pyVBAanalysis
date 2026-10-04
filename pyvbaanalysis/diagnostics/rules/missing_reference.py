@@ -28,6 +28,9 @@ be proven, so the rule stays silent rather than guess.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
+
 from ...host.host_libraries import HOST_LIBRARY_NAMES
 from ...host.host_model import HostObjectModel
 from ...lexer.token_helpers import token_name
@@ -99,11 +102,83 @@ def libraries_named_in(source: str) -> set[str]:
     return {library.lower() for library, _ in _qualified_names_in(source)}
 
 
+# The Scripting library's types a module names unqualified, which no default
+# reference brings.
+_SCRIPTING_TYPES: frozenset[str] = frozenset({"dictionary", "filesystemobject", "textstream"})
+
+
+def check_missing_scripting_reference(
+    source: str,
+    referenced_libraries: Sequence[str] | None,
+    project_types: AbstractSet[str],
+    push: PushFn,
+) -> None:
+    """Module rule: an early-bound Scripting type in a project whose references are
+    known and do not include the Scripting Runtime.
+
+    `Dim d As Scripting.Dictionary` and `Dim d As New Dictionary` then do not
+    compile, "User-defined type not defined" (issue #349, measured in Excel 16.0).
+    Silent when the references are not known, and for a name the project declares
+    itself. Reported once per module, as a missing library is.
+    """
+    if referenced_libraries is None or any(name.lower() == "scripting" for name in referenced_libraries):
+        return
+    toks = [
+        t
+        for t in tokenize_cached(source)
+        if t.kind is not TokenKind.COMMENT and t.kind is not TokenKind.NEWLINE
+    ]
+
+    def raw_at(index: int) -> str | None:
+        return toks[index].raw_text if index < len(toks) else None
+
+    i = 0
+    while i + 1 < len(toks):
+        word = toks[i].raw_text.lower()
+        if word != "as" and word != "new":
+            i += 1
+            continue
+        at = i + 1
+        if word == "as" and (raw_at(at) or "").lower() == "new":
+            at += 1
+        qualified = (
+            (raw_at(at) or "").lower() == "scripting"
+            and raw_at(at + 1) == "."
+            and token_name(toks[at + 2] if at + 2 < len(toks) else None) is not None
+        )
+        name = (
+            token_name(toks[at + 2])
+            if qualified
+            else token_name(toks[at] if at < len(toks) else None)
+        )
+        lower = name.lower() if name is not None else None
+        if (
+            not name
+            or not lower
+            or (
+                not qualified
+                and (lower not in _SCRIPTING_TYPES or lower in project_types or raw_at(at + 1) == ".")
+            )
+        ):
+            i += 1
+            continue
+        push(
+            "missingLibraryReference",
+            f"'{name}' is the Scripting Runtime's, which this project does not reference. Add a "
+            "reference to Microsoft Scripting Runtime, or bind late: "
+            f'Dim x As Object: Set x = CreateObject("Scripting.{name}"). This is a VBE compile '
+            "error: User-defined type not defined.",
+            Span(toks[at].start, (toks[at + 2] if qualified else toks[at]).end),
+        )
+        return
+
+
 def check_missing_library_reference(
     source: str,
     model: HostObjectModel,
     references_known: bool,
     push: PushFn,
+    project_modules: AbstractSet[str] = frozenset(),
 ) -> None:
     """Module rule: a type or constant qualified with an Office library the project
     does not reference.
@@ -111,6 +186,9 @@ def check_missing_library_reference(
     Reported once per library per module. A project missing a reference names it on
     every line that uses it, and one diagnostic per line would bury the module in the
     same message with the same one fix.
+
+    `project_modules` is the project's module names, lowercased: a module named Word
+    is called as Word.Hi (issue #357).
     """
     if not references_known:
         return
@@ -123,7 +201,7 @@ def check_missing_library_reference(
     for found_library, span in _qualified_names_in(source):
         lower = found_library.lower()
         library = _ADDABLE.get(lower)
-        if library is None or lower in present or lower in seen:
+        if library is None or lower in present or lower in project_modules or lower in seen:
             continue
         seen.add(lower)
         push(
@@ -134,10 +212,3 @@ def check_missing_library_reference(
             span,
             VbaDiagnosticData(add_library_reference=VbaAddLibraryReferenceData(library=lower)),
         )
-
-
-# --- sync stubs (2f49b93): replaced as each group is ported ---
-
-
-def check_missing_scripting_reference(*args: object, **kwargs: object) -> None:
-    return None

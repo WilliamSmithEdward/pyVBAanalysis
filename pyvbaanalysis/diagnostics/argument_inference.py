@@ -2,10 +2,12 @@
 
 Ported from the inference engine of
 xlide_vscode/src/analyzer/diagnostics/typeInference.ts: inferExpressionType and
-its operand splitters, the host-global, runtime-object and external-constant
-value types, member-expression typing through the member-completion context, the
-ByRef / string-arithmetic / numeric-overflow operand checks,
-incompatibilityReason, and validateArgumentTypes(ForSignature).
+its atomic, arithmetic and concatenation typers, the host-global call type,
+member-expression typing through the member-completion context, the
+string-arithmetic operand check, incompatibilityReason, the object/value
+argument checks, and validateArgumentTypes(ForSignature). The pure helpers
+these read (operand splitters, literal and overflow typing, ByRef exactness)
+are in types/type_inference.py.
 
 The member-completion paths run only when the caller passes the source and a
 member context; without them an expression that needs one resolves to None, and
@@ -14,6 +16,7 @@ an unresolved argument type is simply not checked.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -21,28 +24,44 @@ from dataclasses import dataclass, replace
 from ..completion.member_access import (
     MemberCompletionContext,
     MemberCompletionEntry,
-    is_explicit_element_accessor,
+    is_known_object_assignment_type,
     resolve_exact_member_completion,
 )
 from ..constants.integer_constant_expression import parse_decimal_integer_literal
-from ..host.host_model import (
-    HostConstant,
-    HostObjectModel,
-    get_host_members,
-    resolve_host_constant,
-    resolve_host_global,
-)
+from ..host.host_model import resolve_host_global, resolve_host_global_member
+from ..js_compat import js_number_to_string
 from ..lexer.token_helpers import match_paren_from
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..parser.nodes import Span
-from ..runtime.vba_runtime import VbaRuntimeConstant, resolve_runtime_constant, resolve_runtime_object
-from ..symbols.symbol_model import VbaSymbolKind, qualified_procedure_key
-from ..types.type_inference import SourceDeclaredType
+from ..symbols.symbol_model import qualified_procedure_key
+from ..types.type_inference import (
+    VALUE_HELD,
+    ByRefMismatch,
+    SourceDeclaredType,
+    arithmetic_of_scalars,
+    by_ref_variable_type_mismatch,
+    final_member_token_in_expression,
+    find_nonnumeric_string_in_arithmetic_expression,
+    float_literal_value,
+    has_top_level_operator,
+    infer_bare_external_constant_expression_type,
+    infer_bare_external_object_expression_type,
+    infer_intrinsic_cverr_error_variant,
+    infer_qualified_external_constant_expression_type,
+    infer_signed_numeric_literal,
+    js_string_literal,
+    member_accepts_zero_arguments,
+    member_expression_return_type,
+    numeric_literal_overflow_reason,
+    object_value_needs_index,
+    parameterless_value_signature,
+    sheets_from_collection_property,
+    split_top_level_arithmetic_operands,
+    split_top_level_operands,
+)
 from ..types.type_names import (
-    is_boolean_string,
     is_known_scalar_type,
     is_numeric_type,
-    is_provably_non_numeric_string,
     is_string_concatenation_operand_type,
     normalize_type,
     numeric_literal_bounds,
@@ -52,7 +71,6 @@ from .call_extraction import (
     CallableTypeSignature,
     CallArguments,
     InferredArgumentType,
-    callable_accepts_zero_arguments,
     named_argument_slot,
     split_arg_slots,
     string_literal_value,
@@ -64,11 +82,11 @@ from .callable_signatures import (
     callable_signature_for,
     callable_signature_for_call,
     parenthesized_call_name_at,
-    parse_runtime_display_signature,
     runtime_callable_source_shadowed,
 )
-from .const_expr import numeric_external_constant_value
 from .context import PushFn
+from .null_operators import operator_yields_null
+from .string_conversion import is_invalid_boolean_string, is_invalid_date_string, numeric_string_verdict
 from .walker import span_for_tokens, strip_header_brackets, token_name, token_text
 
 SourceDeclaredTypeResolver = Callable[[str], SourceDeclaredType]
@@ -77,7 +95,7 @@ SourceQualifiedDeclaredTypeResolver = Callable[[str, str], SourceDeclaredType]
 _SignatureMap = Mapping[str, CallableTypeSignature]
 
 
-def _significant(toks: list[VbaToken]) -> list[VbaToken]:
+def _significant(toks: Sequence[VbaToken]) -> list[VbaToken]:
     return [t for t in toks if t.kind is not TokenKind.COMMENT and t.kind is not TokenKind.NEWLINE]
 
 
@@ -85,7 +103,7 @@ def _significant(toks: list[VbaToken]) -> list[VbaToken]:
 
 
 def infer_argument_type(
-    slot: list[VbaToken],
+    slot: Sequence[VbaToken],
     slice_start: int,
     env: Mapping[str, str],
     module_signatures: _SignatureMap,
@@ -109,6 +127,13 @@ def infer_argument_type(
     )
 
 
+# Runtime functions that return Null for a Null first argument, where the $
+# spellings raise 94 at the call (XLIDE issue #184, measured in Excel 16.0).
+_NULL_PROPAGATING_RUNTIME_FUNCTIONS = frozenset(
+    {"len", "lenb", "left", "right", "mid", "ucase", "lcase", "trim", "ltrim", "rtrim"}
+)
+
+
 def infer_expression_type(
     toks: list[VbaToken],
     slice_start: int,
@@ -123,72 +148,52 @@ def infer_expression_type(
 ) -> InferredArgumentType | None:
     if not toks:
         return None
-    unwrapped = unwrap_outer_parens(toks)
-    if len(unwrapped) != len(toks):
-        return infer_expression_type(
-            unwrapped, slice_start, env, module_signatures, source_names,
-            resolve_expression_type, resolve_qualified_expression_type,
-            source=source, member_ctx=member_ctx,
-        )
-    signed = _infer_signed_numeric_literal(toks, slice_start)
+    # Upstream recurses once per enclosing pair of parentheses; unwrap them all.
+    while True:
+        unwrapped = unwrap_outer_parens(toks)
+        if len(unwrapped) == len(toks):
+            break
+        toks = unwrapped
+    if not toks:
+        return None
+    signed = infer_signed_numeric_literal(toks, slice_start)
     if signed is not None:
         return signed
-    concatenation = _infer_string_concatenation_expression_type(
+    concatenation = infer_string_concatenation_expression_type(
         toks, slice_start, env, module_signatures, source_names,
         resolve_expression_type, resolve_qualified_expression_type,
         source=source, member_ctx=member_ctx,
     )
     if concatenation is not None:
         return concatenation
-    arithmetic = _infer_arithmetic_expression_type(
+    arithmetic = infer_arithmetic_expression_type(
         toks, slice_start, env, module_signatures, source_names,
         resolve_expression_type, resolve_qualified_expression_type,
         source=source, member_ctx=member_ctx,
     )
     if arithmetic is not None:
         return arithmetic
-    return _infer_atomic_expression_type(
+    return infer_atomic_expression_type(
         toks, slice_start, env, module_signatures, source_names,
         resolve_expression_type, resolve_qualified_expression_type,
         source=source, member_ctx=member_ctx,
     )
 
 
-def _infer_signed_numeric_literal(toks: list[VbaToken], slice_start: int) -> InferredArgumentType | None:
-    if len(toks) != 2 or toks[0].kind is not TokenKind.OPERATOR:
-        return None
-    sign = toks[0].raw_text
-    if sign not in ("+", "-"):
-        return None
-    literal = toks[1]
-    if literal.kind is not TokenKind.INTEGER_LITERAL:
-        return None
-    value = parse_decimal_integer_literal(literal.raw_text)
-    if value is None:
-        return None
-    signed = -value if sign == "-" else value
-    text = f"{sign}{literal.raw_text}"
-    return InferredArgumentType(
-        type_="Double",
-        label=f"numeric literal {text}",
-        span=Span(slice_start + toks[0].start, slice_start + literal.end),
-        numeric_value=signed,
-        numeric_text=text,
-    )
-
-
-def _infer_atomic_expression_type(
+def infer_atomic_expression_type(
     toks: list[VbaToken],
     slice_start: int,
     env: Mapping[str, str],
     module_signatures: _SignatureMap,
-    source_names: SourceNameScope | None,
-    resolve_expression_type: SourceDeclaredTypeResolver | None,
-    resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None,
+    source_names: SourceNameScope | None = None,
+    resolve_expression_type: SourceDeclaredTypeResolver | None = None,
+    resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None = None,
     *,
     source: str | None = None,
     member_ctx: MemberCompletionContext | None = None,
 ) -> InferredArgumentType | None:
+    if not toks:
+        return None
     first = toks[0]
     span = Span(slice_start + first.start, slice_start + first.end)
     if len(toks) == 1:
@@ -196,10 +201,18 @@ def _infer_atomic_expression_type(
         if literal is not None:
             return literal
 
-    model = member_ctx.model if member_ctx is not None else None
     name = token_name(first)
     if name and len(toks) == 1:
         declared_type = resolve_expression_type(name) if resolve_expression_type else None
+        # A Const that holds a string literal converts as the literal does (XLIDE
+        # issue #255).
+        if declared_type is not None and declared_type.resolved and declared_type.string_value is not None:
+            return InferredArgumentType(
+                type_="String",
+                label=f"constant '{name}' ({js_string_literal(declared_type.string_value)})",
+                span=span,
+                string_value=declared_type.string_value,
+            )
         type_ = (
             declared_type.as_type
             if declared_type is not None and declared_type.resolved
@@ -207,15 +220,17 @@ def _infer_atomic_expression_type(
         )
         if type_:
             return InferredArgumentType(type_=type_, label=f"{name} As {type_}", span=span)
-        sig = _parameterless_value_signature(name, module_signatures, source_names)
+        sig = parameterless_value_signature(name, module_signatures, source_names)
         if sig is not None and sig.return_type:
             return InferredArgumentType(
                 type_=sig.return_type, label=f"{name} As {sig.return_type}", span=span
             )
-        external_object = _infer_bare_external_object_expression_type(name, span, source_names, model)
+        external_object = infer_bare_external_object_expression_type(name, span, source_names, member_ctx)
         if external_object is not None:
             return external_object
-        return _infer_bare_external_constant_expression_type(name, span, source_names, model)
+        return infer_bare_external_constant_expression_type(
+            name, span, source_names, member_ctx.model if member_ctx is not None else None
+        )
 
     if token_text(first) == "new" and len(toks) == 2:
         type_name = token_name(toks[1])
@@ -229,12 +244,30 @@ def _infer_atomic_expression_type(
     if name:
         call_name = parenthesized_call_name_at(toks, 0)
         error_variant = (
-            _infer_intrinsic_cverr_error_variant(toks, slice_start, module_signatures, source_names)
+            infer_intrinsic_cverr_error_variant(toks, slice_start, module_signatures, source_names)
             if call_name is not None and call_name.paren_index == 1
             else None
         )
         if error_variant is not None:
             return error_variant
+        # `Len(Null)` and `UCase(Null)` return Null, whatever type they otherwise
+        # return (XLIDE issue #184, measured in Excel 16.0).
+        if (
+            call_name is not None
+            and call_name.name.lower() in _NULL_PROPAGATING_RUNTIME_FUNCTIONS
+            and call_name.name.lower() not in module_signatures
+            and not bare_callable_source_shadowed(call_name.name, source_names)
+            and not runtime_callable_source_shadowed(call_name.name, source_names)
+            and match_paren_from(toks, call_name.paren_index) == len(toks) - 1
+        ):
+            slots = split_arg_slots(toks[call_name.paren_index + 1 : -1], slice_start).slots
+            first_slot = slots[0] if slots else []
+            if len(first_slot) == 1 and token_text(first_slot[0]) == "null":
+                return InferredArgumentType(
+                    type_="Null",
+                    label=f"{call_name.name}(Null), which is Null",
+                    span=Span(span.start, slice_start + toks[-1].end),
+                )
         if call_name is not None:
             sig = callable_signature_for(call_name.name, module_signatures, source_names)
             if (
@@ -247,10 +280,16 @@ def _infer_atomic_expression_type(
                     label=f"{call_name.name}(...) As {sig.return_type}",
                     span=Span(span.start, slice_start + toks[call_name.name_end_index].end),
                 )
+            host_global = _infer_bare_host_global_call_type(
+                toks, call_name.name, call_name.paren_index, slice_start, module_signatures,
+                source_names, member_ctx,
+            )
+            if host_global is not None:
+                return host_global
 
     if name and len(toks) > 1 and toks[1].raw_text == ".":
         member = token_name(toks[2]) if len(toks) > 2 else None
-        error_variant = _infer_intrinsic_cverr_error_variant(
+        error_variant = infer_intrinsic_cverr_error_variant(
             toks, slice_start, module_signatures, source_names
         )
         if error_variant is not None:
@@ -258,7 +297,7 @@ def _infer_atomic_expression_type(
         if member and len(toks) == 3:
             member_span = Span(slice_start + toks[2].start, slice_start + toks[2].end)
             lookup_key = qualified_procedure_key(name, member)
-            sig = _parameterless_value_signature(lookup_key, module_signatures)
+            sig = parameterless_value_signature(lookup_key, module_signatures)
             if sig is not None and sig.return_type:
                 return InferredArgumentType(
                     type_=sig.return_type,
@@ -278,8 +317,8 @@ def _infer_atomic_expression_type(
                         span=member_span,
                     )
                 return None
-            external = _infer_qualified_external_constant_expression_type(
-                name, member, member_span, model
+            external = infer_qualified_external_constant_expression_type(
+                name, member, member_span, member_ctx.model if member_ctx is not None else None
             )
             if external is not None:
                 return external
@@ -302,242 +341,45 @@ def _infer_atomic_expression_type(
     return None
 
 
-def _infer_bare_external_object_expression_type(
-    name: str,
-    span: Span,
-    source_names: SourceNameScope | None,
-    model: HostObjectModel | None,
-) -> InferredArgumentType | None:
-    """A host global (`Application`, `ActiveCell`) or runtime object (`Err`) named
-    bare, unless source declares the name."""
-    if runtime_callable_source_shadowed(name, source_names):
-        return None
-    host_type = resolve_host_global(name, model)
-    if host_type:
-        return InferredArgumentType(type_=host_type, label=f"{name} As {host_type}", span=span)
-    runtime_object = resolve_runtime_object(name)
-    if runtime_object is not None:
-        runtime_type = runtime_object.get("type", "")
-        return InferredArgumentType(type_=runtime_type, label=f"{name} As {runtime_type}", span=span)
-    return None
-
-
-def _infer_bare_external_constant_expression_type(
-    name: str,
-    span: Span,
-    source_names: SourceNameScope | None,
-    model: HostObjectModel | None,
-) -> InferredArgumentType | None:
-    """A VBA runtime or host constant named bare. A name both define stays unknown."""
-    if runtime_callable_source_shadowed(name, source_names):
-        return None
-    candidates = [
-        candidate
-        for candidate in (
-            _inferred_external_constant(name, resolve_runtime_constant(name)),
-            _inferred_external_constant(name, resolve_host_constant(name, model)),
-        )
-        if candidate is not None
-    ]
-    if len(candidates) != 1:
-        return None
-    return replace(candidates[0], span=span)
-
-
-# Qualifiers that name a host's own constant library, resolved against the CURRENT
-# host's model: `Word.wdRed` answers in a Word module and misses in an Excel one
-# (XLIDE issue #24).
-_HOST_CONSTANT_QUALIFIERS = frozenset({"excel", "word", "powerpoint", "access", "office"})
-
-
-def _infer_qualified_external_constant_expression_type(
-    qualifier: str,
-    name: str,
-    span: Span,
-    model: HostObjectModel | None,
-) -> InferredArgumentType | None:
-    lower = qualifier.lower()
-    if lower == "vba":
-        inferred = _inferred_external_constant(f"{qualifier}.{name}", resolve_runtime_constant(name))
-        return replace(inferred, span=span) if inferred is not None else None
-    if lower in _HOST_CONSTANT_QUALIFIERS:
-        inferred = _inferred_external_constant(f"{qualifier}.{name}", resolve_host_constant(name, model))
-        return replace(inferred, span=span) if inferred is not None else None
-    return None
-
-
-def _inferred_external_constant(
-    display_name: str, constant: VbaRuntimeConstant | HostConstant | None
-) -> InferredArgumentType | None:
-    if constant is None:
-        return None
-    declared_type = constant.get("type")
-    numeric_value = numeric_external_constant_value(constant.get("value"))
-    if numeric_value is not None:
-        return InferredArgumentType(
-            type_="Long",
-            label=f"{display_name} As {declared_type if declared_type is not None else 'Long'}",
-            span=Span(0, 0),
-            numeric_value=numeric_value,
-            numeric_text=display_name,
-            # A named-constant origin, so an overflow reads as the constant's value
-            # rather than as a "numeric literal".
-            numeric_constant_name=display_name,
-        )
-    if normalize_type(declared_type) == "string":
-        return InferredArgumentType(
-            type_="String",
-            label=f"{display_name} As {declared_type if declared_type is not None else 'String'}",
-            span=Span(0, 0),
-        )
-    return None
-
-
-# -- member-expression typing ----------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class _FinalMemberToken:
-    name: str
-    token: VbaToken
-    called: bool
-    argument_tokens: Sequence[VbaToken] | None = None
-
-
-def infer_member_expression_type(
-    source: str,
+def _infer_bare_host_global_call_type(
     toks: Sequence[VbaToken],
+    call_name: str,
+    paren_index: int,
     slice_start: int,
-    member_ctx: MemberCompletionContext,
+    module_signatures: _SignatureMap,
+    source_names: SourceNameScope | None,
+    member_ctx: MemberCompletionContext | None,
 ) -> InferredArgumentType | None:
-    """The type a member-access expression yields (`ActiveSheet.Range("A1")`,
-    `p.Name`), from the member the completion context resolves."""
-    if _has_top_level_operator(toks):
+    """`Range("A1")`, `Cells(1, 1)`, `Names(1)`: a member of the host's hidden Global
+    interface called bare, which the member chains never see because nothing
+    precedes it. Its arguments index what it returns the way any member call's do
+    (XLIDE issue #202)."""
+    if (
+        member_ctx is None
+        or paren_index != 1
+        or match_paren_from(toks, 1) != len(toks) - 1
+        or call_name.lower() in module_signatures
+        or bare_callable_source_shadowed(call_name, source_names)
+        or runtime_callable_source_shadowed(call_name, source_names)
+    ):
         return None
-    resolved = _final_member_token_in_expression(toks)
-    if resolved is None:
+    member = resolve_host_global_member(call_name, member_ctx.model)
+    if member is None or not member.get("returns"):
         return None
-    member = resolve_exact_member_completion(
-        source, resolved.name, slice_start + resolved.token.end, member_ctx
+    owner = (member_ctx.model.get("globalType") if member_ctx.model is not None else None) or ""
+    entry = MemberCompletionEntry(
+        name=member["name"],
+        kind=member.get("kind", "property"),
+        returns=member.get("returns"),
+        signature=member.get("signature"),
+        owner=owner,
     )
-    if member is None or not member.returns:
-        return None
-    if not resolved.called and member.kind == "method" and not _member_accepts_zero_arguments(member):
-        return None
-    return_type = _member_expression_return_type(member, resolved.argument_tokens, member_ctx)
-    label_start = toks[0].start if toks else resolved.token.start
-    label_end = toks[-1].end if resolved.called else resolved.token.end
-    label_text = source[slice_start + label_start : slice_start + label_end].strip()
+    type_ = member_expression_return_type(entry, toks[2:-1], member_ctx)
     return InferredArgumentType(
-        type_=return_type,
-        label=f"{label_text} As {return_type}",
-        span=Span(slice_start + resolved.token.start, slice_start + resolved.token.end),
+        type_=type_,
+        label=f"{call_name}(...) As {type_}",
+        span=Span(slice_start + toks[0].start, slice_start + toks[-1].end),
     )
-
-
-def _member_expression_return_type(
-    member: MemberCompletionEntry,
-    argument_tokens: Sequence[VbaToken] | None,
-    member_ctx: MemberCompletionContext,
-) -> str:
-    # Calling a member with arguments indexes into it. When the member returns a
-    # host collection (one whose Item resolves to an element type), the call yields
-    # that element: ws.ChartObjects(1) is a ChartObject, not the collection. A
-    # concrete-typed call keeps its declared type (ws.Range("A1") stays Range), and
-    # Item/_Default/Add already return the resolved element.
-    if member.returns and argument_tokens and not is_explicit_element_accessor(member.name):
-        element = _default_host_item_return_type(member.returns, member_ctx)
-        return element if element is not None else member.returns
-    return member.returns if member.returns else "Variant"
-
-
-_AS_OBJECT_SIGNATURE_RE = re.compile(r"\bAs Object\s*$", re.IGNORECASE)
-
-
-def _default_host_item_return_type(type_name: str, member_ctx: MemberCompletionContext) -> str | None:
-    members = get_host_members(type_name, member_ctx.model)
-    item = next((m for m in members if m["name"].lower() == "item"), None)
-    if item is None:
-        return None
-    if item.get("returns"):
-        # The library declares most Item accessors `As Object` and the model
-        # repairs the type from the reference prose, which is right for
-        # completion and chaining. It is not a compile-time binding: the VBE
-        # compiles `Worksheets(1).NoSuchMember` and `Workbooks(1).NoSuchMember`
-        # (measured in Excel 16.0, XLIDE issue #114), so the item's members are
-        # late bound. A one-part union carries the type without closing it. The
-        # hand-written collections carry the repaired type on Item, so the
-        # library's word is read off `_Default` too.
-        default_member = next((m for m in members if m["name"] == "_Default"), None)
-        declared_object = any(
-            member is not None
-            and (
-                member.get("declaredType") == "Object"
-                or _AS_OBJECT_SIGNATURE_RE.search(member.get("signature") or "") is not None
-            )
-            for member in (item, default_member)
-        )
-        return f"union:{item['returns']}" if declared_object else item["returns"]
-    # A mixed-element collection (Sheets, whose Item is a Worksheet OR a Chart)
-    # carries returnsAnyOf instead. Its indexed element is a late-bound Object, which
-    # any specific object target accepts, so `Set ws = ThisWorkbook.Sheets("x")` is
-    # not a mismatch while single-typed collections stay strict.
-    if item.get("returnsAnyOf"):
-        return "Object"
-    return None
-
-
-def _final_member_token_in_expression(toks: Sequence[VbaToken]) -> _FinalMemberToken | None:
-    if not toks:
-        return None
-    last = toks[-1]
-    last_name = token_name(last)
-    if last_name and len(toks) >= 2 and toks[-2].raw_text == ".":
-        return _FinalMemberToken(last_name, last, called=False)
-    if last.raw_text != ")":
-        return None
-    open_index = _matching_open_paren_index(toks, len(toks) - 1)
-    if open_index < 2:
-        return None
-    member = toks[open_index - 1]
-    member_name = token_name(member)
-    if not member_name or toks[open_index - 2].raw_text != ".":
-        return None
-    return _FinalMemberToken(
-        member_name, member, called=True, argument_tokens=toks[open_index + 1 : -1]
-    )
-
-
-def _matching_open_paren_index(toks: Sequence[VbaToken], close: int) -> int:
-    depth = 0
-    for i in range(close, -1, -1):
-        raw = toks[i].raw_text
-        if raw == ")":
-            depth += 1
-        elif raw == "(":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
-
-
-def _has_top_level_operator(toks: Sequence[VbaToken]) -> bool:
-    depth = 0
-    for tok in toks:
-        raw = tok.raw_text
-        if raw in ("(", "["):
-            depth += 1
-        elif raw in (")", "]"):
-            depth -= 1
-        elif depth == 0 and tok.kind is TokenKind.OPERATOR:
-            return True
-    return False
-
-
-def _member_accepts_zero_arguments(member: MemberCompletionEntry) -> bool:
-    if not member.signature:
-        return False
-    return callable_accepts_zero_arguments(parse_runtime_display_signature(member.name, member.signature))
 
 
 def _infer_atomic_literal(first: VbaToken, span: Span) -> InferredArgumentType | None:
@@ -552,12 +394,16 @@ def _infer_atomic_literal(first: VbaToken, span: Span) -> InferredArgumentType |
             if first.kind is TokenKind.INTEGER_LITERAL
             else None
         )
+        float_value = (
+            float_literal_value(first.raw_text) if first.kind is TokenKind.FLOAT_LITERAL else None
+        )
         return InferredArgumentType(
             type_="Double",
             label=f"numeric literal {first.raw_text}",
             span=span,
             numeric_value=numeric_value,
             numeric_text=first.raw_text,
+            float_value=float_value if float_value is not None and math.isfinite(float_value) else None,
         )
     if first.kind is TokenKind.DATE_LITERAL:
         return InferredArgumentType(type_="Date", label="Date literal", span=span)
@@ -572,66 +418,56 @@ def _infer_atomic_literal(first: VbaToken, span: Span) -> InferredArgumentType |
     return None
 
 
-def _infer_intrinsic_cverr_error_variant(
-    toks: list[VbaToken],
+# -- member-expression typing ----------------------------------------------
+
+
+def infer_member_expression_type(
+    source: str,
+    toks: Sequence[VbaToken],
     slice_start: int,
-    module_signatures: _SignatureMap,
-    source_names: SourceNameScope | None,
+    member_ctx: MemberCompletionContext,
 ) -> InferredArgumentType | None:
-    first_name = token_name(toks[0])
-    if not first_name:
+    """The type a member-access expression yields (`ActiveSheet.Range("A1")`,
+    `p.Name`), from the member the completion context resolves."""
+    if has_top_level_operator(toks):
         return None
-    paren_index = -1
-    display_name = ""
-    if first_name.lower() == "cverr" and len(toks) > 1 and toks[1].raw_text == "(":
-        if (
-            first_name.lower() in module_signatures
-            or bare_callable_source_shadowed(first_name, source_names)
-            or runtime_callable_source_shadowed(first_name, source_names)
-        ):
-            return None
-        paren_index = 1
-        display_name = first_name
-    elif (
-        first_name.lower() == "vba"
-        and len(toks) > 3
-        and toks[1].raw_text == "."
-        and (token_name(toks[2]) or "").lower() == "cverr"
-        and toks[3].raw_text == "("
-    ):
-        paren_index = 3
-        display_name = f"{first_name}.{toks[2].raw_text}"
-    if paren_index < 0:
+    resolved = final_member_token_in_expression(toks)
+    if resolved is None:
         return None
-    close = match_paren_from(toks, paren_index)
-    if close != len(toks) - 1:
+    member = resolve_exact_member_completion(
+        source, resolved.name, slice_start + resolved.token.end, member_ctx
+    )
+    if member is None or not member.returns:
         return None
-    inner = toks[paren_index + 1 : close]
-    if not inner:
+    if not resolved.called and member.kind == "method" and not member_accepts_zero_arguments(member):
         return None
-    split = split_arg_slots(inner, slice_start)
-    if len(split.slots) != 1 or not split.slots[0]:
-        return None
+    return_type = member_expression_return_type(member, resolved.argument_tokens, member_ctx)
+    label_start = toks[0].start if toks else resolved.token.start
+    label_end = toks[-1].end if resolved.called else resolved.token.end
+    label_text = source[slice_start + label_start : slice_start + label_end].strip()
     return InferredArgumentType(
-        type_="Error",
-        label=f"{display_name}(...) Error Variant",
-        span=span_for_tokens(toks, slice_start),
+        type_=return_type,
+        label=f"{label_text} As {return_type}",
+        span=Span(slice_start + resolved.token.start, slice_start + resolved.token.end),
     )
 
 
-def _infer_arithmetic_expression_type(
+# -- operator expressions --------------------------------------------------
+
+
+def infer_arithmetic_expression_type(
     toks: list[VbaToken],
     slice_start: int,
     env: Mapping[str, str],
     module_signatures: _SignatureMap,
-    source_names: SourceNameScope | None,
-    resolve_expression_type: SourceDeclaredTypeResolver | None,
-    resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None,
+    source_names: SourceNameScope | None = None,
+    resolve_expression_type: SourceDeclaredTypeResolver | None = None,
+    resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None = None,
     *,
     source: str | None = None,
     member_ctx: MemberCompletionContext | None = None,
 ) -> InferredArgumentType | None:
-    parts = _split_top_level_arithmetic_operands(toks)
+    parts = split_top_level_arithmetic_operands(toks)
     if len(parts) < 2:
         return None
     for part in parts:
@@ -648,19 +484,19 @@ def _infer_arithmetic_expression_type(
     )
 
 
-def _infer_string_concatenation_expression_type(
+def infer_string_concatenation_expression_type(
     toks: list[VbaToken],
     slice_start: int,
     env: Mapping[str, str],
     module_signatures: _SignatureMap,
-    source_names: SourceNameScope | None,
-    resolve_expression_type: SourceDeclaredTypeResolver | None,
-    resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None,
+    source_names: SourceNameScope | None = None,
+    resolve_expression_type: SourceDeclaredTypeResolver | None = None,
+    resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None = None,
     *,
     source: str | None = None,
     member_ctx: MemberCompletionContext | None = None,
 ) -> InferredArgumentType | None:
-    parts = _split_top_level_operands(toks, ("&",))
+    parts = split_top_level_operands(toks, "&")
     if len(parts) < 2:
         return None
     for part in parts:
@@ -679,189 +515,34 @@ def _infer_string_concatenation_expression_type(
     )
 
 
-def _split_top_level_arithmetic_operands(toks: list[VbaToken]) -> list[list[VbaToken]]:
-    parts = _split_top_level_operands(toks, ("+", "-", "*", "/", "\\", "^"))
-    return parts if len(parts) >= 2 else []
-
-
-def _split_top_level_operands(toks: list[VbaToken], operators: tuple[str, ...]) -> list[list[VbaToken]]:
-    allowed = set(operators)
-    parts: list[list[VbaToken]] = []
-    start = 0
-    depth = 0
-    for i, tok in enumerate(toks):
-        raw = tok.raw_text
-        if raw in ("(", "["):
-            depth += 1
-            continue
-        if raw in (")", "]"):
-            depth -= 1
-            continue
-        if depth != 0:
-            continue
-        if tok.kind is not TokenKind.OPERATOR or raw not in allowed:
-            if tok.kind is TokenKind.OPERATOR:
-                return []
-            continue
-        # A +/- at the start of an operand is a unary sign (e.g. `2 * -3`,
-        # `x + -1`); fold it into the following operand rather than treating it
-        # as a separator. Any other operator at the operand start is malformed.
-        if i == start:
-            if raw in ("+", "-"):
-                continue
-            return []
-        if i == len(toks) - 1:
-            return []
-        parts.append(toks[start:i])
-        start = i + 1
-    if not parts:
-        return []
-    parts.append(toks[start:])
-    return parts
-
-
-def _parameterless_value_signature(
-    name: str, module_signatures: _SignatureMap, source_names: SourceNameScope | None = None
-) -> CallableTypeSignature | None:
-    sig = callable_signature_for(name, module_signatures, source_names)
-    if sig is not None and sig.return_type and callable_accepts_zero_arguments(sig):
-        return sig
-    return None
-
-
 # -- string-arithmetic operand check ---------------------------------------
 
 
 def nonnumeric_string_arithmetic_operand(
-    expected_raw: str, slot: list[VbaToken], slice_start: int
+    expected_raw: str, slot: Sequence[VbaToken], slice_start: int
 ) -> InferredArgumentType | None:
     expected = normalize_type(expected_raw)
     if not expected or not is_numeric_type(expected):
         return None
-    return _find_nonnumeric_string_in_arithmetic_expression(_significant(slot), slice_start)
-
-
-def _find_nonnumeric_string_in_arithmetic_expression(
-    toks: list[VbaToken], slice_start: int
-) -> InferredArgumentType | None:
-    unwrapped = unwrap_outer_parens(toks)
-    if len(unwrapped) != len(toks):
-        return _find_nonnumeric_string_in_arithmetic_expression(unwrapped, slice_start)
-    parts = _split_top_level_arithmetic_operands(toks)
-    if len(parts) < 2:
-        return None
-    for part in parts:
-        nested = _find_nonnumeric_string_in_arithmetic_expression(part, slice_start)
-        if nested is not None:
-            return nested
-        operand = unwrap_outer_parens(part)
-        if len(operand) == 1 and operand[0].kind is TokenKind.STRING_LITERAL:
-            value = string_literal_value(operand[0].raw_text)
-            if is_provably_non_numeric_string(value):
-                return InferredArgumentType(
-                    type_="String",
-                    label=f"nonnumeric string literal {operand[0].raw_text}",
-                    span=Span(slice_start + operand[0].start, slice_start + operand[0].end),
-                    string_value=value,
-                )
-    return None
+    return find_nonnumeric_string_in_arithmetic_expression(_significant(slot), slice_start)
 
 
 # -- ByRef variable type mismatch ------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class _ByRefMismatch:
-    name: str
-    actual: str
-    span: Span
-
-
-# The bindings a ByRef argument passes as the variable itself, not a copy.
-_BYREF_VARIABLE_KINDS = frozenset(
-    {VbaSymbolKind.LOCAL_VARIABLE, VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.PARAMETER}
-)
-
-
-def _is_known_by_ref_exact_type(type_: str | None) -> bool:
-    if not type_ or type_ == "variant":
-        return False
-    return type_ == "object" or is_known_scalar_type(type_)
-
-
 def byref_variable_type_mismatch(
     param: CallableParamType,
-    slot: list[VbaToken],
+    slot: Sequence[VbaToken],
     slice_start: int,
     env: Mapping[str, str],
     resolve_expression_type: SourceDeclaredTypeResolver | None,
     resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None,
-) -> _ByRefMismatch | None:
-    if not param.by_ref or not param.type_:
-        return None
-    expected = normalize_type(param.type_)
-    if not _is_known_by_ref_exact_type(expected):
-        return None
-    toks = _significant(slot)
-    name: str | None = None
-    actual_raw: str | None = None
-    span: Span | None = None
-    if len(toks) == 1:
-        name = token_name(toks[0])
-        if not name:
-            return None
-        declared_type = resolve_expression_type(name) if resolve_expression_type else None
-        # A Const is passed as a temporary copy, so its type never has to match
-        # (XLIDE issue #111: `Take(K)` with K an Integer Const compiles).
-        if declared_type is not None and declared_type.resolved and declared_type.kind is VbaSymbolKind.CONSTANT:
-            return None
-        actual_raw = (
-            declared_type.as_type
-            if declared_type is not None and declared_type.resolved
-            else env.get(name.lower())
-        )
-        span = Span(slice_start + toks[0].start, slice_start + toks[0].end)
-        # A VARIABLE declared Variant (or with no type) passed ByRef to a typed
-        # parameter is the compile error itself (XLIDE issue #111): the VBE refuses
-        # `Take v` with `Dim v As Variant` for `x As Long`, `x As String` and
-        # `x As Object` alike (measured 2026-09-26). Only a variable or parameter:
-        # a parameterless Function's name here is a call result, which passes as
-        # a copy.
-        variant_variable = (
-            not param.is_array
-            and declared_type is not None
-            and declared_type.resolved
-            and declared_type.kind in _BYREF_VARIABLE_KINDS
-            and (normalize_type(declared_type.as_type) or "variant") == "variant"
-        )
-        if variant_variable:
-            assert declared_type is not None
-            return _ByRefMismatch(
-                name=name,
-                actual=declared_type.as_type if declared_type.as_type is not None else "Variant",
-                span=span,
-            )
-    elif len(toks) == 3 and toks[1].raw_text == ".":
-        qualifier = token_name(toks[0])
-        member = token_name(toks[2])
-        if not qualifier or not member:
-            return None
-        declared_type = (
-            resolve_qualified_expression_type(qualifier, member)
-            if resolve_qualified_expression_type
-            else None
-        )
-        if declared_type is None or not declared_type.resolved:
-            return None
-        name = f"{qualifier}.{member}"
-        actual_raw = declared_type.as_type
-        span = Span(slice_start + toks[0].start, slice_start + toks[2].end)
-    else:
-        return None
-    actual = normalize_type(actual_raw)
-    if not _is_known_by_ref_exact_type(actual) or actual == expected:
-        return None
-    return _ByRefMismatch(name=name, actual=actual_raw if actual_raw is not None else name, span=span)
+) -> ByRefMismatch | None:
+    """by_ref_variable_type_mismatch (types/type_inference.py), under the name the
+    port's rules have imported it by."""
+    return by_ref_variable_type_mismatch(
+        param, slot, slice_start, env, resolve_expression_type, resolve_qualified_expression_type
+    )
 
 
 # -- type compatibility ----------------------------------------------------
@@ -887,62 +568,270 @@ def incompatibility_reason(expected_raw: str, actual: InferredArgumentType) -> s
             return None
         return "An object parameter requires an object value."
     if is_numeric_type(expected):
-        overflow = _numeric_literal_overflow_reason(expected, actual)
+        overflow = numeric_literal_overflow_reason(expected, actual)
         if overflow is not None:
             return overflow
         if is_numeric_type(actual_type) or actual_type == "boolean":
             return None
-        if actual_type == "string":
-            return (
-                "This string literal cannot be converted to a numeric value. "
-                "This will raise Run-time error '13': Type mismatch."
-                if actual.string_value is not None
-                and is_provably_non_numeric_string(actual.string_value)
-                else None
-            )
+        if actual_type == "string" and actual.string_value is not None:
+            # The string's number where every locale reads it alike: "&H10000" is
+            # 65536 and overflows an Integer (XLIDE issue #188).
+            verdict = numeric_string_verdict(actual.string_value)
+            if verdict.kind == "invalid":
+                if actual.held_by is not None:
+                    return (
+                        f"'{actual.held_by}' holds {js_string_literal(actual.string_value)} here, "
+                        "which converts to no number. This will raise Run-time error '13': "
+                        "Type mismatch."
+                    )
+                return (
+                    "This string literal cannot be converted to a numeric value. "
+                    "This will raise Run-time error '13': Type mismatch."
+                )
+            bounds = numeric_literal_bounds(expected) if verdict.value is not None else None
+            if (
+                bounds is not None
+                and verdict.value is not None
+                and (verdict.value < bounds.min or verdict.value > bounds.max)
+            ):
+                return (
+                    f"The string {js_string_literal(actual.string_value)} converts to "
+                    f"{js_number_to_string(verdict.value)}, outside the {bounds.label} range "
+                    f"{bounds.min} to {bounds.max}. This will raise Run-time error '6': Overflow."
+                )
         return None
     if expected == "boolean":
         if actual_type == "boolean" or is_numeric_type(actual_type):
             return None
-        if actual_type == "string":
+        # A String whose value is not known may be "True" or "5", which convert
+        # (measured in Excel 16.0).
+        if (
+            actual_type == "string"
+            and actual.string_value is not None
+            and is_invalid_boolean_string(actual.string_value)
+        ):
             return (
-                None
-                if actual.string_value is not None and is_boolean_string(actual.string_value)
-                else "This string literal cannot be converted to Boolean. "
+                "This string literal cannot be converted to Boolean. "
                 "This will raise Run-time error '13': Type mismatch."
             )
         return None
+    if expected == "date" and actual_type == "string" and actual.string_value is not None:
+        return (
+            "This string literal cannot be converted to a Date. "
+            "This will raise Run-time error '13': Type mismatch."
+            if is_invalid_date_string(actual.string_value)
+            else None
+        )
     return None  # String accepts any stringifiable scalar; do not warn.
 
 
-def _format_numeric(value: float) -> str:
-    """Format a numeric value the way JS String() would: no '.0' on an integer."""
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value)
+# -- object and value arguments --------------------------------------------
 
 
-def _numeric_literal_overflow_reason(expected: str, actual: InferredArgumentType) -> str | None:
-    if actual.numeric_value is None:
-        return None
-    bounds = numeric_literal_bounds(expected)
-    if bounds is None:
-        return None
-    if bounds.min <= actual.numeric_value <= bounds.max:
-        return None
-    # A resolved named constant must not be described as a "numeric literal"; name
-    # the constant and show its value instead.
-    if actual.numeric_constant_name is not None:
-        return (
-            f"The value of constant '{actual.numeric_constant_name}' "
-            f"({_format_numeric(actual.numeric_value)}) is outside the {bounds.label} range "
-            f"{bounds.min} to {bounds.max}. This will raise Run-time error '6': Overflow."
-        )
-    literal = actual.numeric_text if actual.numeric_text is not None else str(actual.numeric_value)
-    return (
-        f"The numeric literal {literal} is outside the {bounds.label} range "
-        f"{bounds.min} to {bounds.max}. This will raise Run-time error '6': Overflow."
+@dataclass(frozen=True, slots=True)
+class _ObjectValueProblem:
+    # "argumentObjectTypeMismatch" | "argumentTypeMismatch"
+    rule: str
+    what: str
+    reason: str
+    tokens: Sequence[VbaToken]
+
+
+_VALUE_LITERAL_KINDS = frozenset(
+    {TokenKind.INTEGER_LITERAL, TokenKind.FLOAT_LITERAL, TokenKind.STRING_LITERAL, TokenKind.DATE_LITERAL}
+)
+_TYPE_MISMATCH_COMPILE = "An object parameter takes an object. This is a VBE compile error: Type mismatch."
+_RAISES_13 = "This will raise Run-time error '13': Type mismatch."
+
+
+def _object_value_argument_problem(
+    expected: str,
+    slot: Sequence[VbaToken],
+    actual: InferredArgumentType | None,
+    member_ctx: MemberCompletionContext,
+    source_names: SourceNameScope | None,
+    is_declared: Callable[[str], bool],
+    held_class_of: Callable[[str], str | None] | None = None,
+    by_value: bool = False,
+    env: Mapping[str, str] | None = None,
+) -> _ObjectValueProblem | None:
+    """An object where a parameter takes a value, or a value where it takes an
+    object (XLIDE issue #223, measured in Excel 16.0):
+
+    - Nothing into a Long or String parameter: "Invalid use of object".
+    - New Collection there: "Argument not optional", since its default member
+      Item needs an index.
+    - A literal, True, False, a date, or an expression of a known scalar type into
+      a Collection or other known object parameter: "Type mismatch". So is a
+      scalar variable passed by value (#410). Each is a compile error.
+    - A Variant holding no object, passed by value to one: 424 when the call
+      runs (#410).
+    - Array(...) or Split(...) into a Long or String parameter: an array, which
+      raises 13 when the call runs.
+    """
+    from .rules.type_of_is import object_assignment_incompatibility_reason
+
+    declared_env: Mapping[str, str] = env if env is not None else {}
+    toks = unwrap_outer_parens(
+        [tok for tok in slot if tok.kind is not TokenKind.COMMENT and tok.kind is not TokenKind.NEWLINE]
     )
+    if not toks:
+        return None
+    expected_type = normalize_type(expected)
+    if expected_type and is_known_scalar_type(expected_type):
+        if len(toks) == 1 and token_text(toks[0]) == "nothing":
+            return _ObjectValueProblem(
+                "argumentObjectTypeMismatch",
+                "Nothing",
+                "This is a VBE compile error: Invalid use of object.",
+                toks,
+            )
+        if len(toks) == 2 and token_text(toks[0]) == "new" and object_value_needs_index(toks[1].raw_text, member_ctx):
+            return _ObjectValueProblem(
+                "argumentObjectTypeMismatch",
+                f"New {toks[1].raw_text}, whose default member Item needs an index",
+                "This is a VBE compile error: Argument not optional.",
+                toks,
+            )
+        # A Collection variable passed by value is read for its value, the same
+        # way (XLIDE issue #647). ByRef it is byref-argument-type-mismatch's.
+        passed = token_name(toks[0]) if len(toks) == 1 else None
+        passed_type = declared_env.get(passed.lower()) if passed else None
+        if by_value and passed_type and is_declared(toks[0].raw_text) and object_value_needs_index(passed_type, member_ctx):
+            return _ObjectValueProblem(
+                "argumentObjectTypeMismatch",
+                f"'{toks[0].raw_text}', declared {passed_type}, whose default member Item needs an index",
+                "This is a VBE compile error: Argument not optional.",
+                toks,
+            )
+        callee = token_text(toks[0])
+        if (
+            callee in ("array", "split")
+            and len(toks) > 1
+            and toks[1].raw_text == "("
+            and match_paren_from(toks, 1) == len(toks) - 1
+            and not runtime_callable_source_shadowed(toks[0].raw_text, source_names)
+        ):
+            return _ObjectValueProblem(
+                "argumentTypeMismatch", f"{toks[0].raw_text}(...), an array", _RAISES_13, toks
+            )
+        return None
+    # A literal, True, False or a date, and an expression of a known scalar type
+    # such as `v + 0` (XLIDE issue #410).
+    atom = toks[1:] if toks[0].raw_text == "-" else toks
+    literal = len(atom) == 1 and (
+        atom[0].kind in _VALUE_LITERAL_KINDS
+        or (len(toks) == 1 and token_text(atom[0]) in ("true", "false"))
+    )
+    # `b + 0` and `d + 0` with b a Boolean and d a Date too (XLIDE issue #647).
+    scalar_expression = (
+        len(toks) > 1
+        and not literal
+        and (
+            (actual is not None and is_known_scalar_type(normalize_type(actual.type_) or ""))
+            or arithmetic_of_scalars(toks, declared_env)
+        )
+    )
+    if (
+        (literal or scalar_expression)
+        and expected_type != "object"
+        and is_known_object_assignment_type(expected, member_ctx)
+    ):
+        return _ObjectValueProblem(
+            "argumentObjectTypeMismatch",
+            actual.label if actual is not None else " ".join(tok.raw_text for tok in toks),
+            _TYPE_MISMATCH_COMPILE,
+            toks,
+        )
+    # An object of another class, as a Set of it would be: TakeWs(Range("A1")) and
+    # TakeWs(ThisWorkbook) into a Worksheet raise 13 when the call runs (#223). A
+    # declared variable is judged by what it holds, not its declared class (#246).
+    first_name = token_name(toks[0])
+    declared_name = len(toks) == 1 and first_name is not None and is_declared(toks[0].raw_text)
+    held = (
+        held_class_of(first_name.lower())
+        if declared_name and held_class_of is not None and first_name is not None
+        else None
+    )
+    # A scalar variable passed by value is a value, as a literal is; ByRef it is
+    # byref-argument-type-mismatch's. A Variant holding Empty or a value raises
+    # 424 (XLIDE issue #410).
+    if (
+        declared_name
+        and by_value
+        and expected_type != "object"
+        and is_known_object_assignment_type(expected, member_ctx)
+        and first_name is not None
+    ):
+        declared_raw = declared_env.get(first_name.lower())
+        declared = normalize_type(declared_raw)
+        if declared and is_known_scalar_type(declared):
+            return _ObjectValueProblem(
+                "argumentObjectTypeMismatch",
+                f"'{toks[0].raw_text}', declared {declared_raw}",
+                _TYPE_MISMATCH_COMPILE,
+                toks,
+            )
+        if held == VALUE_HELD:
+            return _ObjectValueProblem(
+                "argumentTypeMismatch",
+                f"'{toks[0].raw_text}', a Variant that holds no object here",
+                "An object parameter takes an object. This will raise Run-time error '424': "
+                "Object required.",
+                toks,
+            )
+    if held and held != VALUE_HELD and expected_type != "object" and is_known_object_assignment_type(expected, member_ctx):
+        holding = InferredArgumentType(
+            type_=held,
+            label=f"'{toks[0].raw_text}', which holds a {held} here",
+            span=Span(toks[0].start, toks[0].end),
+        )
+        reason = object_assignment_incompatibility_reason(expected, holding, member_ctx)
+        if reason:
+            return _ObjectValueProblem("argumentTypeMismatch", holding.label, f"{reason} {_RAISES_13}", toks)
+    # `TakeC(ActiveSheet)` into a Collection, as the Object holding it (XLIDE #685).
+    if (
+        not declared_name
+        and len(toks) == 1
+        and token_text(toks[0]) == "activesheet"
+        and not is_declared(toks[0].raw_text)
+        and resolve_host_global("ActiveSheet", member_ctx.model) is not None
+        and expected_type != "object"
+        and is_known_object_assignment_type(expected, member_ctx)
+    ):
+        sheet = InferredArgumentType(
+            type_="Worksheet or Chart",
+            label=f"'{toks[0].raw_text}', a Worksheet or a Chart",
+            span=Span(toks[0].start, toks[0].end),
+        )
+        reason = object_assignment_incompatibility_reason(expected, sheet, member_ctx)
+        if reason:
+            return _ObjectValueProblem("argumentTypeMismatch", sheet.label, f"{reason} {_RAISES_13}", toks)
+    # `TakeW(Worksheets)` into a parameter As Worksheets (XLIDE issue #404).
+    sheets = (
+        sheets_from_collection_property(toks, expected, source_names, member_ctx)
+        if not declared_name and source_names is not None
+        else None
+    )
+    if sheets is not None:
+        return _ObjectValueProblem(
+            "argumentTypeMismatch",
+            f"'{sheets.text}', which returns a Sheets object",
+            f"Excel's Worksheets and Charts properties return a Sheets object, never a "
+            f"{sheets.collection} one. {_RAISES_13}",
+            toks,
+        )
+    if (
+        actual is not None
+        and not declared_name
+        and expected_type != "object"
+        and is_known_object_assignment_type(expected, member_ctx)
+        and not is_known_scalar_type(normalize_type(actual.type_) or "")
+    ):
+        reason = object_assignment_incompatibility_reason(expected, actual, member_ctx)
+        if reason:
+            return _ObjectValueProblem("argumentTypeMismatch", actual.label, f"{reason} {_RAISES_13}", toks)
+    return None
 
 
 # -- argument-type validation ----------------------------------------------
@@ -959,6 +848,9 @@ def validate_argument_types(
     *,
     source: str | None = None,
     member_ctx: MemberCompletionContext | None = None,
+    held_class_of: Callable[[str], str | None] | None = None,
+    held_null: Callable[[str], bool] | None = None,
+    held_number: Callable[[str], int | float | str | None] | None = None,
 ) -> None:
     sig = callable_signature_for_call(call, module_signatures, source_names)
     if sig is None or not sig.params:
@@ -967,7 +859,19 @@ def validate_argument_types(
         sig, call, env, module_signatures, source_names, push,
         resolve_expression_type, resolve_qualified_expression_type,
         source=source, member_ctx=member_ctx,
+        held_class_of=held_class_of, held_null=held_null, held_number=held_number,
     )
+
+
+_PAREN_SPACING_RE = re.compile(r" ?([()]) ?")
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_whole(value: int | float) -> bool:
+    return isinstance(value, int) or (math.isfinite(value) and value.is_integer())
 
 
 def validate_argument_types_for_signature(
@@ -982,10 +886,22 @@ def validate_argument_types_for_signature(
     *,
     source: str | None = None,
     member_ctx: MemberCompletionContext | None = None,
+    held_class_of: Callable[[str], str | None] | None = None,
+    held_null: Callable[[str], bool] | None = None,
+    held_number: Callable[[str], int | float | str | None] | None = None,
 ) -> None:
     if not sig.params:
         return
     params_by_name = {strip_header_brackets(p.name).lower(): p for p in sig.params}
+
+    def holds_null(lower: str) -> bool:
+        return held_null is not None and held_null(lower) is True
+
+    def is_declared(name: str) -> bool:
+        return name.lower() in env or (
+            resolve_expression_type is not None and resolve_expression_type(name).resolved is True
+        )
+
     positional_index = 0
     for slot in call.slots:
         named = named_argument_slot(slot)
@@ -1007,7 +923,7 @@ def validate_argument_types_for_signature(
         byref_mismatch = (
             None
             if call.arguments_parenthesized
-            else byref_variable_type_mismatch(
+            else by_ref_variable_type_mismatch(
                 param, value_slot, call.slice_start, env,
                 resolve_expression_type, resolve_qualified_expression_type,
             )
@@ -1019,6 +935,33 @@ def validate_argument_types_for_signature(
                 f"'{byref_mismatch.name}' is declared as {byref_mismatch.actual}. This is a "
                 "VBE compile error: ByRef argument type mismatch.",
                 byref_mismatch.span,
+            )
+            continue
+        # An array parameter takes an array variable; anything else is
+        # argument-shape-mismatch's, not a value to convert (XLIDE issue #410).
+        if param.is_array:
+            continue
+        # `TakeL(1 + Null)`: an operator on Null gives Null, which a typed
+        # parameter refuses (XLIDE issue #324, measured in Excel 16.0).
+        null_slot = [tok for tok in value_slot if tok.kind is not TokenKind.COMMENT]
+        scalar_expected = normalize_type(expected)
+        if (
+            len(null_slot) > 1
+            and scalar_expected
+            and scalar_expected != "variant"
+            and is_known_scalar_type(scalar_expected)
+            and operator_yields_null(
+                null_slot,
+                lambda tok: token_text(tok) == "null" or holds_null((token_name(tok) or "").lower()),
+            )
+        ):
+            text = _PAREN_SPACING_RE.sub(r"\1", " ".join(tok.raw_text for tok in null_slot))
+            push(
+                "argumentTypeMismatch",
+                f"Argument '{param.name}' of '{sig.name}' expects {expected}, but '{text}' is "
+                "Null: an operator on Null gives Null. Null cannot be coerced to this scalar "
+                "type. This will raise Run-time error '94': Invalid use of Null.",
+                Span(call.slice_start + null_slot[0].start, call.slice_start + null_slot[-1].end),
             )
             continue
         string_arithmetic = nonnumeric_string_arithmetic_operand(
@@ -1038,16 +981,144 @@ def validate_argument_types_for_signature(
             resolve_expression_type, resolve_qualified_expression_type,
             source=source, member_ctx=member_ctx,
         )
+        kind_problem = (
+            _object_value_argument_problem(
+                expected,
+                value_slot,
+                actual,
+                member_ctx,
+                source_names,
+                is_declared,
+                held_class_of,
+                param.by_ref is False or call.arguments_parenthesized,
+                env,
+            )
+            if member_ctx is not None
+            else None
+        )
+        if kind_problem is not None:
+            push(
+                kind_problem.rule,
+                f"Argument '{param.name}' of '{sig.name}' expects {expected}, but got "
+                f"{kind_problem.what}. {kind_problem.reason}",
+                Span(
+                    call.slice_start + kind_problem.tokens[0].start,
+                    call.slice_start + kind_problem.tokens[-1].end,
+                ),
+            )
+            continue
+        # A Variant local a straight line has just set to Null is Null here, for
+        # both checks below, whether or not it was given a type, and so is an
+        # element `a(0)` or `a(i)` (XLIDE issue #332, measured in Excel 16.0).
+        element = (
+            token_name(value_slot[0])
+            if len(value_slot) == 4 and value_slot[1].raw_text == "(" and value_slot[3].raw_text == ")"
+            else None
+        )
+        single = token_name(value_slot[0]) if len(value_slot) == 1 else None
+        held_name = (
+            (single.lower() if single is not None else None)
+            if len(value_slot) == 1
+            else f"{element.lower()}({value_slot[2].raw_text.lower()})"
+            if element is not None
+            else None
+        )
+        # Mid hands a Null string back without reading its Length: `Mid(n0, 1, n2)`
+        # with both Null runs (XLIDE issue #664, measured in Excel 16.0).
+        first = [
+            tok
+            for tok in (call.slots[0] if call.slots else [])
+            if tok.kind is not TokenKind.COMMENT and tok.kind is not TokenKind.NEWLINE
+        ]
+        null_string = (
+            sig.name.lower() == "mid"
+            and param.name.lower() == "length"
+            and len(first) == 1
+            and (token_text(first[0]) == "null" or holds_null((token_name(first[0]) or "").lower()))
+        )
+        held_null_here = (
+            not null_string
+            and held_name is not None
+            and holds_null(held_name)
+            and normalize_type(actual.type_ if actual is not None else None) in (None, "variant")
+        )
+        if held_null_here:
+            text = "".join(tok.raw_text for tok in value_slot)
+            label = f"'{text}', which holds Null here"
+            if actual is None:
+                actual = InferredArgumentType(
+                    type_="Null",
+                    label=label,
+                    span=Span(call.slice_start + value_slot[0].start, call.slice_start + value_slot[-1].end),
+                )
+            else:
+                actual = replace(actual, type_="Null", label=label)
         if actual is None:
             continue
+        # A local known to hold a number that is not whole is range-checked as that
+        # number: `c = 922337203685477.5807@: Space(c)` overflows (XLIDE issue #332).
+        # A whole one past the Long range is runtime-argument-value's (#336).
+        held_value = (
+            held_number(held_name)
+            if held_number is not None
+            and held_name is not None
+            and actual.numeric_value is None
+            and actual.float_value is None
+            else None
+        )
+        if isinstance(held_value, (int, float)) and _is_number(held_value) and not _is_whole(held_value):
+            actual = replace(actual, held_by=value_slot[0].raw_text, float_value=float(held_value))
+        # A local's whole number or String passed by value to the project's own
+        # procedure converts as a literal does: `v = -3` then `S v` with `ByVal p
+        # As Byte` raises 6, and "abc" into an Integer 13 (XLIDE issue #558). `S
+        # (v)` passes a copy whatever p is.
+        in_parens_name = (
+            token_name(value_slot[1])
+            if len(value_slot) == 3 and value_slot[0].raw_text == "(" and value_slot[2].raw_text == ")"
+            else None
+        )
+        in_parens = in_parens_name.lower() if in_parens_name is not None else None
+        copied_name = (
+            held_name
+            if (param.by_ref is False or call.arguments_parenthesized) and held_name is not None
+            else in_parens
+        )
+        own_procedure = module_signatures.get(call.lookup_key or call.name.lower()) is sig
+        # A Boolean's True is no -1 here: into a Byte it is 255 (XLIDE issue #664).
+        boolean = copied_name is not None and normalize_type(env.get(copied_name)) == "boolean"
+        copied = (
+            held_number(copied_name)
+            if held_number is not None
+            and own_procedure
+            and copied_name is not None
+            and not boolean
+            and actual.numeric_value is None
+            and actual.float_value is None
+            and actual.string_value is None
+            else None
+        )
+        holder = (
+            value_slot[1].raw_text
+            if in_parens is not None and copied_name == in_parens
+            else value_slot[0].raw_text
+        )
+        if isinstance(copied, (int, float)) and _is_number(copied):
+            actual = (
+                replace(actual, held_by=holder, numeric_value=copied)
+                if _is_whole(copied)
+                else replace(actual, held_by=holder, float_value=float(copied))
+            )
+        elif isinstance(copied, str):
+            actual = replace(actual, held_by=holder, type_="String", string_value=copied)
         # A Variant parameter the function still refuses Null for: CStr(Null),
-        # Chr(Null), Asc(Null) raise 94 where Left(Null, 1) hands Null back
-        # (XLIDE issue #104).
+        # Chr(Null), Asc(Null) raise 94 where Left(Null, 1) hands Null back (XLIDE
+        # issue #104).
         if param.null_raises and normalize_type(actual.type_) == "null":
+            and_label = f", and {actual.label}" if held_null_here else ""
             push(
                 "argumentTypeMismatch",
-                f"Argument '{param.name}' of '{sig.name}' cannot be Null. This will raise "
-                "Run-time error '94': Invalid use of Null.",
+                f"Argument '{param.name}' of '{sig.name}' cannot be Null{and_label}. This will "
+                "raise Run-time error '94': Invalid use of Null.",
                 actual.span,
             )
             continue

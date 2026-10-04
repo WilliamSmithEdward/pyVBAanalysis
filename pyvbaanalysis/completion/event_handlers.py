@@ -86,21 +86,3 @@ def event_handler_document_type_for_context(
     if module_kind is not ModuleSymbolKind.DOCUMENT:
         return None
     return document_type if document_type is not None else _infer_document_type(module_name)
-
-
-# --- sync stubs (2f49b93): replaced as each group is ported ---
-
-
-class EventHandlerCompletionContext:
-    pass
-
-
-class EventHandlerCompletion:
-    pass
-
-
-def resolve_event_handler_completions(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("resolveEventHandlerCompletions not ported yet")
-
-
-ALL_EVENT_DEFINITIONS: object = None

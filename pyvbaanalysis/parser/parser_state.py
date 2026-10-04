@@ -186,8 +186,9 @@ def code_tokens(statement: LogicalStatement) -> list[VbaToken]:
     return [t for t in statement.tokens if t.kind is not TokenKind.COMMENT]
 
 
-# --- sync stubs (2f49b93): replaced as each group is ported ---
-
-
-def is_comment_line(*args: object, **kwargs: object) -> object:
-    raise NotImplementedError("isCommentLine not ported yet")
+def is_comment_line(statement: LogicalStatement) -> bool:
+    """A line that holds only a comment, ``'`` or ``Rem``. Inside a procedure it
+    is no statement (MS-VBAL 3.3.1): the flow rules read one as unreachable
+    after Exit, or as the line a GoSub target is fallen into from (XLIDE issue
+    #249)."""
+    return all(t.kind is TokenKind.COMMENT for t in statement.tokens)

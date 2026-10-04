@@ -111,10 +111,10 @@ def test_enum_type_event_declare_symbols() -> None:
 
 
 def test_inactive_branch_symbols_are_filtered() -> None:
-    src = "#If Win32 Then\nPublic A As Long\n#End If\nPublic B As Long"
+    src = "#If Mac Then\nPublic A As Long\n#End If\nPublic B As Long"
     ms = build_module_symbols("Module1", ModuleSymbolKind.STANDARD, src)
     names = {c.name for c in (ms.root.children or [])}
-    assert "A" not in names  # inactive branch removed (Win32 = false)
+    assert "A" not in names  # inactive branch removed (Mac = 0)
     assert "B" in names
 
 
