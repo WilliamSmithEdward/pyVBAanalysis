@@ -190,7 +190,7 @@ def _check_procedure(
     symbols: ModuleSymbols | None,
     project_visible_symbols: Sequence[VbaSymbol] | None,
     host_model: HostObjectModel | None,
-    module_constants: Mapping[str, int | None],
+    module_constants: Mapping[str, float | None],
     callee_calls: CalleeMemberCalls,
     option_base: int,
 ) -> None:

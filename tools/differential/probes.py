@@ -26,9 +26,12 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from offsets import utf16_offsets
+
 from pyvbaanalysis import analyze_module, analyze_module_options_for, analyze_project
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions, VbaDiagnostic
 from pyvbaanalysis.symbols import ImplicitMember, ModuleInput, ModuleSymbolKind, ProjectIndex
+from pyvbaanalysis.symbols.sheet_changes import WorkbookSheetInfo
 
 _UPSTREAM = Path(__file__).resolve().parent / "upstream"
 
@@ -51,8 +54,11 @@ def kind_from_type(module_type: str | None) -> ModuleSymbolKind:
     return _KIND_FROM_TYPE.get(module_type or "", ModuleSymbolKind.STANDARD)
 
 
-def _finding(d: VbaDiagnostic) -> str:
-    return f"{d.code} @{d.span.start}-{d.span.end}: {d.message}"
+def _finding(d: VbaDiagnostic, source: str) -> str:
+    offsets = utf16_offsets(source)
+    start = d.span.start if offsets is None else offsets[d.span.start]
+    end = d.span.end if offsets is None else offsets[d.span.end]
+    return f"{d.code} @{start}-{end}: {d.message}"
 
 
 # -- the port's halves ---------------------------------------------------------
@@ -73,15 +79,16 @@ def port_corpus(corpus: Path) -> list[dict[str, Any]]:
     list is given as known and empty, which is what upstream assumes of an absent one."""
     records: list[dict[str, Any]] = []
 
-    def emit(pass_: str, case_id: str, module: str, found: Iterable[VbaDiagnostic]) -> None:
+    def emit(pass_: str, case_id: str, module: str, found: Iterable[VbaDiagnostic], source: str) -> None:
+        offsets = utf16_offsets(source)
         records.extend(
             {
                 "pass": pass_,
                 "id": case_id,
                 "module": module,
                 "code": d.code,
-                "start": d.span.start,
-                "end": d.span.end,
+                "start": d.span.start if offsets is None else offsets[d.span.start],
+                "end": d.span.end if offsets is None else offsets[d.span.end],
                 "message": d.message,
             }
             for d in found
@@ -91,13 +98,13 @@ def port_corpus(corpus: Path) -> list[dict[str, Any]]:
         modules = _corpus_modules(case)
         for name, kind, source in modules:
             opts = AnalyzeModuleOptions(module_name=name, module_kind=kind, referenced_hosts=[])
-            emit("S", case["id"], name, analyze_module(source, opts))
+            emit("S", case["id"], name, analyze_module(source, opts), source)
         index = ProjectIndex()
         for name, kind, source in modules:
             index.set_module(ModuleInput(name, kind, source))
         for name, kind, source in modules:
             opts = analyze_module_options_for(index, name, kind, referenced_hosts=[])
-            emit("P", case["id"], name, analyze_module(source, opts))
+            emit("P", case["id"], name, analyze_module(source, opts), source)
     return records
 
 
@@ -118,9 +125,14 @@ def port_projects(cases: Path) -> list[dict[str, Any]]:
             )
             for m in case["modules"]
         ]
-        results = analyze_project(modules, host=case.get("host") or None, referenced_hosts=case.get("referenced") or [])
+        results = analyze_project(
+            modules, host=case.get("host") or None, referenced_hosts=case.get("referenced") or [],
+            referenced_libraries=case.get("referencedLibraries"),
+            workbook_sheets=[WorkbookSheetInfo(**sheet) for sheet in case["workbookSheets"]]
+            if case.get("workbookSheets") is not None else None,
+        )
         records.extend(
-            {"label": case["label"], "module": module.module_name, "findings": [_finding(d) for d in results[module.module_name]]}
+            {"label": case["label"], "module": module.module_name, "findings": [_finding(d, module.source) for d in results[module.module_name]]}
             for module in modules
         )
     return records

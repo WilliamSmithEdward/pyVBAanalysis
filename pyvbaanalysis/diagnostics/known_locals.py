@@ -1321,7 +1321,7 @@ def _declared_facts_for(source: str, symbols: ModuleSymbols, proc: ProcedureNode
             bounds[lower] = (lower_bound, int(fixed.group(2)))
     # The module's Consts and Enum members, which a local or parameter of the same
     # name hides.
-    constants: dict[str, int | None] | None = None
+    constants: dict[str, float | None] | None = None
     params = {param.name.lower() for param in proc.params}
 
     def constant(lower: str) -> float | None:
@@ -1381,10 +1381,10 @@ class _NameLookup:
 
     __slots__ = ("_get",)
 
-    def __init__(self, get: Callable[[str], int | None]) -> None:
+    def __init__(self, get: Callable[[str], float | None]) -> None:
         self._get = get
 
-    def get(self, name: str, /) -> int | None:
+    def get(self, name: str, /) -> float | None:
         return self._get(name)
 
 
@@ -1453,7 +1453,7 @@ def _run_function_for(
 
     # `Twice = n * 2`: a name nothing reassigns holds what the call gave it, so the
     # value folds with it.
-    def held_value(name: str) -> int | None:
+    def held_value(name: str) -> float | None:
         held = exit_state.get(name.lower())
         if held is not None and held is initial.get(name.lower()) and all(token_name(tok) is None for tok in held):
             return evaluate_integer_constant_expression(" ".join(tok.raw_text for tok in held), _NO_CONSTANTS)

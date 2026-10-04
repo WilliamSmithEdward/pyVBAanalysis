@@ -44,7 +44,7 @@ from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import ROUND_HALF_UP, Context, Decimal
 from functools import lru_cache
-from typing import Union
+from typing import Any, Union, cast
 
 from ...conditional import ConditionalActivityTracker
 from ...constants.date_literal import DATE_EPOCH_MS, DAY_MS, date_literal_serial
@@ -55,6 +55,7 @@ from ...js_compat import JS_WHITESPACE, js_number, js_number_to_string, js_trim,
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.expression_limits import MAX_EXPRESSION_DEPTH
+from ...parser.expression_stack import run_expression
 from ...parser.nodes import (
     BodyNode,
     DoBlockNode,
@@ -453,27 +454,27 @@ class _TypedFolder:
         self._nesting = nesting
         self._index = 0
 
-    def _child(self, toks: Sequence[VbaToken], division_by_zero: Callable[[Span], None] | None, nesting: int) -> _Folded:
-        return _TypedFolder(toks, self._base, self._names, division_by_zero, nesting).fold()
+    def _child(self, toks: Sequence[VbaToken], division_by_zero: Callable[[Span], None] | None, nesting: int) -> Generator[Any, Any, _Folded]:
+        return (cast("_Typed | None", (yield _TypedFolder(toks, self._base, self._names, division_by_zero, nesting).fold())))
 
-    def fold(self) -> _Folded:
+    def fold(self) -> Generator[Any, Any, _Folded]:
         # Parsing already treats deeper expressions as recovery input. Keep an
         # untypable expression from aborting the rest of the overflow rule.
         if self._nesting >= MAX_EXPRESSION_DEPTH:
             return None
         if len(self._toks) == 0:
             return None
-        logical = self._logical()
+        logical = (cast("_Folded | _NotLogical", (yield self._logical())))
         if not isinstance(logical, _NotLogical):
             return logical
         # `Not` binds below every arithmetic operator: `Not 255 + 256` is Not 511
         # (issue #235, measured in Excel 16.0).
         if self._toks[0].kind is TokenKind.KEYWORD and token_text(self._toks[0]) == "not":
-            operand = self._child(self._toks[1:], self._division_by_zero, self._nesting + 1)
+            operand = (cast("_Folded", (yield self._child(self._toks[1:], self._division_by_zero, self._nesting + 1))))
             if operand is None or isinstance(operand, _Overflow):
                 return operand
             return _not_of(operand, self._span(0, len(self._toks) - 1))
-        result = self._additive()
+        result = (cast("_Folded", (yield self._additive())))
         if isinstance(result, _Overflow):
             return result
         return result if self._index == len(self._toks) else None
@@ -485,7 +486,7 @@ class _TypedFolder:
         tok = self._at(i)
         return tok.raw_text if tok is not None else None
 
-    def _logical(self) -> _Folded | _NotLogical:
+    def _logical(self) -> Generator[Any, Any, _Folded | _NotLogical]:
         """`a And b`, Or, Xor, Eqv and Imp follow VBA precedence and left
         associativity. Each operand is converted to a Long first, so one outside
         the Long range overflows: `1E10 And 1` is "Overflow" in a Const (issue
@@ -523,7 +524,7 @@ class _TypedFolder:
             else:
                 folded = self._string_operand(operand)
                 if folded is None:
-                    folded = self._child(operand, self._division_by_zero, self._nesting)
+                    folded = (cast("_Folded", (yield self._child(operand, self._division_by_zero, self._nesting))))
             if folded is None or isinstance(folded, _Overflow):
                 return folded
             values.append(_LogicalValue(folded, start, to - 1))
@@ -611,15 +612,15 @@ class _TypedFolder:
     def _span(self, start: int, to: int) -> Span:
         return Span(self._base + self._toks[start].start, self._base + self._toks[to].end)
 
-    def _additive(self) -> _Folded:
+    def _additive(self) -> Generator[Any, Any, _Folded]:
         start = self._index
-        left = self._multiplicative()
+        left = (cast("_Folded", (yield self._multiplicative())))
         while isinstance(left, _Typed):
             op = self._at(self._index)
             if op is None or op.kind is not TokenKind.OPERATOR or op.raw_text not in ("+", "-"):
                 break
             self._index += 1
-            right = self._multiplicative()
+            right = (cast("_Folded", (yield self._multiplicative())))
             if not isinstance(right, _Typed):
                 return right
             left = self._combine(left, right, op.raw_text, start, self._index - 1)
@@ -632,12 +633,12 @@ class _TypedFolder:
     def _left_associative(
         self,
         operators: tuple[str, ...],
-        left: Callable[[], _Folded],
-        right: Callable[[], _Folded] | None = None,
-    ) -> _Folded:
+        left: Callable[[], Generator[Any, Any, _Folded]],
+        right: Callable[[], Generator[Any, Any, _Folded]] | None = None,
+    ) -> Generator[Any, Any, _Folded]:
         operand_of = right if right is not None else left
         start = self._index
-        value = left()
+        value = (cast("_Folded", (yield left())))
         while isinstance(value, _Typed):
             op = self._at(self._index)
             if op is None:
@@ -646,34 +647,34 @@ class _TypedFolder:
             if word not in operators:
                 break
             self._index += 1
-            operand = operand_of()
+            operand = (cast("_Folded", (yield operand_of())))
             if not isinstance(operand, _Typed):
                 return operand
             value = self._combine(value, operand, word, start, self._index - 1)
         return value
 
-    def _multiplicative(self) -> _Folded:
-        return self._left_associative(("mod",), self._integer_division)
+    def _multiplicative(self) -> Generator[Any, Any, _Folded]:
+        return (cast("_Folded", (yield self._left_associative(("mod",), self._integer_division))))
 
-    def _integer_division(self) -> _Folded:
-        return self._left_associative(("\\",), self._product)
+    def _integer_division(self) -> Generator[Any, Any, _Folded]:
+        return (cast("_Folded", (yield self._left_associative(("\\",), self._product))))
 
-    def _product(self) -> _Folded:
-        return self._left_associative(("*", "/"), self._unary)
+    def _product(self) -> Generator[Any, Any, _Folded]:
+        return (cast("_Folded", (yield self._left_associative(("*", "/"), self._unary))))
 
-    def _power(self) -> _Folded:
+    def _power(self) -> Generator[Any, Any, _Folded]:
         """`a ^ b` binds above unary minus (`-2 ^ 2` is -4); the exponent may carry
         its own sign."""
-        return self._left_associative(("^",), self._primary, self._unary)
+        return (cast("_Folded", (yield self._left_associative(("^",), self._primary, self._unary))))
 
-    def _unary(self, depth: int = 0) -> _Folded:
+    def _unary(self, depth: int = 0) -> Generator[Any, Any, _Folded]:
         tok = self._at(self._index)
         if tok is not None and tok.kind is TokenKind.OPERATOR and tok.raw_text in ("-", "+"):
             if depth + self._nesting >= MAX_EXPRESSION_DEPTH:
                 return None
             start = self._index
             self._index += 1
-            operand = self._unary(depth + 1)
+            operand = (cast("_Folded", (yield self._unary(depth + 1))))
             if not isinstance(operand, _Typed):
                 return operand
             if tok.raw_text == "+":
@@ -695,13 +696,13 @@ class _TypedFolder:
                     f"Negating {negated} gives {gives}, which does not fit {_label(type_name)}",
                 )
             return _Typed(value, type_name, exact=exact, constant=operand.constant)
-        return self._power()
+        return (cast("_Folded", (yield self._power())))
 
     def _word(self, at: int) -> str:
         tok = self._at(at)
         return tok.raw_text if tok is not None and tok.kind is TokenKind.OPERATOR else token_text(tok)
 
-    def _primary(self) -> _Folded:
+    def _primary(self) -> Generator[Any, Any, _Folded]:
         tok = self._at(self._index)
         if tok is None:
             return None
@@ -727,7 +728,7 @@ class _TypedFolder:
                 inner_start += 1
                 inner_end -= 1
                 peeled += 1
-            value = self._child(self._toks[inner_start:inner_end], self._division_by_zero, self._nesting + 1 + peeled)
+            value = (cast("_Folded", (yield self._child(self._toks[inner_start:inner_end], self._division_by_zero, self._nesting + 1 + peeled))))
             self._index = close + 1
             return value
         literal = _literal_typed(tok)
@@ -813,11 +814,11 @@ class _TypedFolder:
                 or (self._names.with_subject is not None and self._names.with_subject() is not None)
             )
         ):
-            return self._sheet_size(True)
+            return (cast("_Folded", (yield self._sheet_size(True))))
         name = token_name(tok)
         if not name:
             return None
-        size = self._sheet_size()
+        size = (cast("_Folded", (yield self._sheet_size())))
         if size is not None:
             return size
 
@@ -870,7 +871,7 @@ class _TypedFolder:
                 return self._convert(callee, held, self._span(start, close), argument[0].raw_text)
             if callee == "val":
                 return None
-            inner = self._child(argument, None, self._nesting + 1)
+            inner = (cast("_Folded", (yield self._child(argument, None, self._nesting + 1))))
             if not isinstance(inner, _Typed):
                 return inner
             return self._convert(callee, inner, self._span(start, close))
@@ -880,7 +881,7 @@ class _TypedFolder:
         if callee == "round" and self._raw_at(callee_index + 1) == "(":
             close = match_paren_from(self._toks, callee_index + 1)
             args = [] if close < 0 else split_top_level_token_groups(self._toks, callee_index + 2, ",", close)
-            inner = self._child(args[0], None, self._nesting + 1) if len(args) == 1 else None
+            inner = (cast("_Folded", (yield self._child(args[0], None, self._nesting + 1)))) if len(args) == 1 else None
             if isinstance(inner, _Typed) and inner.type == "currency":
                 rounded = _round(inner.value)
                 if rounded < _RANGES["currency"].min or rounded > _RANGES["currency"].max:
@@ -893,9 +894,9 @@ class _TypedFolder:
             result = (
                 None
                 if close < 0
-                else self._function_result(
+                else (cast("_Folded", (yield self._function_result(
                     callee, split_top_level_token_groups(self._toks, callee_index + 2, ",", close)
-                )
+                ))))
             )
             if result is not None:
                 self._index = close + 1
@@ -927,7 +928,7 @@ class _TypedFolder:
         self._index += 1
         return known
 
-    def _sheet_size(self, with_subject: bool = False) -> _Folded:
+    def _sheet_size(self, with_subject: bool = False) -> Generator[Any, Any, _Folded]:
         """A size Excel fixes, read from a member chain at the current token (issue
         #411, measured in Excel 16.0): a worksheet's `Rows.Count` (1048576) or
         `Columns.Count` (16384) through ActiveSheet, Application, Worksheets(n) or a
@@ -966,11 +967,11 @@ class _TypedFolder:
         if len(segments) < 2 or self._raw_at(i) == "(":
             return None
 
-        def fold(expr: list[VbaToken]) -> float | None:
-            folded = self._child(expr, self._division_by_zero, self._nesting + 1)
+        def fold(expr: list[VbaToken]) -> Generator[Any, Any, float | None]:
+            folded = (cast("_Folded", (yield self._child(expr, self._division_by_zero, self._nesting + 1))))
             return folded.value if isinstance(folded, _Typed) else None
 
-        value = _sheet_size_of(segments, fold, self._names)
+        value = cast("float | None", (yield _sheet_size_of(segments, fold, self._names)))
         if value is None:
             return None
         start = self._index
@@ -986,7 +987,7 @@ class _TypedFolder:
             )
         return _Typed(float(value), "long")
 
-    def _function_result(self, callee: str, args: list[list[VbaToken]]) -> _Folded:
+    def _function_result(self, callee: str, args: list[list[VbaToken]]) -> Generator[Any, Any, _Folded]:
         """What a VBA function returns for arguments the folder can read (issue #407,
         measured in Excel 16.0): Sgn is an Integer, -1, 0 or 1; Choose and IIf give
         the argument they pick; Len of `String(n, c)` or of a literal is a Long; Asc
@@ -996,17 +997,17 @@ class _TypedFolder:
         # overflow in any of them raises (issue #258).
         values: dict[int, _Typed | None] = {}
         for arg in args:
-            folded = self._child(arg, self._division_by_zero, self._nesting + 1) if len(arg) > 0 else None
+            folded = (cast("_Folded", (yield self._child(arg, self._division_by_zero, self._nesting + 1)))) if len(arg) > 0 else None
             if isinstance(folded, _Overflow):
                 return folded
             values[id(arg)] = folded
 
-        def fold(toks: list[VbaToken] | None) -> _Typed | None:
+        def fold(toks: list[VbaToken] | None) -> Generator[Any, Any, _Typed | None]:
             # Original arguments were already checked above, including unknowns.
             if toks is not None and id(toks) in values:
                 return values[id(toks)]
             folded = (
-                self._child(toks, self._division_by_zero, self._nesting + 1)
+                (cast("_Folded", (yield self._child(toks, self._division_by_zero, self._nesting + 1))))
                 if toks is not None and len(toks) > 0
                 else None
             )
@@ -1026,23 +1027,23 @@ class _TypedFolder:
             return None
 
         if callee == "sgn":
-            value = fold(args[0]) if len(args) == 1 else None
+            value = (cast("_Typed | None", (yield fold(args[0])))) if len(args) == 1 else None
             return _Typed(_js_sign(value.value), "integer") if value is not None else None
         if callee == "choose":
-            index = fold(args[0]) if args else None
+            index = (cast("_Typed | None", (yield fold(args[0])))) if args else None
             k = _js_trunc(index.value) if index is not None else None
             if k is not None and k >= 1 and k < len(args):
-                return fold(args[int(k)])
+                return (cast("_Typed | None", (yield fold(args[int(k)]))))
             return None
         if callee == "iif":
             word = token_text(args[0][0]) if len(args) == 3 and len(args[0]) == 1 else ""
-            return fold(args[1]) if word == "true" else fold(args[2]) if word == "false" else None
+            return (cast("_Typed | None", (yield fold(args[1])))) if word == "true" else (cast("_Typed | None", (yield fold(args[2])))) if word == "false" else None
         if callee == "len":
             only = args[0] if len(args) == 1 else None
             if only is not None and len(only) == 1 and only[0].kind is TokenKind.STRING_LITERAL:
                 return _Typed(float(utf16_length(string_literal_value(only[0].raw_text))), "long")
             made = call(only, "string")
-            count = fold(made[0]) if made is not None and len(made) == 2 else None
+            count = (cast("_Typed | None", (yield fold(made[0])))) if made is not None and len(made) == 2 else None
             if count is not None and _is_integer(count.value) and count.value >= 0:
                 return _Typed(count.value, "long")
             return None
@@ -1055,7 +1056,7 @@ class _TypedFolder:
             if callee == "asc":
                 return None
             made = call(only, "chrw")
-            code = fold(made[0]) if made is not None and len(made) == 1 else None
+            code = (cast("_Typed | None", (yield fold(made[0])))) if made is not None and len(made) == 1 else None
             if code is None or not _is_integer(code.value) or code.value < -32768 or code.value > 65535:
                 return None
             return _Typed(code.value - 65536 if code.value > 32767 else code.value, "integer")
@@ -1836,8 +1837,8 @@ def _literal_range(segment: _ChainSegment | None) -> _Block | None:
 
 
 def _sheet_size_of(
-    chain: Sequence[_ChainSegment], fold: Callable[[list[VbaToken]], float | None], names: _NameLookup
-) -> float | None:
+    chain: Sequence[_ChainSegment], fold: Callable[[list[VbaToken]], Generator[Any, Any, float | None]], names: _NameLookup
+) -> Generator[Any, Any, float | None]:
     """The size a member chain reads, where Excel fixes it (issue #411):
     `ws.Rows.Count`, `Cells(Rows.Count, 1).Row`, `Range("A1:A40000").Rows.Count`."""
     if names("rows.count") is None:
@@ -1883,7 +1884,7 @@ def _sheet_size_of(
             return float(block.column)
         return None
     if before.name == "cells" and before.args is not None and len(before.args) == 2 and last.name in ("row", "column"):
-        return fold(before.args[0 if last.name == "row" else 1])
+        return cast("float | None", (yield fold(before.args[0 if last.name == "row" else 1])))
     return None
 
 
@@ -3255,13 +3256,10 @@ def _fold(
 ) -> _Folded:
     """A fresh fold of `toks`."""
     try:
-        return _TypedFolder(toks, base, names, division_by_zero).fold()
+        return run_expression(_TypedFolder(toks, base, names, division_by_zero).fold())
     except RecursionError:
-        # Port-only: each parenthesis that holds an operation costs about a dozen
-        # Python frames, so an expression nested past the interpreter's limit
-        # (well under upstream's MAX_EXPRESSION_DEPTH) is unknown here, where
-        # XLIDE folds it. Letting the error out would drop every overflow finding
-        # in the module.
+        # Name lookups supplied by callers can recurse independently of the
+        # folder. Keep an unavailable name from dropping the module's findings.
         return None
 
 

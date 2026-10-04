@@ -243,7 +243,7 @@ def fixed_string_length(
     proc: ProcedureNode,
     types: ModuleTypes,
     constants: IntegerConstantLookup,
-) -> int | None:
+) -> float | None:
     """The declared length of the fixed-length string the tokens name: `s` with
     `Dim s As String * 3`, an element `s(1)` of an array of them, or a field
     `t.name` declared `name As String * 3`. A Const length is read too."""

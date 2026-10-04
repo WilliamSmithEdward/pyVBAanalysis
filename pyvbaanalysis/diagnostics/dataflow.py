@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Generic, TypeVar
 
 from ..flow.procedure_labels import statement_label_declarations, statement_label_references
@@ -116,10 +116,6 @@ class StraightLineDataflowHooks:
     known_condition: Callable[[Sequence[VbaToken]], bool | None] | None = None
 
 
-# The port's earlier name for the hooks.
-DataflowHooks = StraightLineDataflowHooks
-
-
 def walk_straight_line_body(
     source: str,
     body: Sequence[BodyNode],
@@ -130,6 +126,7 @@ def walk_straight_line_body(
     the rule's transitions in order, while nested blocks (If/For/Do/...) are not
     entered - every tracked name touched anywhere inside them is demoted to
     "unknown" instead of guessing which runtime path executes."""
+    hooks = replace(hooks, touches_in_statement=_TouchLookup(source, is_inactive, hooks.touches_in_statement))
     if not _walk_following_jumps(source, body, is_inactive, hooks):
         _drive(
             _walk_body(
@@ -452,6 +449,7 @@ def walk_branch_merged_body(
     Error, Resume): callers gate on procedure_has_unstructured_flow and fall back
     to walk_straight_line_body when it holds.
     """
+    hooks = replace(hooks, touches_in_statement=_TouchLookup(source, is_inactive, hooks.touches_in_statement))
     _drive(_walk_body(source, body, is_inactive, hooks, True))
 
 
@@ -807,6 +805,8 @@ def _block_touches(
     own lines pass on, `If TryGet(k, obj) Then` and a For Each's control variable
     among them (XLIDE issue #237). Upstream recurses through nested blocks; the
     same set comes from one walk over every nested node."""
+    if isinstance(touches, _TouchLookup):
+        return touches.block(node)
     child: list[BodyNode] = getattr(node, "body", None) or []
     out: set[str] = set()
     for nested in iter_body_nodes(child, is_inactive):
@@ -816,6 +816,47 @@ def _block_touches(
             out.update(_header_touches(source, nested, touches))
     out.update(_header_touches(source, node, touches))
     return out
+
+
+class _TouchLookup:
+    """Per-walk subtree summaries; retain nodes alongside their identity keys."""
+
+    def __init__(
+        self, source: str, inactive: Callable[[BodyNode], bool],
+        touches: Callable[[LeafStatementNode], Iterable[str]],
+    ) -> None:
+        self.source = source
+        self.inactive = inactive
+        self.touches = touches
+        self.blocks: dict[int, tuple[BodyNode, set[str]]] = {}
+
+    def __call__(self, leaf: LeafStatementNode) -> Iterable[str]:
+        return self.touches(leaf)
+
+    def block(self, node: BodyNode) -> set[str]:
+        stack = [(node, False)]
+        while stack:
+            current, ready = stack.pop()
+            if id(current) in self.blocks:
+                continue
+            children = getattr(current, "body", None) or []
+            if not ready:
+                stack.append((current, True))
+                stack.extend(
+                    (child, False) for child in reversed(children)
+                    if not self.inactive(child) and isinstance(getattr(child, "body", None), list)
+                )
+                continue
+            names = _header_touches(self.source, current, self.touches)
+            for child in children:
+                if self.inactive(child):
+                    continue
+                if is_leaf_statement(child):
+                    names.update(self.touches(child))
+                elif id(child) in self.blocks:
+                    names.update(self.blocks[id(child)][1])
+            self.blocks[id(current)] = (current, names)
+        return set(self.blocks[id(node)][1])
 
 
 _S = TypeVar("_S")
@@ -861,6 +902,7 @@ def walk_entering_blocks(
     every name the loop changes (XLIDE issue #238). After a block the state is its
     entry state less every name it touches, so a block that never names a
     variable keeps what is known about it."""
+    state = replace(state, touches=_TouchLookup(source, is_inactive, state.touches))
     _drive(_walk_entering_blocks(source, body, is_inactive, visit, state, loop_touched))
 
 
@@ -1196,7 +1238,6 @@ def _at(tokens: Sequence[VbaToken], i: int) -> VbaToken | None:
 
 __all__ = [
     "BlockEnteringState",
-    "DataflowHooks",
     "Lattice",
     "StraightLineDataflowHooks",
     "leaves_the_list",

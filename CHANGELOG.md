@@ -24,6 +24,12 @@ per milestone.
 
 ### Changed
 
+* Sync the analyzer and evidence data to XLIDE commit `2f49b93`, including
+  reference-library and saved-workbook-sheet context from Office readers.
+* Expression folders use explicit stacks to match upstream's nesting limits,
+  preserve fractional `Val` constants, and cache dataflow subtree touches
+  within each walk to avoid repeatedly scanning nested blocks.
+
 * CI installs its test tools and pyOpenVBA from a hash-locked lock
   (`.github/requirements/test.txt`), and the dependency audit reads the
   runtime set from `.github/requirements/runtime.txt`, which Dependabot moves

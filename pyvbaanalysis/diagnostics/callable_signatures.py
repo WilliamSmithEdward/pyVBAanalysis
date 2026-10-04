@@ -647,7 +647,7 @@ class _ScopedIntegerConstantLookup:
 
     def __init__(
         self,
-        constants: Mapping[str, int | None],
+        constants: Mapping[str, float | None],
         symbols: ModuleSymbols,
         proc_sym: VbaSymbol | None,
         project_visible: Sequence[VbaSymbol] | None,
@@ -659,7 +659,7 @@ class _ScopedIntegerConstantLookup:
         self._project_visible = project_visible
         self._model = model
 
-    def get(self, name: str, /) -> int | None:
+    def get(self, name: str, /) -> float | None:
         key = name.lower()
         if "." in key:
             if key in self._constants:
@@ -686,7 +686,7 @@ class _ScopedIntegerConstantLookup:
 
 
 def scoped_integer_constant_lookup(
-    constants: Mapping[str, int | None],
+    constants: Mapping[str, float | None],
     symbols: ModuleSymbols,
     proc_sym: VbaSymbol | None,
     project_visible: Sequence[VbaSymbol] | None,
@@ -697,7 +697,7 @@ def scoped_integer_constant_lookup(
 
 def procedure_integer_constant_lookup(
     member: ProcedureNode,
-    module_constants: Mapping[str, int | None],
+    module_constants: Mapping[str, float | None],
     symbols: ModuleSymbols,
     project_visible: Sequence[VbaSymbol] | None,
     activity: ConditionalActivityTracker | None,
@@ -705,7 +705,7 @@ def procedure_integer_constant_lookup(
 ) -> IntegerConstantLookup:
     """The integer-constant lookup for one procedure: its own `Const`s over the
     module's, resolved the way names resolve from inside that procedure."""
-    own: dict[str, int | None] = {}
+    own: dict[str, float | None] = {}
     collect_body_literal_integer_constants(member.body, own, activity)
     return scoped_integer_constant_lookup(
         module_constants if not own else {**module_constants, **own},

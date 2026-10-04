@@ -419,13 +419,13 @@ class _DivisionByZeroLookup:
     def __init__(self, state: _DivisionState) -> None:
         self._state = state
 
-    def get(self, name: str, /) -> int | None:
+    def get(self, name: str, /) -> float | None:
         state = self._state
         lower = name.lower()
         pass_value = state.pass_values.get(lower)
         if pass_value is not None:
             # A counter's pass value is any number, as upstream's lookup returns it.
-            return int(pass_value) if _js_is_integer(pass_value) else pass_value  # type: ignore[return-value]
+            return int(pass_value) if _js_is_integer(pass_value) else pass_value
         constant = state.constants.get(name)
         if constant is not None:
             return constant
@@ -464,7 +464,7 @@ class _DivisionByZeroLookup:
         if isinstance(result, float) and _js_is_integer(result):
             return int(result)
         # Upstream's lookup hands back any number; the evaluator reads it as it is.
-        return result  # type: ignore[return-value]
+        return result
 
 
 def check_string_arithmetic_operands(

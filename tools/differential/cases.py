@@ -18,6 +18,7 @@ loose file, unless one is asked for. An Office file always names its own.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import sys
 from collections import defaultdict
@@ -44,6 +45,9 @@ def _office_case(path: Path, label: str) -> dict[str, Any] | None:
         "label": label,
         "host": project.host,
         "referenced": project.referenced_hosts or [],
+        "referencedLibraries": project.referenced_libraries,
+        "workbookSheets": [dataclasses.asdict(sheet) for sheet in project.workbook_sheets]
+        if project.workbook_sheets is not None else None,
         "modules": [_office_module(m) for m in project.modules],
     }
 

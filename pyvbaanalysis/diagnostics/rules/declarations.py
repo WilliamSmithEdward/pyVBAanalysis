@@ -1251,7 +1251,7 @@ _FIXED_LENGTH_STRING_MAX = 65526
 def check_fixed_length_string_bounds(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
     module_constants = collect_module_literal_integer_constants(mod, activity)
 
-    def inspect_declaration(decl: VariableDeclNode | TypeFieldNode, constants: dict[str, int | None]) -> None:
+    def inspect_declaration(decl: VariableDeclNode | TypeFieldNode, constants: dict[str, float | None]) -> None:
         if decl.fixed_length is None or is_inactive_node(activity, decl):
             return
         value = resolve_fixed_length_string_size(decl.fixed_length, constants)

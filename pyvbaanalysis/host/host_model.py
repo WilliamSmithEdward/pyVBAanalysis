@@ -479,8 +479,8 @@ def application_member_names(model: HostObjectModel | None = None) -> frozenset[
 
     Where the host has a Global interface (Excel, Word, PowerPoint), that is what
     VBA really calls bare, and resolve_host_global_member answers for it, hidden
-    members and all. Application's documented members stand in for it here because
-    they match it closely; its hidden ones do not, so they stay out. `Save` is a
+    members and all. Application's documented members are included only when
+    they also resolve on Global; hidden Application members stay out. `Save` is a
     hidden method of Excel's `_Application` and no member of `_Global`, so a bare
     `Save` is "Sub or Function not defined". Access has no Global: its type library
     makes Application itself the object VBA binds bare, so there every member of
@@ -497,7 +497,10 @@ def application_member_names(model: HostObjectModel | None = None) -> frozenset[
         frozenset(
             member["name"].lower()
             for member in members
-            if not (global_answers and member.get("hidden"))
+            if not (
+                global_answers
+                and (member.get("hidden") or resolve_host_global_member(member["name"], resolved) is None)
+            )
         ),
         resolved,
     )

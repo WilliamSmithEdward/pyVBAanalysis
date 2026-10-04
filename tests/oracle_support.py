@@ -5,6 +5,8 @@ Not a test module (no test_ prefix); imported by the rule test files.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from pyvbaanalysis import analyze_module_options_for
 from pyvbaanalysis.diagnostics import analyze_module
 from pyvbaanalysis.evidence import OracleCase, load_audit, load_oracle_cases
@@ -25,7 +27,8 @@ def _kind(module_type: str) -> ModuleSymbolKind:
     return _KIND.get(module_type, ModuleSymbolKind.STANDARD)
 
 
-def case_codes(case: OracleCase) -> set[str]:
+@lru_cache(maxsize=len(CASES))
+def case_codes(case: OracleCase) -> frozenset[str]:
     """Union of diagnostic codes analyze_module emits across a case's modules.
 
     Each module is analyzed with the cross-module project context the real
@@ -37,6 +40,9 @@ def case_codes(case: OracleCase) -> set[str]:
     Every case was run in a default Excel workbook, so the host is named as Excel,
     and the reference list is known to name no other application's library rather
     than unknown.
+
+    Cases are immutable. Reuse their full findings across rule-specific assertions
+    so enlarging the corpus does not repeat the same complete analysis per rule.
     """
     index = ProjectIndex()
     for module in case.modules:
@@ -48,7 +54,7 @@ def case_codes(case: OracleCase) -> set[str]:
         )
         for diag in analyze_module(module.source, opts):
             out.add(diag.code)
-    return out
+    return frozenset(out)
 
 
 def asserted_cases(code: str) -> list[OracleCase]:

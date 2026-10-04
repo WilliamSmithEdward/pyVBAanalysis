@@ -553,5 +553,3 @@ def check_type_of_is_compatibility(
 
 # The names the registry used before the 2f49b93 sync; the registry (F7) moves to
 # the names above, and these go with it.
-check_typeof_missing_operand = check_type_of_missing_operand
-check_typeof_is_compatibility = check_type_of_is_compatibility

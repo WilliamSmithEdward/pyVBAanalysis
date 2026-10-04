@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from offsets import utf16_offsets
 from recorder import STAMPED_METHODS
 
 from pyvbaanalysis import analyze_module
@@ -200,7 +201,12 @@ def _shown(code: str, start: int, end: int, message: str) -> str:
 
 def _port_result(source: str, opts: AnalyzeModuleOptions) -> Counter[str]:
     found: list[VbaDiagnostic] = analyze_module(source, opts)
-    return Counter(_shown(d.code, d.span.start, d.span.end, d.message) for d in found)
+    offsets = utf16_offsets(source)
+    return Counter(
+        _shown(d.code, offsets[d.span.start] if offsets is not None else d.span.start,
+               offsets[d.span.end] if offsets is not None else d.span.end, d.message)
+        for d in found
+    )
 
 
 def replay(calls: Path, show: int = 10, only_code: str | None = None) -> int:

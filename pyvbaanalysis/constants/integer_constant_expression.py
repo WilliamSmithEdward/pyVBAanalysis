@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Mapping
-from typing import Protocol
+from collections.abc import Callable, Generator, Mapping
+from typing import Any, Protocol, cast
 
 from ..js_compat import js_number, js_number_to_string, js_trim
 from ..lexer.token_helpers import token_name
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..lexer.tokenize import tokenize
+from ..parser.expression_stack import run_expression
 
 # JavaScript Number.MAX_SAFE_INTEGER; mirrors the Number.isSafeInteger gating that
 # the TypeScript source uses to reject magnitudes that lose precision.
@@ -35,11 +36,14 @@ _OCTAL_RE = re.compile(r"^&[oO]([0-7]+)$")
 
 
 class IntegerConstantLookup(Protocol):
-    """Lookup of integer constant values by lowercased (possibly qualified) name."""
+    """Lookup of numeric constant values by lowercased (possibly qualified) name.
+
+    Most supported forms are integers; Val can also produce a fraction.
+    """
 
     # Positional-only so a plain dict/Mapping of resolved constants satisfies the
     # protocol (mirrors the ReadonlyMap the TypeScript rules pass in).
-    def get(self, name: str, /) -> int | None: ...
+    def get(self, name: str, /) -> float | None: ...
 
 
 def _is_safe_integer(value: int) -> bool:
@@ -116,15 +120,13 @@ def enum_member_raw_expression(explicit_raw: str | None, previous_name: str | No
     return f"{previous_name} + 1" if previous_name else "0"
 
 
-def evaluate_integer_constant_expression(raw: str, constants: IntegerConstantLookup) -> int | None:
-    """Evaluates one raw constant expression against already-known constants."""
+def evaluate_integer_constant_expression(raw: str, constants: IntegerConstantLookup) -> float | None:
+    """Evaluate a supported numeric constant expression (Val may be fractional)."""
     return _IntegerConstantExpressionParser(raw, constants).parse()
 
 
-# Recursion-depth ceiling for the descent parser. User-authored Const text is
-# untrusted, so a pathologically deep expression (e.g. thousands of nested
-# parens) must not overflow the interpreter stack. Past this depth we bail to
-# None, honoring the file's "return None so callers never guess" contract.
+# Match upstream's descent budget, even though readers use an explicit stack.
+# Past this depth return None so callers never guess.
 _MAX_RECURSION_DEPTH = 300
 
 
@@ -187,47 +189,44 @@ class _IntegerConstantExpressionParser:
         # Inside a call's arguments, where True and False pass as -1 and 0.
         self._in_arguments = 0
 
-    def parse(self) -> int | None:
+    def parse(self) -> float | None:
         if not self._tokens:
             return None
         try:
-            value = self._expression()
+            value = run_expression(self._expression())
         except RecursionError:
-            # The depth guard bounds well below the interpreter limit, but the
-            # "return None so callers never guess" contract must hold regardless.
+            # Caller-provided constant lookups may still recurse.
             return None
         if value is None or self._current() is not None:
             return None
-        # Upstream can return a fraction here (`Const K = Val("1.5")`); the
-        # port's integer evaluator answers None for one rather than widen its
-        # int contract.
-        whole = _whole(value)
-        return whole if isinstance(whole, int) else None
+        # Val can return a fraction. Preserve it for a later rounding call or
+        # another constant, as upstream's JavaScript number map does.
+        return _whole(value)
 
-    def _expression(self) -> float | None:
+    def _expression(self) -> Generator[Any, Any, float | None]:
         # Depth guard: untrusted Const text can nest arbitrarily deep; bail to
         # None rather than overflowing the stack.
         self._depth += 1
         try:
             if self._depth > _MAX_RECURSION_DEPTH:
                 return None
-            return self._logical(0)
+            return (cast("float | None", (yield self._logical(0))))
         finally:
             self._depth -= 1
 
-    def _logical(self, level: int) -> float | None:
+    def _logical(self, level: int) -> Generator[Any, Any, float | None]:
         """Xor, Or and And, loosest first, then Not, over whole numbers within
         the Long range: ``Const K0 = 15 And 255`` is 15 (XLIDE issue #496,
         measured in Excel 16.0)."""
         if level == len(_LOGICAL_LEVELS):
             if self._accept_word("not"):
-                operand = self._logical(level)
+                operand = (cast("float | None", (yield self._logical(level))))
                 return None if operand is None or not _is_long(operand) else ~int(operand)
-            return self._expression_inner()
+            return (cast("float | None", (yield self._expression_inner())))
         word = _LOGICAL_LEVELS[level]
-        value = self._logical(level + 1)
+        value = (cast("float | None", (yield self._logical(level + 1))))
         while value is not None and self._accept_word(word):
-            right = self._logical(level + 1)
+            right = (cast("float | None", (yield self._logical(level + 1))))
             if right is None or not _is_long(value) or not _is_long(right):
                 return None
             left_int = int(value)
@@ -240,64 +239,64 @@ class _IntegerConstantExpressionParser:
                 value = left_int ^ right_int
         return value
 
-    def _expression_inner(self) -> float | None:
-        value = self._modulo()
+    def _expression_inner(self) -> Generator[Any, Any, float | None]:
+        value = (cast("float | None", (yield self._modulo())))
         while value is not None:
             if self._accept("+"):
-                right = self._modulo()
+                right = (cast("float | None", (yield self._modulo())))
                 value = None if right is None else safe_integer(value + right)
                 continue
             if self._accept("-"):
-                right = self._modulo()
+                right = (cast("float | None", (yield self._modulo())))
                 value = None if right is None else safe_integer(value - right)
                 continue
             break
         return value
 
-    def _modulo(self) -> float | None:
+    def _modulo(self) -> Generator[Any, Any, float | None]:
         """Mod binds below ``\\``, and ``\\`` below ``*``: ``50 Mod 7 + 10`` is 11."""
-        value = self._integer_division()
+        value = (cast("float | None", (yield self._integer_division())))
         while value is not None and self._accept_word("mod"):
-            right = self._integer_division()
+            right = (cast("float | None", (yield self._integer_division())))
             # JavaScript's % keeps the dividend's sign, as math.fmod does.
             value = None if right is None or right == 0 else safe_integer(math.fmod(value, right))
         return value
 
-    def _integer_division(self) -> float | None:
-        value = self._term()
+    def _integer_division(self) -> Generator[Any, Any, float | None]:
+        value = (cast("float | None", (yield self._term())))
         while value is not None and self._accept("\\"):
-            right = self._term()
+            right = (cast("float | None", (yield self._term())))
             value = None if right is None or right == 0 else safe_integer(math.trunc(value / right))
         return value
 
-    def _term(self) -> float | None:
-        value = self._factor()
+    def _term(self) -> Generator[Any, Any, float | None]:
+        value = (cast("float | None", (yield self._factor())))
         while value is not None:
             if not self._accept("*"):
                 break
-            right = self._factor()
+            right = (cast("float | None", (yield self._factor())))
             value = None if right is None else safe_integer(value * right)
         return value
 
-    def _factor(self) -> float | None:
+    def _factor(self) -> Generator[Any, Any, float | None]:
         # Depth guard: unary +/- chains and nested parens recurse through factor;
         # bail to None once the ceiling is hit (see _expression()).
         self._depth += 1
         try:
             if self._depth > _MAX_RECURSION_DEPTH:
                 return None
-            return self._factor_inner()
+            return (cast("float | None", (yield self._factor_inner())))
         finally:
             self._depth -= 1
 
-    def _factor_inner(self) -> float | None:
+    def _factor_inner(self) -> Generator[Any, Any, float | None]:
         if self._accept("+"):
-            return self._factor()
+            return (cast("float | None", (yield self._factor())))
         if self._accept("-"):
-            value = self._factor()
+            value = (cast("float | None", (yield self._factor())))
             return None if value is None else safe_integer(-value)
         if self._accept("("):
-            value = self._expression()
+            value = (cast("float | None", (yield self._expression())))
             return value if value is not None and self._accept(")") else None
         token = self._current()
         if token is None:
@@ -319,7 +318,7 @@ class _IntegerConstantExpressionParser:
         qualified = self._qualified_name()
         if qualified:
             return self._constants.get(qualified.lower())
-        rounded = self._rounding_call()
+        rounded = (cast("float | None | _NotACall", (yield self._rounding_call())))
         if not isinstance(rounded, _NotACall):
             return rounded
         name = token_name(token)
@@ -338,9 +337,9 @@ class _IntegerConstantExpressionParser:
                 if before is None or before.raw_text != ".":
                     self._index += 1
                     self._in_arguments += 1
-                    args: list[float | None] = [self._expression()]
+                    args: list[float | None] = [(cast("float | None", (yield self._expression())))]
                     while self._accept(","):
-                        args.append(self._expression())
+                        args.append((cast("float | None", (yield self._expression()))))
                     self._in_arguments -= 1
                     if not self._accept(")") or any(arg is None for arg in args):
                         return None
@@ -349,7 +348,7 @@ class _IntegerConstantExpressionParser:
             return self._constants.get(name.lower())
         return None
 
-    def _rounding_call(self) -> float | None | _NotACall:
+    def _rounding_call(self) -> Generator[Any, Any, float | None | _NotACall]:
         """``CInt(3.5)``, ``Int(-0.1)``, ``Fix(-0.9)``, ``Round(0.5)``: a
         conversion or rounding of a number, which comes out whole (XLIDE issue
         #286, measured in Excel 16.0). CInt, CLng and Round round half to even,
@@ -412,7 +411,7 @@ class _IntegerConstantExpressionParser:
             value = (-read if negative else read) if math.isfinite(read) else None
         else:
             self._index = argument
-            value = self._expression()
+            value = (cast("float | None", (yield self._expression())))
         if value is None or not self._accept(")"):
             self._index = start
             return _NOT_A_CALL
@@ -463,17 +462,17 @@ class _CallableLookup:
 
     __slots__ = ("_fn",)
 
-    def __init__(self, fn: Callable[[str], int | None]) -> None:
+    def __init__(self, fn: Callable[[str], float | None]) -> None:
         self._fn = fn
 
-    def get(self, name: str) -> int | None:
+    def get(self, name: str) -> float | None:
         return self._fn(name)
 
 
 def resolve_raw_integer_constants(
     raw_constants: Mapping[str, str | None],
-    base: Mapping[str, int | None] | None = None,
-) -> dict[str, int | None]:
+    base: Mapping[str, float | None] | None = None,
+) -> dict[str, float | None]:
     """Resolves raw constant expressions to integer values, memoized, cycle-safe.
 
     raw_constants maps a lowercased (possibly qualified) name to its raw expression
@@ -481,11 +480,11 @@ def resolve_raw_integer_constants(
     back to the optional base map of already-resolved values; the returned map only
     contains raw_constants keys. A reference cycle resolves to None.
     """
-    base_map: Mapping[str, int | None] = {} if base is None else base
-    resolved: dict[str, int | None] = {}
+    base_map: Mapping[str, float | None] = {} if base is None else base
+    resolved: dict[str, float | None] = {}
     resolving: set[str] = set()
 
-    def resolve(name: str) -> int | None:
+    def resolve(name: str) -> float | None:
         key = name.lower()
         if key in resolved:
             return resolved[key]

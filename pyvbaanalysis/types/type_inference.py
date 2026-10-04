@@ -560,7 +560,7 @@ class _WithKnownLocals:
         self._constants = constants
         self._known = known
 
-    def get(self, name: str, /) -> int | None:
+    def get(self, name: str, /) -> float | None:
         constant = self._constants.get(name)
         if constant is not None:
             return constant

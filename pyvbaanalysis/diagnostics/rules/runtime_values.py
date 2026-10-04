@@ -454,7 +454,7 @@ def check_runtime_argument_values(
                     )
 
                 # A fixed-length string is always its declared length (issue #248).
-                def fixed_length_of(slot: Sequence[VbaToken]) -> int | None:
+                def fixed_length_of(slot: Sequence[VbaToken]) -> float | None:
                     return fixed_string_length(slot, symbols, member, types, lookup)
 
                 for message_hit in _runtime_statement_value_hits(
@@ -537,7 +537,7 @@ def _runtime_statement_value_hits(
     known_string_lengths: Mapping[str, int],
     known_strings: Mapping[str, str],
     source_names: SourceNameScope,
-    fixed_length_of: Callable[[Sequence[VbaToken]], int | None] | None = None,
+    fixed_length_of: Callable[[Sequence[VbaToken]], float | None] | None = None,
 ) -> list[_MessageHit]:
     """Statement and operator forms that raise for a value the code states (XLIDE
     issue #118, each measured in Excel 16.0):
@@ -684,7 +684,7 @@ def _runtime_statement_value_hits(
             # A local known to hold a number, and True or False, count too:
             # `z ^ -1` with z never assigned, `0 ^ True` (issue #331, measured in
             # Excel 16.0).
-            def named(operand: VbaToken | None, beside: VbaToken | None) -> int | None:
+            def named(operand: VbaToken | None, beside: VbaToken | None) -> float | None:
                 word = token_text(operand)
                 if word in ("true", "false"):
                     return -1 if word == "true" else 0
@@ -795,7 +795,7 @@ def _number_argument_group(toks: Sequence[VbaToken], index: int) -> list[VbaToke
 
 def _integer_group_value(
     source: str, span: Span, group: Sequence[VbaToken], constants: IntegerConstantLookup
-) -> int | None:
+) -> float | None:
     # Upstream reads group[0].start unguarded, so an empty group throws there and
     # the shared statement walk stops; the IndexError here does the same.
     return evaluate_integer_constant_expression(
@@ -1615,7 +1615,7 @@ def _date_serial_past_maximum(
     19xx or 20xx, and is judged only where both readings agree."""
     if _strip_vba_prefix(call.display_name).lower() != "dateserial" or len(call.slots) != 3:
         return None
-    parts: list[int | None] = []
+    parts: list[float | None] = []
     for slot in call.slots:
         toks = [t for t in slot if t.kind is not TokenKind.COMMENT]
         parts.append(None if not toks else _integer_group_value(source, span, toks, constants))
@@ -2536,11 +2536,12 @@ def _utc_ms(year: int, month: int, day: int) -> int:
     return _days_from_civil(year, month, day) * _MS_PER_DAY
 
 
-def _utc_date_ms(year: int, month_index: int, day: int) -> int:
+def _utc_date_ms(year: float, month_index: float, day: float) -> int:
     """`new Date(0)`, then setUTCFullYear(year, month_index, 1) and
     setUTCDate(day): the month index and the day roll over into the next unit."""
-    carried_year = year + month_index // 12
-    return (_days_from_civil(carried_year, month_index % 12 + 1, 1) + day - 1) * _MS_PER_DAY
+    whole_month = math.trunc(month_index)
+    carried_year = math.trunc(year) + whole_month // 12
+    return (_days_from_civil(carried_year, whole_month % 12 + 1, 1) + math.trunc(day) - 1) * _MS_PER_DAY
 
 
 def _epoch_ms(date: UtcDate | None) -> int | None:

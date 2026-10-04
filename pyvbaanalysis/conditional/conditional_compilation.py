@@ -14,9 +14,9 @@ import enum
 import math
 import re
 import unicodedata
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
-from typing import Protocol, Union
+from typing import Any, Protocol, Union, cast
 
 from ..constants.date_literal import date_literal_serial
 from ..constants.integer_constant_expression import bankers_round, parse_vba_integer_literal
@@ -24,6 +24,7 @@ from ..js_compat import js_number, js_trim
 from ..lexer.token_helpers import relational_operator_at, token_word
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..lexer.tokenize import tokenize
+from ..parser.expression_stack import run_expression
 from ..parser.nodes import (
     BodyNode,
     ConditionalDirectiveKind,
@@ -735,45 +736,44 @@ class _ConditionalExpressionParser:
 
     def parse(self) -> ConditionalValue | None:
         try:
-            value = self._parse_logical(0)
+            value = run_expression(self._parse_logical(0))
         except RecursionError:
-            # Upstream recurses on the JavaScript stack, which nests far deeper
-            # than Python's; an expression nested past it is left unknown.
+            # A caller's constant lookup may recurse independently of the reader.
             return None
         return value if self._index >= len(self._tokens) else None
 
-    def _parse_logical(self, level: int) -> ConditionalValue | None:
+    def _parse_logical(self, level: int) -> Generator[Any, Any, ConditionalValue | None]:
         """Imp, Eqv, Xor, Or, And, loosest first; each level is left-associative."""
         if level == len(_LOGICAL_LEVELS):
-            return self._parse_not()
+            return (cast("ConditionalValue | None", (yield self._parse_not())))
         op = _LOGICAL_LEVELS[level]
-        left = self._parse_logical(level + 1)
+        left = (cast("ConditionalValue | None", (yield self._parse_logical(level + 1))))
         while self._match_word(op):
-            right = self._parse_logical(level + 1)
+            right = (cast("ConditionalValue | None", (yield self._parse_logical(level + 1))))
             left = None if left is None or right is None else _logical(op, left, right)
         return left
 
-    def _parse_not(self) -> ConditionalValue | None:
+    def _parse_not(self) -> Generator[Any, Any, ConditionalValue | None]:
         """`Not` binds looser than a comparison: `Not 1 = 2` is `Not (1 = 2)`."""
         if self._match_word("not"):
-            value = self._parse_not()
+            value = (cast("ConditionalValue | None", (yield self._parse_not())))
             if isinstance(value, bool):
                 return not value
             if value is not None and _is_null(value):
                 return _NULL
             number = None if value is None else _whole_number(value)
             return None if number is None else ~_to_int32(number)
-        return self._parse_comparison()
+        return (cast("ConditionalValue | None", (yield self._parse_comparison())))
 
-    def _parse_comparison(self) -> ConditionalValue | None:
-        left = self._parse_concat()
+    def _parse_comparison(self) -> Generator[Any, Any, ConditionalValue | None]:
+        left = (cast("ConditionalValue | None", (yield self._parse_concat())))
         while True:
             relational = relational_operator_at(self._tokens, self._index)
             word = None if relational is not None else token_word(self._peek())
             if relational is None and word != "like" and word != "is":
                 return left
             self._index += relational[1] if relational is not None else 1
-            right = self._parse_concat()
+            right = (cast("ConditionalValue | None", (yield self._parse_concat())))
             if left is None or right is None:
                 left = None
             elif relational is not None:
@@ -781,20 +781,20 @@ class _ConditionalExpressionParser:
             else:
                 left = _like(left, right) if word == "like" else _is(left, right)
 
-    def _parse_concat(self) -> ConditionalValue | None:
-        left = self._parse_additive()
+    def _parse_concat(self) -> Generator[Any, Any, ConditionalValue | None]:
+        left = (cast("ConditionalValue | None", (yield self._parse_additive())))
         while self._peek_raw() == "&":
             self._index += 1
-            right = self._parse_additive()
+            right = (cast("ConditionalValue | None", (yield self._parse_additive())))
             left = None if left is None or right is None else _concat(left, right)
         return left
 
-    def _parse_additive(self) -> ConditionalValue | None:
-        left = self._parse_mod()
+    def _parse_additive(self) -> Generator[Any, Any, ConditionalValue | None]:
+        left = (cast("ConditionalValue | None", (yield self._parse_mod())))
         while self._peek_raw() in ("+", "-"):
             op = self._tokens[self._index].raw_text
             self._index += 1
-            right = self._parse_mod()
+            right = (cast("ConditionalValue | None", (yield self._parse_mod())))
             if left is None or right is None:
                 left = None
             elif op == "+" and isinstance(left, str) and isinstance(right, str):
@@ -803,61 +803,61 @@ class _ConditionalExpressionParser:
                 left = _arithmetic(op, left, right)
         return left
 
-    def _parse_mod(self) -> ConditionalValue | None:
-        left = self._parse_integer_division()
+    def _parse_mod(self) -> Generator[Any, Any, ConditionalValue | None]:
+        left = (cast("ConditionalValue | None", (yield self._parse_integer_division())))
         while self._match_word("mod"):
-            right = self._parse_integer_division()
+            right = (cast("ConditionalValue | None", (yield self._parse_integer_division())))
             left = None if left is None or right is None else _arithmetic("mod", left, right)
         return left
 
-    def _parse_integer_division(self) -> ConditionalValue | None:
-        left = self._parse_product()
+    def _parse_integer_division(self) -> Generator[Any, Any, ConditionalValue | None]:
+        left = (cast("ConditionalValue | None", (yield self._parse_product())))
         while self._peek_raw() == "\\":
             self._index += 1
-            right = self._parse_product()
+            right = (cast("ConditionalValue | None", (yield self._parse_product())))
             left = None if left is None or right is None else _arithmetic("\\", left, right)
         return left
 
-    def _parse_product(self) -> ConditionalValue | None:
-        left = self._parse_negation()
+    def _parse_product(self) -> Generator[Any, Any, ConditionalValue | None]:
+        left = (cast("ConditionalValue | None", (yield self._parse_negation())))
         while self._peek_raw() in ("*", "/"):
             op = self._tokens[self._index].raw_text
             self._index += 1
-            right = self._parse_negation()
+            right = (cast("ConditionalValue | None", (yield self._parse_negation())))
             left = None if left is None or right is None else _arithmetic(op, left, right)
         return left
 
-    def _parse_negation(self) -> ConditionalValue | None:
+    def _parse_negation(self) -> Generator[Any, Any, ConditionalValue | None]:
         """Unary minus binds looser than ^: `-2 ^ 2` is -4."""
         op = self._peek_raw()
         if op in ("-", "+"):
             self._index += 1
-            return _signed(op, self._parse_negation())
-        return self._parse_power()
+            return _signed(op, (cast("ConditionalValue | None", (yield self._parse_negation()))))
+        return (cast("ConditionalValue | None", (yield self._parse_power())))
 
-    def _parse_power(self) -> ConditionalValue | None:
-        left = self._parse_primary()
+    def _parse_power(self) -> Generator[Any, Any, ConditionalValue | None]:
+        left = (cast("ConditionalValue | None", (yield self._parse_primary())))
         while self._peek_raw() == "^":
             self._index += 1
-            right = self._parse_negation_operand()
+            right = (cast("ConditionalValue | None", (yield self._parse_negation_operand())))
             left = None if left is None or right is None else _arithmetic("^", left, right)
         return left
 
-    def _parse_negation_operand(self) -> ConditionalValue | None:
+    def _parse_negation_operand(self) -> Generator[Any, Any, ConditionalValue | None]:
         """An exponent may carry its own sign: `2 ^ -1`."""
         op = self._peek_raw()
         if op in ("-", "+"):
             self._index += 1
-            return _signed(op, self._parse_primary())
-        return self._parse_primary()
+            return _signed(op, (cast("ConditionalValue | None", (yield self._parse_primary()))))
+        return (cast("ConditionalValue | None", (yield self._parse_primary())))
 
-    def _parse_primary(self) -> ConditionalValue | None:
+    def _parse_primary(self) -> Generator[Any, Any, ConditionalValue | None]:
         token = self._peek()
         if token is None:
             return None
         if token.raw_text == "(":
             self._index += 1
-            value = self._parse_logical(0)
+            value = (cast("ConditionalValue | None", (yield self._parse_logical(0))))
             if self._peek_raw() != ")":
                 return None
             self._index += 1

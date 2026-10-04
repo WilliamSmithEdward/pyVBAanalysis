@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeGuard, Union
+from typing import TYPE_CHECKING, Any, TypeGuard, Union, cast
 
 from ..constants.date_literal import date_literal_serial
 from ..constants.integer_constant_expression import bankers_round, parse_vba_integer_literal
@@ -32,6 +32,7 @@ from ..lexer.token_helpers import match_paren_from, split_top_level_token_groups
 from ..lexer.token_helpers import token_word as token_text
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..parser.expression_limits import MAX_EXPRESSION_DEPTH
+from ..parser.expression_stack import run_expression
 from .string_conversion import is_invalid_date_string, numeric_string_verdict, val_prefix_value
 
 if TYPE_CHECKING:
@@ -176,11 +177,10 @@ def condition_value(toks: Sequence[VbaToken], facts: ConditionFacts) -> bool | N
     """The value of `toks` as a condition: True, False, or None when it is not certain."""
     parser = _ConditionParser([tok for tok in toks if tok.kind is not TokenKind.COMMENT], facts)
     try:
-        value = parser.or_expr()
+        value = run_expression(parser.or_expr())
     except RecursionError:
-        # Port-only: each nesting level costs a dozen Python frames, so a
-        # condition nested past Python's limit is not known here, where
-        # upstream reads it up to MAX_EXPRESSION_DEPTH.
+        # A caller-provided fact lookup may itself recurse; an unavailable fact
+        # remains unknown. The reader's own nesting uses an explicit stack.
         return None
     if not parser.done():
         return None
@@ -192,7 +192,7 @@ def number_value(toks: Sequence[VbaToken], facts: ConditionFacts) -> float | Non
     s known (issue #685)."""
     parser = _ConditionParser([tok for tok in toks if tok.kind is not TokenKind.COMMENT], facts)
     try:
-        value = parser.or_expr()
+        value = run_expression(parser.or_expr())
     except RecursionError:
         return None
     return value if parser.done() and _is_number(value) else None
@@ -267,14 +267,14 @@ class _ConditionParser:
         tok = self._at(i)
         return tok.raw_text if tok is not None else None
 
-    def _descend(self, read: Callable[[], _Operand]) -> _Operand:
+    def _descend(self, read: Callable[[], Generator[Any, Any, _Operand]]) -> Generator[Any, Any, _Operand]:
         """Share the recovery budget across calls, parentheses and prefix operators."""
         if self._nesting + 1 >= MAX_EXPRESSION_DEPTH:
             self._index = len(self._toks) + 1
             return None
         self._nesting += 1
         try:
-            return read()
+            return (cast("_Operand", (yield read())))
         finally:
             self._nesting -= 1
 
@@ -284,37 +284,37 @@ class _ConditionParser:
     def _word(self) -> str:
         return token_text(self._at(self._index))
 
-    def or_expr(self) -> _Value:
+    def or_expr(self) -> Generator[Any, Any, _Value]:
         if self._nesting >= MAX_EXPRESSION_DEPTH:
             return None
-        value = self._and_expr()
+        value = (cast("_Value", (yield self._and_expr())))
         while self._word() == "or":
             self._index += 1
-            right = self._and_expr()
+            right = (cast("_Value", (yield self._and_expr())))
             a = _truth(value)
             b = _truth(right)
             value = True if a is True or b is True else False if a is False and b is False else None
         return value
 
-    def _and_expr(self) -> _Value:
-        value = self._not_expr()
+    def _and_expr(self) -> Generator[Any, Any, _Value]:
+        value = (cast("_Value", (yield self._not_expr())))
         while self._word() == "and":
             self._index += 1
-            right = self._not_expr()
+            right = (cast("_Value", (yield self._not_expr())))
             a = _truth(value)
             b = _truth(right)
             value = False if a is False or b is False else True if a is True and b is True else None
         return value
 
-    def _not_expr(self) -> _Value:
+    def _not_expr(self) -> Generator[Any, Any, _Value]:
         if self._word() == "not":
             self._index += 1
-            value = _truth(self._descend(self._not_expr))
+            value = _truth((cast("_Operand", (yield self._descend(self._not_expr)))))
             return None if value is None else not value
-        return self._comparison()
+        return (cast("_Value", (yield self._comparison())))
 
-    def _comparison(self) -> _Value:
-        left = self.concat()
+    def _comparison(self) -> Generator[Any, Any, _Value]:
+        left = (cast("_Operand", (yield self.concat())))
         op = self._raw(self._index)
         if self._word() == "is" and token_text(self._at(self._index + 1)) == "nothing":
             self._index += 2
@@ -322,14 +322,14 @@ class _ConditionParser:
         # `s Like "b*"`, by the module's compare mode (issue #686).
         if self._word() == "like":
             self._index += 1
-            pattern = self.concat()
+            pattern = (cast("_Operand", (yield self.concat())))
             if isinstance(left, str) and isinstance(pattern, str):
                 return _like_match(left, pattern, _text_compare(self._facts.compare, left + pattern))
             return None
         if op is None or op not in _RELATIONAL:
             return None if isinstance(left, (_Nothing, _Range)) else left
         self._index += 1
-        right = self.concat()
+        right = (cast("_Operand", (yield self.concat())))
         # A range against a number: decided where every value in it agrees.
         left_range = _range_of(left)
         right_range = _range_of(right)
@@ -360,57 +360,57 @@ class _ConditionParser:
                 return op == "<>"
         return None
 
-    def _sum(self) -> _Operand:
+    def _sum(self) -> Generator[Any, Any, _Operand]:
         """Whole numbers joined by +, -, * or Mod: `b Mod 2 = 0` with b known
         (issue #565). A result past the Long range, which may overflow, and any
         operand that is not a known whole number make it None."""
-        value = self._modulo()
+        value = (cast("_Operand", (yield self._modulo())))
         op = self._raw(self._index)
         while op == "+" or op == "-":
             self._index += 1
-            value = _whole_arithmetic(value, self._modulo(), op)
+            value = _whole_arithmetic(value, (cast("_Operand", (yield self._modulo()))), op)
             op = self._raw(self._index)
         return value
 
-    def concat(self) -> _Operand:
+    def concat(self) -> Generator[Any, Any, _Operand]:
         """`&` joins strings, and whole numbers and Booleans as VBA spells them:
         `"a" & k` (issue #691)."""
         if self._nesting >= MAX_EXPRESSION_DEPTH:
             return None
-        value = self._sum()
+        value = (cast("_Operand", (yield self._sum())))
         while self._raw(self._index) == "&":
             self._index += 1
-            right = self._sum()
+            right = (cast("_Operand", (yield self._sum())))
             a = _spelled(value)
             b = _spelled(right)
             value = a + b if a is not None and b is not None else None
         return value
 
-    def _modulo(self) -> _Operand:
-        value = self._integer_division()
+    def _modulo(self) -> Generator[Any, Any, _Operand]:
+        value = (cast("_Operand", (yield self._integer_division())))
         while self._word() == "mod":
             self._index += 1
-            value = _whole_arithmetic(value, self._integer_division(), "mod")
+            value = _whole_arithmetic(value, (cast("_Operand", (yield self._integer_division()))), "mod")
         return value
 
-    def _integer_division(self) -> _Operand:
+    def _integer_division(self) -> Generator[Any, Any, _Operand]:
         """`k \\ 2`: each side rounded half to even, then divided toward zero (issue #691)."""
-        value = self._product()
+        value = (cast("_Operand", (yield self._product())))
         while self._raw(self._index) == "\\":
             self._index += 1
-            right = self._product()
+            right = (cast("_Operand", (yield self._product())))
             if _is_number(value) and _is_number(right) and _js_round(float(right)) != 0:
                 value = _js_trunc(_js_round(float(value)) / _js_round(float(right))) + 0
             else:
                 value = None
         return value
 
-    def _product(self) -> _Operand:
-        value = self._unary()
+    def _product(self) -> Generator[Any, Any, _Operand]:
+        value = (cast("_Operand", (yield self._unary())))
         op = self._raw(self._index)
         while op == "*" or op == "/":
             self._index += 1
-            right = self._unary()
+            right = (cast("_Operand", (yield self._unary())))
             if op == "*":
                 value = _whole_arithmetic(value, right, "*")
             elif _is_number(value) and _is_number(right) and right != 0:
@@ -420,20 +420,20 @@ class _ConditionParser:
             op = self._raw(self._index)
         return value
 
-    def _unary(self) -> _Operand:
+    def _unary(self) -> Generator[Any, Any, _Operand]:
         """`-d`, binding looser than `^`: -2 ^ 2 is -4."""
         if self._raw(self._index) == "-":
             self._index += 1
-            value = self._descend(self._unary)
+            value = (cast("_Operand", (yield self._descend(self._unary))))
             return -float(value) + 0 if _is_number(value) else None
-        return self._power()
+        return (cast("_Operand", (yield self._power())))
 
-    def _power(self) -> _Operand:
+    def _power(self) -> Generator[Any, Any, _Operand]:
         """`k ^ 2` (issue #691)."""
-        value = self._operand()
+        value = (cast("_Operand", (yield self._operand())))
         while self._raw(self._index) == "^":
             self._index += 1
-            right = self._operand()
+            right = (cast("_Operand", (yield self._operand())))
             result = (
                 _js_pow(float(value), float(right))
                 if _is_number(value) and _is_number(right)
@@ -442,7 +442,7 @@ class _ConditionParser:
             value = result if math.isfinite(result) else None
         return value
 
-    def _operand(self) -> _Operand:
+    def _operand(self) -> Generator[Any, Any, _Operand]:
         """A literal, a known name, an object name (for Is Nothing), IsNumeric(...),
         or a parenthesized condition."""
         tok = self._at(self._index)
@@ -451,7 +451,7 @@ class _ConditionParser:
         facts = self._facts
         if tok.raw_text == "(":
             self._index += 1
-            inner = self._descend(self.or_expr)
+            inner = (cast("_Operand", (yield self._descend(self.or_expr))))
             if self._raw(self._index) != ")":
                 self._index = len(self._toks) + 1
                 return None
@@ -482,7 +482,7 @@ class _ConditionParser:
             return float(_VB_CONSTANTS[word])
         # Built-ins of known values (issue #691).
         if word in _BUILTIN_CALLS and next_raw == "(":
-            called = self._builtin_call(word)
+            called = (cast("_Value | _NotACall", (yield self._builtin_call(word))))
             if not isinstance(called, _NotACall):
                 return called
             next_raw = self._raw(self._index)
@@ -539,7 +539,7 @@ class _ConditionParser:
             return None
         # LCase, UCase, InStr, StrComp and Replace of known strings (issue #686).
         if word in _STRING_CALLS:
-            called = self._string_call(word)
+            called = (cast("_Value | _NotACall", (yield self._string_call(word))))
             if not isinstance(called, _NotACall):
                 return called
         found_name = token_name(tok)
@@ -554,7 +554,7 @@ class _ConditionParser:
         held_range = facts.range(name) if known is None and facts.range is not None else None
         return _Range(held_range) if held_range is not None else known
 
-    def _string_call(self, word: str) -> _Value | _NotACall:
+    def _string_call(self, word: str) -> Generator[Any, Any, _Value | _NotACall]:
         """A call of a string function at the token before the index, its arguments
         each a condition operand. NOT_A_CALL where no `(` follows; None where an
         argument or the result is not known."""
@@ -566,7 +566,9 @@ class _ConditionParser:
         close = match_paren_from(self._toks, open_at)
         if close < 0:
             return _NOT_A_CALL
-        args = [self._argument_value(arg) for arg in split_top_level_token_groups(self._toks, open_at + 1, ",", close)]
+        args: list[_Value] = []
+        for argument in split_top_level_token_groups(self._toks, open_at + 1, ",", close):
+            args.append((cast("_Value", (yield self._argument_value(argument)))))
         self._index = close + 1
         mode = self._facts.compare
 
@@ -639,7 +641,7 @@ class _ConditionParser:
             return expression.replace(find, replacement)
         return None
 
-    def _builtin_call(self, word: str) -> _Value | _NotACall:
+    def _builtin_call(self, word: str) -> Generator[Any, Any, _Value | _NotACall]:
         """A built-in whose arguments are known (issue #691): Abs, Sgn, Int, Fix,
         Round, Val, CStr and Len of values; IsEmpty, IsArray, TypeName, VarType,
         UBound and LBound of a local whose declaration or value says; IsDate of a
@@ -664,11 +666,11 @@ class _ConditionParser:
                 return found.lower() if found is not None else None
             return None
 
-        def value(k: int) -> _Value:
-            return self._argument_value(groups[k]) if k < len(groups) else None
+        def value(k: int) -> Generator[Any, Any, _Value]:
+            return (cast("_Value", (yield self._argument_value(groups[k])))) if k < len(groups) else None
 
-        def number(k: int) -> float | None:
-            v = value(k)
+        def number(k: int) -> Generator[Any, Any, float | None]:
+            v = (cast("_Value", (yield value(k))))
             return float(v) if _is_number(v) else None
 
         def typed(k: int) -> str | None:
@@ -685,26 +687,26 @@ class _ConditionParser:
 
         one = len(groups) == 1
         if word == "abs":
-            n = number(0)
+            n = (cast("float | None", (yield number(0))))
             return abs(n) if one and n is not None else None
         if word == "sgn":
-            n = number(0)
+            n = (cast("float | None", (yield number(0))))
             return _js_sign(n) + 0 if one and n is not None else None
         if word == "int" or word == "fix":
-            n = number(0)
+            n = (cast("float | None", (yield number(0))))
             if not one or n is None:
                 return None
             return (_js_floor(n) if word == "int" else _js_trunc(n)) + 0
         if word == "round":
-            n = number(0)
+            n = (cast("float | None", (yield number(0))))
             return _js_round(n) + 0 if one and n is not None else None
         if word == "val":
-            s = value(0)
+            s = (cast("_Value", (yield value(0))))
             return val_prefix_value(s) if one and isinstance(s, str) else None
         if word == "cstr":
-            return _spelled(value(0)) if one else None
+            return _spelled((cast("_Value", (yield value(0))))) if one else None
         if word == "len":
-            s = value(0)
+            s = (cast("_Value", (yield value(0))))
             return float(utf16_length(s)) if one and isinstance(s, str) else None
         if word == "isempty":
             return empty(0) if one else None
@@ -712,7 +714,7 @@ class _ConditionParser:
             declared = typed(0)
             return None if not one or declared is None or declared == "variant" else declared.endswith("()")
         if word == "isdate":
-            s = value(0)
+            s = (cast("_Value", (yield value(0))))
             return False if one and isinstance(s, str) and is_invalid_date_string(s) else None
         if word == "typename" or word == "vartype":
             declared = typed(0)
@@ -733,18 +735,18 @@ class _ConditionParser:
             if len(groups) != 3:
                 return None
             parser = _ConditionParser(groups[0], facts, self._nesting + 1)
-            condition = _truth(parser.or_expr())
-            return None if condition is None or not parser.done() else value(1 if condition else 2)
+            condition = _truth((cast("_Value", (yield parser.or_expr()))))
+            return None if condition is None or not parser.done() else (cast("_Value", (yield value(1 if condition else 2))))
         if word == "ubound" or word == "lbound":
             lower = name(0)
             bounds = facts.bounds(lower) if lower and facts.bounds is not None else None
-            dimension = number(1) if len(groups) == 2 else 1.0
+            dimension = (cast("float | None", (yield number(1)))) if len(groups) == 2 else 1.0
             if bounds is not None and dimension == 1 and len(groups) <= 2:
                 return float(bounds[1 if word == "ubound" else 0])
             return None
         return None
 
-    def _argument_value(self, arg: Sequence[VbaToken]) -> _Value:
+    def _argument_value(self, arg: Sequence[VbaToken]) -> Generator[Any, Any, _Value]:
         """An argument's value: a condition operand, and vbBinaryCompare or
         vbTextCompare as 0 or 1."""
         toks = [tok for tok in arg if tok.kind is not TokenKind.COMMENT]
@@ -752,7 +754,7 @@ class _ConditionParser:
         if word == "vbbinarycompare" or word == "vbtextcompare":
             return 1.0 if word == "vbtextcompare" else 0.0
         parser = _ConditionParser(toks, self._facts, self._nesting + 1)
-        value = parser.concat()
+        value = (cast("_Operand", (yield parser.concat())))
         return value if parser.done() and not isinstance(value, (_Nothing, _Range)) else None
 
 

@@ -9,7 +9,7 @@ before any rule rides on it.
 from __future__ import annotations
 
 from pyvbaanalysis.diagnostics.dataflow import (
-    DataflowHooks,
+    StraightLineDataflowHooks,
     Lattice,
     tracked_locals_named_whole,
     walk_branch_merged_body,
@@ -52,7 +52,7 @@ def _track_x(source: str, *, merged: bool) -> str:
         state.clear()
         state.update(snapshot)
 
-    hooks = DataflowHooks(
+    hooks = StraightLineDataflowHooks(
         on_statement=on_statement,
         touches_in_statement=touches,
         demote_to_unknown=demote,

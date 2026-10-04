@@ -119,16 +119,7 @@ from .shared import is_bare_or_vba_qualified_intrinsic_call, source_expression_s
 
 # -- node-keyed lookups ----------------------------------------------------
 #
-# Upstream's maps and sets of parse nodes, read through these two helpers so the
-# keying convention lives in one place.
-
-
-def _node_get(mapping: Any, node: object) -> Any:
-    """`mapping.get(node)`: a plain dict is keyed by the node's id(), a
-    node-keyed map class (StatementShapes, StatementCounters) by the node."""
-    if isinstance(mapping, dict):
-        return mapping.get(id(node))
-    return mapping.get(node)
+# Upstream's node sets use either identity keys or a node-aware collection.
 
 
 def _node_in(collection: Any, node: object) -> bool:
@@ -908,7 +899,7 @@ def check_array_declaration_bounds(
 
 def _inspect_procedure_declarations(
     member: ProcedureNode,
-    module_constants: Mapping[str, int | None],
+    module_constants: Mapping[str, float | None],
     symbols: ModuleSymbols,
     project_visible_symbols: Sequence[VbaSymbol] | None,
     activity: ConditionalActivityTracker | None,
@@ -933,7 +924,7 @@ def _module_integer_constants(
     mod: ModuleNode,
     project_integer_constants: Mapping[str, str | None] | None,
     activity: ConditionalActivityTracker | None,
-) -> dict[str, int | None]:
+) -> dict[str, float | None]:
     """The module's integer constants and Enum members, over the project's Public ones."""
     project_constants = resolve_raw_integer_constants(project_integer_constants or {}, {})
     return collect_module_literal_integer_constants(mod, activity, project_constants)
@@ -2122,7 +2113,7 @@ def known_array_shapes_at(
     results: dict[int, tuple[Any, Mapping[str, FixedArrayBound]]] = {}
 
     def at(stmt: LeafStatementNode) -> Mapping[str, FixedArrayBound]:
-        assignments = _node_get(reaching, stmt)
+        assignments = reaching.get(id(stmt))
         if assignments is None:
             return whole
         entry = results.get(id(assignments))
@@ -2193,7 +2184,7 @@ def redim_shapes_at(
     values_at: list[Any] = []
     fixed_locals: list[dict[str, FixedArrayBound]] = []
 
-    def computed_value(node: LeafStatementNode, toks: Sequence[VbaToken]) -> int | None:
+    def computed_value(node: LeafStatementNode, toks: Sequence[VbaToken]) -> float | None:
         if not values_at:
             values_at.append(known_local_literal_values_at(source, proc, symbols, activity))
         known = values_at[0](node)
@@ -2221,7 +2212,7 @@ def redim_shapes_at(
                 continue
             parts.append(toks[i].raw_text)
             i += 1
-        no_constants: dict[str, int | None] = {}
+        no_constants: dict[str, float | None] = {}
         return evaluate_integer_constant_expression(" ".join(parts), with_known_locals(no_constants, known))
 
     def computed_dimension(node: LeafStatementNode, span: Span) -> ArrayDimensionBound | None:
@@ -3027,10 +3018,11 @@ def _element_step(
     """The array element `v(k)` holds and the parentheses that index it next."""
     if shape.elements is None or len(slots) != 1 or _raw_at(toks, close + 1) != "(":
         return None
-    value: int | None = _comparable_array_bound_expression_value(slots[0])
+    value: float | None = _comparable_array_bound_expression_value(slots[0])
     if value is None and lookup is not None:
         value = evaluate_integer_constant_expression(" ".join(tok.raw_text for tok in slots[0]), lookup)
-    element = None if value is None else _item(shape.elements, value - shape.dims[0].lower)
+    index = None if value is None else safe_integer(value - shape.dims[0].lower)
+    element = None if index is None else _item(shape.elements, index)
     if element is None:
         return None
     return (dataclasses.replace(element, name=f"{shape.name}({value})"), close + 1)
@@ -3527,7 +3519,7 @@ def _check_fixed_array_subscript_bounds_procedure(
     activity: ConditionalActivityTracker | None,
     push: PushFn,
     option_base: int,
-    module_constants: Mapping[str, int | None],
+    module_constants: Mapping[str, float | None],
     module_fixed: Mapping[str, FixedArrayBound],
     project_visible_symbols: Sequence[VbaSymbol] | None,
     host_model: HostObjectModel | None,
@@ -3561,7 +3553,7 @@ def _check_fixed_array_subscript_bounds_procedure(
 
     def fixed_at(stmt: LeafStatementNode) -> Mapping[str, FixedArrayBound]:
         shapes = shapes_at(stmt)
-        reshaped: Mapping[str, FixedArrayBound] | None = _node_get(redimmed, stmt)
+        reshaped = redimmed.get(stmt)
         key = (id(shapes), id(reshaped))
         entry = merged.get(key)
         if entry is not None and entry[0] is shapes and entry[1] is reshaped:
@@ -3577,7 +3569,7 @@ def _check_fixed_array_subscript_bounds_procedure(
     exclusions: dict[int, tuple[object, AbstractSet[str]]] = {}
 
     def excluded_at(stmt: LeafStatementNode) -> AbstractSet[str]:
-        reshaped: Mapping[str, FixedArrayBound] | None = _node_get(redimmed, stmt)
+        reshaped = redimmed.get(stmt)
         if reshaped is None:
             return redim_targets
         entry = exclusions.get(id(reshaped))

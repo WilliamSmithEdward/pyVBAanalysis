@@ -53,6 +53,8 @@ for (const c of JSON.parse(readFileSync(process.argv[2], 'utf8'))) {
       ...(c.host ? { host: c.host } : {}),
       // Absent means "nothing referenced" upstream; the port is given the same.
       referencedHosts: c.referenced ?? [],
+      referencedLibraries: c.referencedLibraries ?? undefined,
+      workbookSheets: c.workbookSheets ?? undefined,
     }));
   }
 }

@@ -494,7 +494,7 @@ class ProjectIndex:
         self._options = options or ProjectIndexOptions()
         self._modules: dict[str, ModuleSymbols] = {}
         self._module_sources: dict[str, str] = {}
-        self._module_resolved_constants: dict[str, dict[str, int | None]] = {}
+        self._module_resolved_constants: dict[str, dict[str, float | None]] = {}
         self._module_implements_lists: dict[str, list[str]] = {}
         self._module_implicit_members: dict[str, Sequence[ImplicitMember]] = {}
         self._module_predeclared_ids: dict[str, bool] = {}
@@ -624,7 +624,7 @@ class ProjectIndex:
         side = "own" if same_module else "other"
         return self._cached(f"contribution:{query}:{side}:{mod.module_name.lower()}", compute)
 
-    def _module_integer_constants(self, mod: ModuleSymbols) -> Mapping[str, int | None]:
+    def _module_integer_constants(self, mod: ModuleSymbols) -> Mapping[str, float | None]:
         key = mod.module_name.lower()
         resolved = self._module_resolved_constants.get(key)
         if resolved is None:
@@ -844,7 +844,7 @@ class ProjectIndex:
         def add_qualified(mod: ModuleSymbols, name: str, raw: str | None) -> None:
             out[f"{mod.module_name.lower()}.{name.lower()}"] = raw
 
-        def resolved_raw(resolved: Mapping[str, int | None], key: str, fallback: str | None) -> str | None:
+        def resolved_raw(resolved: Mapping[str, float | None], key: str, fallback: str | None) -> str | None:
             value = resolved.get(key.lower())
             return fallback if value is None else str(value)
 

@@ -16,7 +16,8 @@ value; `q / 1` is a Double. The rule follows the Win64 compiler constant: in
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
+from typing import Any, cast
 
 from ...conditional import ConditionalActivityTracker
 from ...conditional.conditional_compilation import (
@@ -25,6 +26,7 @@ from ...conditional.conditional_compilation import (
 )
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
 from ...lexer.token_kinds import TokenKind, VbaToken
+from ...parser.expression_stack import run_expression
 from ...parser.nodes import (
     BodyNode,
     ForBlockNode,
@@ -118,8 +120,7 @@ def _check_procedure(
                 lambda name: runtime_callable_source_shadowed(name, source_names),
             )
         except RecursionError:
-            # Port-only: parentheses nested past Python's frame limit, where
-            # upstream recurses on a deeper stack. Unknown, so nothing is said.
+            # A caller's shadowing lookup may itself recurse.
             return False
 
     def report(toks: Sequence[VbaToken], base: int, where: str) -> None:
@@ -249,6 +250,12 @@ def _check_procedure(
 def _wide_expression(
     toks: Sequence[VbaToken], env: Mapping[str, str], shadowed: Callable[[str], bool]
 ) -> bool:
+    return run_expression(_wide_expression_task(toks, env, shadowed))
+
+
+def _wide_expression_task(
+    toks: Sequence[VbaToken], env: Mapping[str, str], shadowed: Callable[[str], bool]
+) -> Generator[Any, Any, bool]:
     """Whether an expression is a whole number that is a LongLong: a LongLong or
     LongPtr name, a `^` literal or a pointer function, with whole-number operands
     and +, -, *, \\ or Mod between them."""
@@ -267,7 +274,7 @@ def _wide_expression(
                 if close < 0:
                     return False
                 inner = toks[i + 1 : close]
-                inner_wide = _wide_expression(inner, env, shadowed)
+                inner_wide = cast(bool, (yield _wide_expression_task(inner, env, shadowed)))
                 if not inner_wide and not _whole_expression(inner, env):
                     return False
                 saw_wide = saw_wide or inner_wide
