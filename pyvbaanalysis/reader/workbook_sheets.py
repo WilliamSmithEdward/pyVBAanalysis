@@ -5,7 +5,8 @@ from __future__ import annotations
 import struct
 from collections.abc import Iterator
 from typing import Any, Literal
-from xml.etree import ElementTree
+
+from defusedxml import ElementTree
 
 from ..symbols.sheet_changes import WorkbookSheetInfo
 

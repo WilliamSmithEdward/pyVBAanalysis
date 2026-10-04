@@ -21,10 +21,8 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
     "Typing :: Typed",
 ]
-# pyOpenVBA is the one external runtime dependency, used for direct VBA reads out of
-# Excel workbooks (pyvbaanalysis.reader.workbook). It is pure Python with no
-# transitive dependencies, so the runtime tree stays pure Python. Everything else is
-# the standard library.
+# pyOpenVBA reads VBA from Office files; defusedxml protects the saved workbook
+# metadata reader from XML entity expansion. Both dependencies are pure Python.
 #
 # The floor is a correctness requirement, not just currency. 3.4.0 resolves a
 # VBA project's code page correctly (earlier, text in a non-Latin project
@@ -32,7 +30,7 @@ classifiers = [
 # forms(), the UserForm designer read that gives a form's controls; without it
 # every control the code-behind names is undeclared. 6.3.3 is the release the
 # reader is tested against.
-dependencies = ["pyOpenVBA>=6.3.3"]
+dependencies = ["pyOpenVBA>=6.3.3", "defusedxml==0.7.1"]
 
 [project.optional-dependencies]
 # Exact pins: CI is a regression gate, so the toolchain must not drift
@@ -95,8 +93,7 @@ select = ["E4", "E7", "E9", "F"]
 python_version = "3.10"
 strict = true
 
-# pyOpenVBA is an untyped runtime dependency used only by the workbook reader
-# (lazily imported). It ships no type stubs, so allow the import.
+# The reader's runtime dependencies ship no type stubs, so allow their imports.
 [[tool.mypy.overrides]]
-module = ["pyopenvba", "pyopenvba.*"]
+module = ["pyopenvba", "pyopenvba.*", "defusedxml", "defusedxml.*"]
 ignore_missing_imports = true

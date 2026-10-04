@@ -53,6 +53,24 @@ def test_biff_sheet_names_and_kinds() -> None:
     assert _biff_sheets(data) == [WorkbookSheetInfo("Chart", "chartsheet")]
 
 
+@pytest.mark.parametrize("part", ["xl/workbook.xml", "xl/_rels/workbook.xml.rels"])
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16"])
+def test_ooxml_metadata_rejects_entity_declarations(part: str, encoding: str) -> None:
+    buffer = io.BytesIO()
+    malicious = '<?xml version="1.0"?><!DOCTYPE root [<!ENTITY expanded "sheet">]><root>&expanded;</root>'
+    entries = {
+        "xl/workbook.xml": b"<workbook/>",
+        "xl/_rels/workbook.xml.rels": b"<Relationships/>",
+    }
+    entries[part] = malicious.encode(encoding)
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, data in entries.items():
+            archive.writestr(name, data)
+    with zipfile.ZipFile(buffer) as archive:
+        with pytest.raises(ValueError, match="EntitiesForbidden"):
+            _zip_sheets(archive, False)
+
+
 def test_xlsb_sheet_names_and_kinds() -> None:
     def wide_string(text: str) -> bytes:
         encoded = text.encode("utf-16-le")

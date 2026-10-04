@@ -13,9 +13,9 @@ Python 3.10 or later.
 pip install -e ".[dev]"
 ```
 
-The `dev` extra adds the test, lint, and type tools. pyOpenVBA (the one runtime
-dependency, used to read VBA out of Office files) is installed with the base
-package, so the container reader is exercised by the test suite.
+The `dev` extra adds the test, lint, and type tools. The base package installs
+pyOpenVBA to read VBA out of Office files and defusedxml to parse saved workbook
+metadata safely, so the container reader is exercised by the test suite.
 
 ## Local checks
 

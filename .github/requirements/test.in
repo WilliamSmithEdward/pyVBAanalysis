@@ -1,6 +1,6 @@
 # Test tooling for the CI and Publish test gates, pinned with hashes so a run
-# installs exactly what was reviewed, with pyOpenVBA, the one runtime
-# dependency. The package itself installs afterwards with --no-deps
+# installs exactly what was reviewed, including both runtime dependencies.
+# The package itself installs afterwards with --no-deps
 # --no-build-isolation, so hatchling, its build backend, and editables, which
 # hatchling needs for an editable install, come from this lock too. The tool
 # versions match the dev extra in pyproject.toml. Compiled for the oldest
@@ -11,5 +11,6 @@ pytest==9.1.1
 ruff==0.16.9
 mypy==2.3.1
 pyopenvba==6.3.5
+defusedxml==0.7.1
 hatchling==1.32.4
 editables==0.6
