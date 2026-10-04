@@ -188,3 +188,61 @@ def analyze_project(
         )
         results[module.module_name] = analyze_module(module.source, opts)
     return results
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+class VbaProjectModuleInput:
+    pass
+
+
+class VbaProjectLiveOverride:
+    pass
+
+
+class VbaProjectIndexBuildOptions:
+    pass
+
+
+VbaProjectAnalysisOptions = object
+
+
+class VbaProjectEditorSymbolContext:
+    pass
+
+
+def module_kind_from_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("moduleKindFromType not ported yet")
+
+
+def effective_module_kind(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("effectiveModuleKind not ported yet")
+
+
+def build_vba_project_index(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("buildVbaProjectIndex not ported yet")
+
+
+def build_live_vba_project_index(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("buildLiveVbaProjectIndex not ported yet")
+
+
+def build_vba_project_index_async(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("buildVbaProjectIndexAsync not ported yet")
+
+
+def build_live_vba_project_index_async(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("buildLiveVbaProjectIndexAsync not ported yet")
+
+
+def project_procedure_signatures(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("projectProcedureSignatures not ported yet")
+
+
+def project_analysis_options_for_module(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("projectAnalysisOptionsForModule not ported yet")
+
+
+def project_editor_symbol_context_for_module(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("projectEditorSymbolContextForModule not ported yet")

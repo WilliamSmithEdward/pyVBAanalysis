@@ -283,3 +283,34 @@ def _absolute_span(base: Span, token: VbaToken) -> Span:
 
 def _at(tokens: Sequence[VbaToken], i: int) -> VbaToken | None:
     return tokens[i] if 0 <= i < len(tokens) else None
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+class VbaProcedureLabelCompletion:
+    pass
+
+
+class VbaProcedureLabelDefinition:
+    pass
+
+
+def resolve_procedure_label_completions(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("resolveProcedureLabelCompletions not ported yet")
+
+
+def resolve_procedure_label_definition_at(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("resolveProcedureLabelDefinitionAt not ported yet")
+
+
+def jump_target_label_declaration(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("jumpTargetLabelDeclaration not ported yet")
+
+
+def statement_label_declarations(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("statementLabelDeclarations not ported yet")
+
+
+def statement_has_unstructured_flow(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("statementHasUnstructuredFlow not ported yet")

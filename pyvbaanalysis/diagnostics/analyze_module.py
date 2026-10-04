@@ -311,3 +311,10 @@ def _me_host_type_for(
     # PowerPoint has no document modules; other hosts' document surfaces are
     # unmodelled, and silence beats a wrong type.
     return None
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def incomplete_expression_edit_span(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("incompleteExpressionEditSpan not ported yet")

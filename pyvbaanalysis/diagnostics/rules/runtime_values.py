@@ -962,3 +962,10 @@ def _token_at(toks: Sequence[VbaToken], index: int) -> VbaToken | None:
 
 def _token_span(base: Span, tok: VbaToken) -> Span:
     return Span(base.start + tok.start, base.start + tok.end)
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def whole_number_arguments(*args: object, **kwargs: object) -> None:
+    return None

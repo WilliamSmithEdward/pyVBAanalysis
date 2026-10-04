@@ -229,3 +229,22 @@ def scan_doc_tags(lines: list[DocBlockLine]) -> list[DocTagOccurrence] | None:
                 occurrence.end = to_source(close + len(tag) + 3)
         tags.append(occurrence)
     return tags
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def parse_doc_body(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("parseDocBody not ported yet")
+
+
+def extract_module_header_doc(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("extractModuleHeaderDoc not ported yet")
+
+
+def extract_leading_doc(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("extractLeadingDoc not ported yet")
+
+
+def doc_param_name_spans(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("docParamNameSpans not ported yet")

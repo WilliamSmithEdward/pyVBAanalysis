@@ -104,3 +104,26 @@ def deduplicate_diagnostics(diagnostics: list[VbaDiagnostic]) -> list[VbaDiagnos
         else:
             out[at] = d
     return out
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+class VbaModuleAnalysisDiagnostic:
+    pass
+
+
+class VbaModuleAnalysisInput:
+    pass
+
+
+class VbaModuleAnalysisResult:
+    pass
+
+
+class VbaModuleAnalysisFailure:
+    pass
+
+
+def analyze_vba_module_source(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("analyzeVbaModuleSource not ported yet")

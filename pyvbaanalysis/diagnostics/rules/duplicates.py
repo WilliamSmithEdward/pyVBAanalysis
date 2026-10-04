@@ -501,3 +501,10 @@ def check_ambiguous_bare_procedure_calls(
         return visitor
 
     return factory
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def check_enum_member_name_clash(*args: object, **kwargs: object) -> None:
+    return None

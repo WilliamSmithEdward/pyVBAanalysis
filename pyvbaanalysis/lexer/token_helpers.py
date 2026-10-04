@@ -304,3 +304,28 @@ def split_top_level_token_groups(
         current.append(tokens[i])
     groups.append(current)
     return groups
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+IDENT_RE: object = None
+
+
+def statement_tokens_cached(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("statementTokensCached not ported yet")
+
+
+def first_token_at_or_after(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("firstTokenAtOrAfter not ported yet")
+
+
+RelationalOperator = object
+
+
+def starts_physical_line(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("startsPhysicalLine not ported yet")
+
+
+def top_level_equals_index(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("topLevelEqualsIndex not ported yet")

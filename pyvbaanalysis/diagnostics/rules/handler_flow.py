@@ -343,3 +343,17 @@ def _raw_at(toks: Sequence[VbaToken], i: int) -> str | None:
     """`toks[i]?.rawText`."""
     tok = _at(toks, i)
     return tok.raw_text if tok is not None else None
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+OnErrorMode = object
+
+
+def on_error_mode(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def error_handler_extents(*args: object, **kwargs: object) -> None:
+    return None

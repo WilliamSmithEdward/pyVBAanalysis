@@ -1804,3 +1804,70 @@ def simple_type_name_for_assignment(type_text: str) -> str | None:
     identifier."""
     trimmed = _TRAILING_EMPTY_PARENS_RE.sub("", type_text).strip()
     return trimmed if is_identifier(trimmed) else None
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+class MemberCompletion:
+    pass
+
+
+class ReceiverChain:
+    pass
+
+
+def resolve_member_completions(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("resolveMemberCompletions not ported yet")
+
+
+def resolve_member_completion_named(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("resolveMemberCompletionNamed not ported yet")
+
+
+def resolve_host_member_kind_at(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("resolveHostMemberKindAt not ported yet")
+
+
+def resolve_member_definitions_at(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("resolveMemberDefinitionsAt not ported yet")
+
+
+def preceded_by_member_access_dot(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("precededByMemberAccessDot not ported yet")
+
+
+def private_member_owner_at(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("privateMemberOwnerAt not ported yet")
+
+
+def project_type_at(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("projectTypeAt not ported yet")
+
+
+def project_class_member_at(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("projectClassMemberAt not ported yet")
+
+
+def member_takes_own_arguments(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("memberTakesOwnArguments not ported yet")
+
+
+def signature_declares_parameters(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("signatureDeclaresParameters not ported yet")
+
+
+def is_late_bound_type_key(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("isLateBoundTypeKey not ported yet")
+
+
+def precedes_leading_member_dot(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("precedesLeadingMemberDot not ported yet")
+
+
+def ms_forms_control_members(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("msFormsControlMembers not ported yet")
+
+
+def project_class_members_index(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("projectClassMembersIndex not ported yet")

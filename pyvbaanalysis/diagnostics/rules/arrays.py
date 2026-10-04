@@ -1559,3 +1559,77 @@ def _array_bound_scalar_arguments(
             )
         )
     return hits
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def check_redim_type_change(*args: object, **kwargs: object) -> None:
+    return None
+
+
+StringValueOf = object
+
+
+class SubscriptHit:
+    pass
+
+
+def parse_fixed_array_bounds_for_decl(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def literal_dimensions(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def local_fixed_arrays(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def known_array_shapes_at(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def redim_shapes_at(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def array_value_shape(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def range_value_block(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def single_cell_value(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def elements_written_in(*args: object, **kwargs: object) -> None:
+    return None
+
+
+class ElementOperand:
+    pass
+
+
+def element_operand_ending_at(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def element_operand_starting_at(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def dimension_count_violation(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def shape_subscript_violation(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def subscript_violation(*args: object, **kwargs: object) -> None:
+    return None

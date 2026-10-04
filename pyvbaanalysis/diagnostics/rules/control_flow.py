@@ -779,3 +779,14 @@ def _malformed_open_statement(toks: Sequence[VbaToken]) -> str | None:
             if ends_operand and starts_clause:
                 return f"An 'Open' statement's mode '{toks[i].raw_text}' must follow 'For'."
     return None if saw_as else "An 'Open' statement requires an 'As #filenumber' clause."
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def check_reserved_labels(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def check_line_number_range(*args: object, **kwargs: object) -> None:
+    return None

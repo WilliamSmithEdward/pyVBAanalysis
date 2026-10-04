@@ -328,3 +328,220 @@ def declared_value_type_for_qualified_source_binding(
         return SourceDeclaredType(resolved=True)
     typed = next((d for d in matching_values if d.as_type), None)
     return SourceDeclaredType(resolved=True, as_type=typed.as_type if typed is not None else None)
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def def_type_of(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("defTypeOf not ported yet")
+
+
+def constant_string_value(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("constantStringValue not ported yet")
+
+
+def string_constants_in_scope(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("stringConstantsInScope not ported yet")
+
+
+def source_binding_type_resolvers(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("sourceBindingTypeResolvers not ported yet")
+
+
+def type_field_declared_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("typeFieldDeclaredType not ported yet")
+
+
+def with_known_locals(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("withKnownLocals not ported yet")
+
+
+def infer_bare_external_constant_expression_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("inferBareExternalConstantExpressionType not ported yet")
+
+
+def infer_bare_external_object_expression_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("inferBareExternalObjectExpressionType not ported yet")
+
+
+def infer_qualified_external_constant_expression_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("inferQualifiedExternalConstantExpressionType not ported yet")
+
+
+def inferred_external_constant(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("inferredExternalConstant not ported yet")
+
+
+def return_assignment_type_for(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("returnAssignmentTypeFor not ported yet")
+
+
+def return_assignment_is_array(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("returnAssignmentIsArray not ported yet")
+
+
+def is_property_result_indexing(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("isPropertyResultIndexing not ported yet")
+
+
+def is_member_parenless_argument_start(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("isMemberParenlessArgumentStart not ported yet")
+
+
+def sheets_from_collection_property(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("sheetsFromCollectionProperty not ported yet")
+
+
+VALUE_HELD: object = None
+
+
+def arithmetic_of_scalars(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("arithmeticOfScalars not ported yet")
+
+
+def by_ref_variable_type_mismatch(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("byRefVariableTypeMismatch not ported yet")
+
+
+def is_known_by_ref_exact_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("isKnownByRefExactType not ported yet")
+
+
+def runtime_signature_parameter_text(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("runtimeSignatureParameterText not ported yet")
+
+
+def parse_runtime_param_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("parseRuntimeParamType not ported yet")
+
+
+def split_signature_top_level(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("splitSignatureTopLevel not ported yet")
+
+
+def infer_signed_numeric_literal(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("inferSignedNumericLiteral not ported yet")
+
+
+def infer_atomic_expression_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("inferAtomicExpressionType not ported yet")
+
+
+def infer_intrinsic_cverr_error_variant(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("inferIntrinsicCverrErrorVariant not ported yet")
+
+
+def member_expression_return_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("memberExpressionReturnType not ported yet")
+
+
+def default_host_item_return_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("defaultHostItemReturnType not ported yet")
+
+
+def final_member_token_in_expression(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("finalMemberTokenInExpression not ported yet")
+
+
+def matching_open_paren_index(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("matchingOpenParenIndex not ported yet")
+
+
+def has_top_level_operator(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("hasTopLevelOperator not ported yet")
+
+
+def member_accepts_zero_arguments(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("memberAcceptsZeroArguments not ported yet")
+
+
+def parameterless_value_signature(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("parameterlessValueSignature not ported yet")
+
+
+def infer_arithmetic_expression_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("inferArithmeticExpressionType not ported yet")
+
+
+def find_nonnumeric_string_in_arithmetic_expression(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("findNonnumericStringInArithmeticExpression not ported yet")
+
+
+def infer_string_concatenation_expression_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("inferStringConcatenationExpressionType not ported yet")
+
+
+def split_top_level_arithmetic_operands(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("splitTopLevelArithmeticOperands not ported yet")
+
+
+def split_top_level_operands(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("splitTopLevelOperands not ported yet")
+
+
+def numeric_literal_overflow_reason(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("numericLiteralOverflowReason not ported yet")
+
+
+def create_object_assignment_type_resolver(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("createObjectAssignmentTypeResolver not ported yet")
+
+
+def dao_whole_value_error(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("daoWholeValueError not ported yet")
+
+
+def object_holding_default(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("objectHoldingDefault not ported yet")
+
+
+def read_only_host_default(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("readOnlyHostDefault not ported yet")
+
+
+def argumentless_host_default(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("argumentlessHostDefault not ported yet")
+
+
+def object_value_needs_index(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("objectValueNeedsIndex not ported yet")
+
+
+def picked_values(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("pickedValues not ported yet")
+
+
+def known_local_literal_values_at(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("knownLocalLiteralValuesAt not ported yet")
+
+
+def statement_may_change_module_variable(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("statementMayChangeModuleVariable not ported yet")
+
+
+def unreachable_statements_in(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("unreachableStatementsIn not ported yet")
+
+
+def dead_branch_spans_in(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("deadBranchSpansIn not ported yet")
+
+
+def defaulted_straight_line(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("defaultedStraightLine not ported yet")
+
+
+def function_result_for(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("functionResultFor not ported yet")
+
+
+SCALAR_OBJECT_ASSIGNMENT_REASON: object = None
+
+
+def create_project_interface_sharing_lookup(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("createProjectInterfaceSharingLookup not ported yet")
+
+
+def implements_object_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("implementsObjectType not ported yet")

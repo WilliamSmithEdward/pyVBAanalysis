@@ -1853,3 +1853,10 @@ def check_module_level_statements_outside_procedures(source: str, mod: ModuleNod
             f"{label} is invalid outside a Sub, Function, or Property procedure.",
             absolute_span(member.span, first),
         )
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def check_module_name(*args: object, **kwargs: object) -> None:
+    return None

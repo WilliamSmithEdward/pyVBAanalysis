@@ -307,3 +307,10 @@ def _definition_tier(
         if first.module_name.lower() == current_module.module_name.lower()
         else BareIdentifierResolutionScope.PROJECT
     )
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def is_local_identifier_symbol(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("isLocalIdentifierSymbol not ported yet")

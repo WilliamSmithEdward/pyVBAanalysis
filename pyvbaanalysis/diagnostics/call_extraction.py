@@ -395,3 +395,10 @@ def validate_arity(
             f"{describe_arity(required, maximum)}, but got {n}.",
             call.name_span,
         )
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def call_then_index(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("callThenIndex not ported yet")

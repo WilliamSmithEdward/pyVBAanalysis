@@ -403,3 +403,10 @@ __all__ = [
     "procedure_signature_from_symbol",
     "is_procedure_kind",
 ]
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def is_access_designer_class(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("isAccessDesignerClass not ported yet")

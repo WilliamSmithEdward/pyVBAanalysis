@@ -184,3 +184,10 @@ class StatementCursor:
 def code_tokens(statement: LogicalStatement) -> list[VbaToken]:
     """Significant tokens excluding any trailing comment (MS-VBAL 3.3.1)."""
     return [t for t in statement.tokens if t.kind is not TokenKind.COMMENT]
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def is_comment_line(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("isCommentLine not ported yet")

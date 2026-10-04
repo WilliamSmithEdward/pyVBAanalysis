@@ -365,3 +365,18 @@ def check_typeof_is_compatibility(
         return visitor
 
     return factory
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def check_type_of_missing_operand(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def check_type_of_is_compatibility(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def check_is_operands_in_conditions(*args: object, **kwargs: object) -> None:
+    return None

@@ -673,3 +673,10 @@ def _has_option_explicit(
         isinstance(member, OptionNode) and _EXPLICIT_OPTION_RE.match(member.option_text.strip())
         for member in active_module_members(mod, activity)
     )
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def check_builtins_read_bare(*args: object, **kwargs: object) -> None:
+    return None

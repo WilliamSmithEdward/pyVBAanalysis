@@ -371,3 +371,22 @@ def _has_top_level_assignment(toks: Sequence[VbaToken]) -> bool:
 
 def _at(tokens: Sequence[VbaToken], i: int) -> VbaToken | None:
     return tokens[i] if 0 <= i < len(tokens) else None
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+class StraightLineDataflowHooks:
+    pass
+
+
+def leaves_the_list(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("leavesTheList not ported yet")
+
+
+class BlockEnteringState:
+    pass
+
+
+def walk_entering_blocks(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("walkEnteringBlocks not ported yet")

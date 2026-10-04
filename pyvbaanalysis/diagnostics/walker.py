@@ -360,3 +360,18 @@ def physical_line_span_at_offset(source: str, offset: int) -> Span:
     if end > start and source[end - 1] == "\r":
         end -= 1
     return Span(start, end)
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def for_each_statement_with_headers(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("forEachStatementWithHeaders not ported yet")
+
+
+class ProcedureWalkHooks:
+    pass
+
+
+def locals_named_whole(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("localsNamedWhole not ported yet")

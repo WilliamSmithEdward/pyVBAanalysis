@@ -747,3 +747,21 @@ def _js_add(a: int, b: int) -> int:
     the way the upstream message prints it. Both operands are safe integers."""
     return int(float(a) + float(b))
 
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def range_method_owner(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def literal_intersect_is_nothing(*args: object, **kwargs: object) -> None:
+    return None
+
+
+class WorkbookSheetsCheck:
+    pass
+
+
+def workbook_sheets_to_check(*args: object, **kwargs: object) -> None:
+    return None

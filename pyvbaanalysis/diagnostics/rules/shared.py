@@ -607,3 +607,33 @@ def scan_conditional_compilation_branch_order(mod: ModuleNode) -> ConditionalBra
                 malformed_block_spans.append(Span(popped.start.start, directive.span.end))
         # Const, Unknown: no branch-order effect.
     return ConditionalBranchOrderScan(issues=issues, malformed_block_spans=malformed_block_spans)
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+class RepeatedKeyRule:
+    pass
+
+
+def names_in(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def name_mentions(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def source_expression_syntax_problem(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def body_may_leave_loop(*args: object, **kwargs: object) -> None:
+    return None
+
+
+ONE_VALUE_BUILTINS: object = None
+
+
+def builtin_name_before(*args: object, **kwargs: object) -> None:
+    return None

@@ -713,3 +713,17 @@ class _ConditionalExpressionParser:
 
     def _peek(self) -> VbaToken | None:
         return self._tokens[self._index] if self._index < len(self._tokens) else None
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+ConditionalSpecialValue = object
+
+
+def compiler_constants_with_defaults(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("compilerConstantsWithDefaults not ported yet")
+
+
+def null_condition_directives(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("nullConditionDirectives not ported yet")

@@ -1201,3 +1201,14 @@ def _invalid_operator_sequence(source: str, span: Span) -> tuple[str, Span] | No
             )
         i = operator_end + 1
     return None
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def juxtaposed_value_index(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def is_non_unary_binary_operator(*args: object, **kwargs: object) -> None:
+    return None

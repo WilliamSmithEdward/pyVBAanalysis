@@ -199,3 +199,12 @@ def resolve_vba_library_qualifier(name: str) -> VbaLibraryQualifier | None:
     the name when a host library has one too, Excel's Constants enum among them.
     """
     return _library_qualifiers_by_lower().get(name.lower())
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+VBA_RUNTIME_CONSTANTS: object = None
+
+
+VBA_RUNTIME_OBJECTS: object = None

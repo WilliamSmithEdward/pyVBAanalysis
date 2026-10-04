@@ -262,3 +262,32 @@ __all__ = [
     "normalize_diagnostic_severity_override",
     "diagnostic_suppression_scopes_for_code",
 ]
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+DiagnosticSeverityOverride = object
+
+
+def all_diagnostic_rule_metadata(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("allDiagnosticRuleMetadata not ported yet")
+
+
+def normalize_diagnostic_severity_overrides(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("normalizeDiagnosticSeverityOverrides not ported yet")
+
+
+def normalize_diagnostic_rule_code(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("normalizeDiagnosticRuleCode not ported yet")
+
+
+def diagnostic_source_for_code(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("diagnosticSourceForCode not ported yet")
+
+
+def is_xlide_diagnostic_source(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("isXlideDiagnosticSource not ported yet")
+
+
+DiagnosticRuleName = object

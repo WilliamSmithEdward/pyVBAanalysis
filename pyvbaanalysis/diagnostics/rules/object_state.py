@@ -493,3 +493,10 @@ def _procedure_symbol_for(symbols: ModuleSymbols, proc: ProcedureNode) -> VbaSym
         if sym.kind in _PROCEDURE_KINDS and sym.full_span.start == proc.span.start:
             return sym
     return None
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def object_let_state_at(*args: object, **kwargs: object) -> None:
+    return None

@@ -375,3 +375,38 @@ def application_member_names(model: HostObjectModel | None = None) -> frozenset[
         ),
         resolved,
     )
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def get_host_enums(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("getHostEnums not ported yet")
+
+
+def is_host_member_name_anywhere(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("isHostMemberNameAnywhere not ported yet")
+
+
+def bare_type_name(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("bareTypeName not ported yet")
+
+
+def host_display_name(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("hostDisplayName not ported yet")
+
+
+def host_library_display_name(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("hostLibraryDisplayName not ported yet")
+
+
+def is_dispatch_only_host_type(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("isDispatchOnlyHostType not ported yet")
+
+
+def get_host_events(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("getHostEvents not ported yet")
+
+
+def get_host_global_members(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("getHostGlobalMembers not ported yet")

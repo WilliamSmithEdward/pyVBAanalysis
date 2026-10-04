@@ -446,3 +446,10 @@ def check_event_handler_module_scope(
             "It will behave like an ordinary procedure here.",
             declared_name_span(source, member.span, member.name),
         )
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def check_raise_event_arguments(*args: object, **kwargs: object) -> None:
+    return None

@@ -134,3 +134,10 @@ def check_missing_library_reference(
             span,
             VbaDiagnosticData(add_library_reference=VbaAddLibraryReferenceData(library=lower)),
         )
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def check_missing_scripting_reference(*args: object, **kwargs: object) -> None:
+    return None

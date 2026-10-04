@@ -397,3 +397,26 @@ def _drop_last(items: list[str | None]) -> None:
     """Array.prototype.pop: removes the last element, and does nothing on an empty list."""
     if len(items) > 0:
         items.pop()
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def replayed_calls(*args: object, **kwargs: object) -> None:
+    return None
+
+
+class Replayed:
+    pass
+
+
+def replayed_diagnostic(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def with_receiver(*args: object, **kwargs: object) -> None:
+    return None
+
+
+def check_collection_loop_counters(*args: object, **kwargs: object) -> None:
+    return None

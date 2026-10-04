@@ -246,3 +246,18 @@ def _bare_type_candidate_index(
     # inside type_completion_candidates), so insertion order cannot matter here.
     index = {c.name.lower(): c for c in type_completion_candidates(project_types, model)}
     return _BARE_TYPE_INDEX_CACHE.put(index, types_key, resolved_model)  # type: ignore[no-any-return]
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+class ProjectTypeName:
+    pass
+
+
+class TypeCompletionContext:
+    pass
+
+
+def resolve_type_completions(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("resolveTypeCompletions not ported yet")

@@ -153,3 +153,21 @@ def is_object_module_kind(module_kind: ModuleSymbolKind | None) -> bool:
 def statement_tokens(source: str, span: Span) -> list[VbaToken]:
     """Significant tokens of a statement span (no comments/newlines), memoized per pass."""
     return cached_statement_tokens(source, span.start, span.end)
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+class VbaDeclareVariableData:
+    pass
+
+
+DiagnosticSeverityOverrides = object
+
+
+class AnalysisFailure:
+    pass
+
+
+def own_object_member_names(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("ownObjectMemberNames not ported yet")

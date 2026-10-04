@@ -1246,3 +1246,13 @@ class ProjectIndex:
                 )
             )
         return out
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+class FormControlInfo:
+    pass
+
+
+ReferenceScopeKind = object

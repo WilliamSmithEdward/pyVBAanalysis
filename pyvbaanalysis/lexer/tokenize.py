@@ -514,3 +514,10 @@ def _lex_symbol(src: str, ch: str, p: int) -> tuple[TokenKind, int]:
     if ch in ("=", "<", ">", "+", "-", "*", "/", "\\", "^", "&", "!", "?"):
         return TokenKind.OPERATOR, p
     return TokenKind.UNKNOWN, p
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def date_literal_month(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("dateLiteralMonth not ported yet")

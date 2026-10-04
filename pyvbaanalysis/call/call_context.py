@@ -391,3 +391,38 @@ def _top_level_token_index(tokens: list[VbaToken], raw_text: str) -> int:
         elif depth == 0 and raw == raw_text:
             return i
     return -1
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+class VbaCallSite:
+    pass
+
+
+class VbaTextSpan:
+    pass
+
+
+class ExplicitCallStatementBareRuntimeRewrite:
+    pass
+
+
+def explicit_call_statement_bare_runtime_rewrite(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("explicitCallStatementBareRuntimeRewrite not ported yet")
+
+
+def explicit_call_statement_argument_list_without_parens(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("explicitCallStatementArgumentListWithoutParens not ported yet")
+
+
+def find_active_call_site(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("findActiveCallSite not ported yet")
+
+
+def callable_completion_should_insert_parens(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("callableCompletionShouldInsertParens not ported yet")
+
+
+def is_explicit_call_target_completion_context(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("isExplicitCallTargetCompletionContext not ported yet")

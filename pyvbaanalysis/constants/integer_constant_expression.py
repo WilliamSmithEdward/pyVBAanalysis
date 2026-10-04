@@ -273,3 +273,10 @@ def resolve_raw_integer_constants(
     for key in raw_constants:
         resolve(key)
     return resolved
+
+
+# --- sync stubs (2f49b93): replaced as each group is ported ---
+
+
+def bankers_round(*args: object, **kwargs: object) -> object:
+    raise NotImplementedError("bankersRound not ported yet")
