@@ -1,8 +1,9 @@
 """Rule family: unresolved-name rules.
 
 Ported from xlide_vscode/src/analyzer/diagnostics/rules/undeclared.ts. Rules:
-Option Explicit presence (style), undeclared variable reads/writes, unknown /
-non-callable bare call statements, and member-not-found.
+Option Explicit presence (style), undeclared variable reads/writes, VBA library
+procedures named bare where a value goes, unknown / non-callable bare call
+statements, and member-not-found.
 
 Self-gating preserves the no-false-positive guarantee: `check_undeclared_variables`
 and `check_unknown_call_statement` no-op unless the caller supplies the project
@@ -10,6 +11,11 @@ identifier/procedure sets (the cross-module surface). The member-not-found rule
 (`check_member_not_found`) rides the host member-completion surface, gated on the
 exhaustive-surface check; its pure helper `member_access_references` collects the
 `.member` references it inspects.
+
+Port-only deviation: an undeclared-variable diagnostic carries no `declareVariable`
+data (upstream's declarationDataFor). That editor quick fix types the assigned
+value with resolveExpressionType, which the port does not have; the diagnostic
+itself (code, message, span) is upstream's.
 """
 
 from __future__ import annotations
@@ -20,6 +26,11 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from ...call.call_context import bare_call_statement_target as call_statement_target
+from ...completion.member_access import (
+    private_member_owner_at,
+    project_class_member_at,
+    project_type_at,
+)
 from ...conditional import ConditionalActivityTracker, inactive_node_skip
 from ...host import (
     application_member_names,
@@ -33,10 +44,12 @@ from ...host.host_model import (
     resolve_host_enum,
     resolve_host_global_member,
 )
+from ...host.ms_forms_form_control_members import MSFORMS_FORM_CONTROL_MEMBERS
 from ...identity_cache import IdentityLru
+from ...js_compat import JS_WHITESPACE, js_trim
 from ...lexer.keyword_table import is_reserved_identifier
 from ...lexer.token_helpers import match_paren_from
-from ...lexer.token_kinds import VbaToken
+from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import (
     BodyNode,
     DeclareNode,
@@ -57,6 +70,7 @@ from ...runtime import (
     resolve_runtime_object,
     resolve_vba_library_qualifier,
 )
+from ...runtime.vba_runtime import VbaRuntimeFunction
 from ...symbols.name_resolution import (
     BareIdentifierContext,
     BareIdentifierResolutionScope,
@@ -69,8 +83,8 @@ from ...symbols.symbol_model import (
     VbaProjectClassMembers,
     VbaSymbol,
     VbaSymbolKind,
-    is_data_bound_designer_class,
 )
+from ...types.type_names import is_known_scalar_type, normalize_type
 from ..call_extraction import (
     CallableTypeSignature,
     CallArguments,
@@ -88,6 +102,8 @@ from ..walker import (
     active_module_members,
     bare_assignment_target,
     first_executable_token_index,
+    for_each_statement,
+    for_each_variable_group,
     set_assignment_target,
     statement_and_branch_spans,
     token_name,
@@ -110,6 +126,154 @@ _VBA_IDENTIFIER_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENDS_WITH_BLANK_PHYSICAL_LINE_RE = re.compile(r"(?:\r\n|\r|\n)[ \t]*(?:\r\n|\r|\n)$")
 
 
+# -- builtinsReadBare ------------------------------------------------------
+
+_NAMES_ON_TOKENS_AFTER = frozenset({"(", ".", "!", ":=", "$"})
+
+
+def check_builtins_read_bare(
+    source: str,
+    mod: ModuleNode,
+    symbols: ModuleSymbols,
+    activity: ConditionalActivityTracker | None,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+    module_kind: ModuleSymbolKind | None,
+    host_model: HostObjectModel | None,
+    designer_class: str | None,
+    implicit_members: Sequence[ImplicitMember] | None,
+    push: PushFn,
+    own_members: AbstractSet[str] = frozenset(),
+) -> None:
+    """A VBA library procedure named bare where a value goes (XLIDE issue #318,
+    measured in Excel 16.0, with or without Option Explicit). One that needs an
+    argument, `Main = Left` or `TypeName(Kill)`, is "Argument not optional"; a
+    statement that takes none, `Main = Beep` or `Reset`, is "Expected Function or
+    variable". One whose arguments are all optional, Now or Timer, gives its value.
+    A name the module, the project, the host or the module's own object declares is
+    theirs."""
+    if module_kind is ModuleSymbolKind.USERFORM and implicit_members is None:
+        return
+    app_members = application_member_names(host_model)
+    designer_members = designer_class_member_names(designer_class, host_model)
+    implicit_names = {member.name.lower() for member in implicit_members or ()}
+    explicit = _has_option_explicit(mod, activity)
+
+    def builtin(name: str, proc_sym: VbaSymbol | None) -> VbaRuntimeFunction | None:
+        lower = name.lower()
+        if (
+            lower in app_members
+            or lower in designer_members
+            or lower in own_members
+            or lower in implicit_names
+            or source_identifier_bound(
+                symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.EXPRESSION
+            )
+            or resolve_host_global(name, host_model) is not None
+            or resolve_host_global_member(name, host_model) is not None
+            or resolve_host_constant(name, host_model) is not None
+            or resolve_host_enum(name, host_model) is not None
+            or resolve_runtime_constant(name) is not None
+            or resolve_runtime_object(name) is not None
+        ):
+            return None
+        return resolve_runtime_function(name)
+
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode):
+            continue
+        proc_sym = procedure_symbol_for(symbols, member)
+        redim = _redim_target_names_in(source, member.body, activity)
+
+        def visit(
+            stmt: LeafStatementNode,
+            proc_sym: VbaSymbol | None = proc_sym,
+            redim: AbstractSet[str] = redim,
+        ) -> None:
+            for span in statement_and_branch_spans(stmt):
+                toks = statement_tokens(source, span)
+                assignment = bare_assignment_target(source, span)
+                value_from = (
+                    next(
+                        (i for i, tok in enumerate(toks) if tok.start == assignment[2][0].start),
+                        -1,
+                    )
+                    if assignment is not None and len(assignment[2]) > 0
+                    else -1
+                )
+                depth = 0
+                for i, tok in enumerate(toks):
+                    depth += 1 if tok.raw_text == "(" else -1 if tok.raw_text == ")" else 0
+                    next_raw = _raw_at(toks, i + 1)
+                    # A name after AddressOf is addressof-misuse's (XLIDE issue #299).
+                    if (
+                        tok.kind is not TokenKind.IDENTIFIER
+                        or (depth == 0 and (value_from < 0 or i < value_from))
+                        or (_raw_at(toks, i - 1) or "") in (".", "!")
+                        or token_text(_at(toks, i - 1)) == "addressof"
+                        or (next_raw or "") in _NAMES_ON_TOKENS_AFTER
+                        or tok.raw_text.lower() in redim
+                    ):
+                        continue
+                    runtime = builtin(tok.raw_text, proc_sym)
+                    if runtime is None:
+                        continue
+                    at = Span(span.start + tok.start, span.start + tok.end)
+                    # `Line` and `Name` open statements and name no procedure: read
+                    # as a value under Option Explicit, each is "Variable not
+                    # defined".
+                    if runtime.name == "Line" or runtime.name == "Name":
+                        if explicit:
+                            push(
+                                "undeclaredVariable",
+                                f"Variable not defined: '{tok.raw_text}'. It opens the "
+                                f"{runtime.name} statement, which gives no value. Declare a "
+                                "variable of that name, or remove Option Explicit.",
+                                at,
+                            )
+                        continue
+                    required = _runtime_required_count(runtime)
+                    if required > 0:
+                        needs = "an argument" if required == 1 else f"{required} arguments"
+                        push(
+                            "argumentCount",
+                            f"'{tok.raw_text}' needs {needs}, and is named here with none where "
+                            "a value goes. This is a VBE compile error: Argument not optional.",
+                            at,
+                        )
+                    elif runtime.kind == "statement":
+                        push(
+                            "subUsedAsValue",
+                            f"'{tok.raw_text}' is a statement, which returns nothing, so it "
+                            "cannot be used as a value. This is a VBE compile error: Expected "
+                            "Function or variable.",
+                            at,
+                        )
+
+        for_each_statement(member.body, visit, activity)
+
+
+_PARAM_ARRAY_OR_OPTIONAL_RE = re.compile(r"^(ParamArray|Optional)\b", re.IGNORECASE | re.ASCII)
+
+
+def _runtime_required_count(runtime: VbaRuntimeFunction) -> int:
+    """How many arguments a library procedure needs: those not in brackets, from its
+    signature."""
+    if runtime.params is not None:
+        return sum(1 for param in runtime.params if not param.optional and not param.param_array)
+    open_ = runtime.signature.find("(")
+    # JS slice: an end of -1 (no `)`) counts from the end, as Python's does.
+    parts = (
+        runtime.signature[open_ + 1 : runtime.signature.find(")", open_)]
+        if open_ >= 0
+        else runtime.signature[len(runtime.name) :]
+    )
+    return sum(
+        1
+        for part in (js_trim(one) for one in parts.split(","))
+        if part != "" and not part.startswith("[") and _PARAM_ARRAY_OR_OPTIONAL_RE.match(part) is None
+    )
+
+
 # -- member-access references (pure helper for checkMemberNotFound) --
 
 
@@ -118,6 +282,9 @@ class MemberAccessReference:
     member: str
     member_span: Span
     dot_end_offset: int
+    # The statement's tokens, and where the member is among them.
+    toks: Sequence[VbaToken] = ()
+    index: int = 0
 
 
 def member_access_references(source: str, span: Span) -> list[MemberAccessReference]:
@@ -135,9 +302,159 @@ def member_access_references(source: str, span: Span) -> list[MemberAccessRefere
                 member=member,
                 member_span=Span(span.start + toks[i + 1].start, span.start + toks[i + 1].end),
                 dot_end_offset=span.start + toks[i].end,
+                toks=toks,
+                index=i + 1,
             )
         )
     return out
+
+
+def _project_member_form_problem(
+    source: str, ref: MemberAccessReference, member_ctx: MemberCompletionContext
+) -> str | None:
+    """A class member used in a form the VBE refuses while compiling (XLIDE issue
+    #224, measured in Excel 16.0):
+
+    - A property whose Get takes a required index, used without one: `Main = c.Idx`,
+      `c.Idx = 5`. "Argument not optional".
+    - A Public field of a value type given arguments: `c.Field(1)` is "Wrong number
+      of arguments or invalid property assignment", and as the target of a Let,
+      `c.Field(1) = 5`, "Can't assign to read-only property". A Variant, Collection
+      or Object field takes them, and `c.Field()` compiles.
+    """
+    next_raw = _raw_at(ref.toks, ref.index + 1)
+    if next_raw == "." or token_text(_at(ref.toks, 0)) == "set":
+        return None
+    member = project_class_member_at(source, ref.dot_end_offset, ref.member, member_ctx)
+    if member is None or member.kind != "property":
+        return None
+    if member.signature is not None:
+        open_ = member.signature.find("(")
+        first_param = member.signature[open_ + 1 :].lstrip(JS_WHITESPACE) if open_ >= 0 else ""
+        index_required = (
+            len(first_param) > 0 and not first_param.startswith(")") and not first_param.startswith("[")
+        )
+        return (
+            f"Argument not optional: property '{member.name}' takes an index, as in "
+            f"{member.signature}. This is a VBE compile error."
+            if index_required and next_raw != "("
+            else None
+        )
+    field = member.writable is True and not member.let_accessor and not member.set_accessor
+    type_ = normalize_type(member.returns)
+    if (
+        not field
+        or type_ is None
+        or type_ == "variant"
+        or not is_known_scalar_type(type_)
+        or next_raw != "("
+    ):
+        return None
+    close = match_paren_from(ref.toks, ref.index + 1)
+    if close != ref.index + 2 and close > 0:
+        assigned = _raw_at(ref.toks, close + 1) == "=" and ref.index == (
+            1 if _raw_at(ref.toks, 0) == "." else 2
+        )
+        return (
+            f"'{member.name}' is a field of type {member.returns}, which takes no index, so "
+            f"'{member.name}(...)' is no place to assign. This is a VBE compile error: Can't "
+            "assign to read-only property."
+            if assigned
+            else f"'{member.name}' is a field of type {member.returns}, which takes no arguments. "
+            "This is a VBE compile error: Wrong number of arguments or invalid property "
+            "assignment."
+        )
+    return None
+
+
+_MSFORMS_PREFIX_RE = re.compile(r"^MSForms\.", re.IGNORECASE)
+
+
+@dataclass(frozen=True, slots=True)
+class _FormControl:
+    name: str
+    type: str
+
+
+def _form_control_without_member(
+    source: str,
+    ref: MemberAccessReference,
+    member_ctx: MemberCompletionContext,
+    own_names: AbstractSet[str],
+) -> _FormControl | None:
+    """A form's control reached through the form, with a member its class lacks:
+    `f.T1.Nope`, `Me.T1.Nope`, a bare `T1.Nope` inside the form. The VBE binds those
+    while compiling for the classes in MSFORMS_FORM_CONTROL_MEMBERS; a variable
+    declared As MSForms.TextBox, and a Frame or an OptionButton on the form, it
+    leaves to run time (XLIDE issue #226, measured in Excel 16.0)."""
+    control_token = _at(ref.toks, ref.index - 2)
+    name = token_name(control_token) if control_token is not None else None
+    if not name or _raw_at(ref.toks, ref.index - 1) != ".":
+        return None
+    lower = name.lower()
+    type_: str | None
+    if _raw_at(ref.toks, ref.index - 3) == ".":
+        # `f.T1.Nope`: T1 must be a control of the form the receiver is.
+        form = project_type_at(
+            source,
+            ref.dot_end_offset - (ref.toks[ref.index - 1].end - ref.toks[ref.index - 3].end),
+            member_ctx,
+        )
+        if form is None or form.kind != "userform" or form.exhaustive is not True:
+            return None
+        type_ = next(
+            (
+                member.returns
+                for member in form.members
+                if member.name.lower() == lower
+                and _MSFORMS_PREFIX_RE.match(member.returns or "") is not None
+            ),
+            None,
+        )
+    else:
+        # A bare `T1.Nope` inside the form, where no local or parameter takes the
+        # name.
+        me_type = member_ctx.me_project_type.lower() if member_ctx.me_project_type is not None else None
+        self_ = next(
+            (
+                candidate
+                for candidate in member_ctx.project_class_members or ()
+                if candidate.kind == "userform"
+                and candidate.exhaustive is True
+                and candidate.name.lower() == me_type
+            ),
+            None,
+        )
+        type_ = (
+            None
+            if lower in own_names or self_ is None
+            else next(
+                (
+                    member.returns
+                    for member in self_.members
+                    if member.name.lower() == lower
+                    and _MSFORMS_PREFIX_RE.match(member.returns or "") is not None
+                ),
+                None,
+            )
+        )
+    if not type_:
+        return None
+    members = MSFORMS_FORM_CONTROL_MEMBERS.get(type_)
+    if members is None or any(member.lower() == ref.member.lower() for member in members):
+        return None
+    return _FormControl(name, type_)
+
+
+def _at(toks: Sequence[VbaToken], i: int) -> VbaToken | None:
+    """`toks[i]` as JavaScript reads it: undefined (None) outside the list."""
+    return toks[i] if 0 <= i < len(toks) else None
+
+
+def _raw_at(toks: Sequence[VbaToken], i: int) -> str | None:
+    """`toks[i]?.rawText`."""
+    tok = _at(toks, i)
+    return tok.raw_text if tok is not None else None
 
 
 def check_member_not_found(
@@ -157,12 +474,51 @@ def check_member_not_found(
     name on an exhaustive receiver is reported absent (matching VBE)."""
 
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
+        # Names a bare control reference would lose to: the procedure's parameters
+        # and locals.
+        own_names = {param.name.lower() for param in member.params}
+
+        def note_group(group: VariableGroupNode) -> None:
+            for decl in group.declarations:
+                own_names.add(decl.name.lower())
+
+        for_each_variable_group(member.body, note_group)
+
         def visitor(stmt: LeafStatementNode) -> None:
             for ref in member_access_references(source, stmt.span):
                 surface = resolve_exhaustive_member_surface(
                     source, ref.dot_end_offset, member_ctx
                 )
                 if surface is None or surface.has_member(ref.member):
+                    form = _project_member_form_problem(source, ref, member_ctx)
+                    if form is not None:
+                        push("argumentCount", form, ref.member_span)
+                        continue
+                    control = _form_control_without_member(source, ref, member_ctx, own_names)
+                    if control is not None:
+                        control_type = (
+                            control.type[len("MSForms.") :]
+                            if control.type.startswith("MSForms.")
+                            else control.type
+                        )
+                        push(
+                            "memberNotFound",
+                            f"Method or data member not found: '{control.name}.{ref.member}'. "
+                            f"The form's {control_type} has no member of that name.",
+                            ref.member_span,
+                        )
+                        continue
+                    owner = private_member_owner_at(
+                        source, ref.dot_end_offset, ref.member, member_ctx
+                    )
+                    if owner:
+                        push(
+                            "memberNotFound",
+                            f"Method or data member not found: '{owner}.{ref.member}'. It is "
+                            f"Private to {owner}, and no reference through an object reaches a "
+                            "Private member, Me included.",
+                            ref.member_span,
+                        )
                     continue
                 push(
                     "memberNotFound",
@@ -187,6 +543,7 @@ def check_unknown_call_statement(
     designer_class: str | None,
     push: PushFn,
     project_types: Sequence[VbaProjectClassMembers] | None = None,
+    own_members: AbstractSet[str] = frozenset(),
 ) -> ProcedureStatementVisitor:
     """A bare call statement whose callee resolves to nothing: "Sub or Function not
     defined". Resolution covers project procedures, source bindings, Application
@@ -199,15 +556,40 @@ def check_unknown_call_statement(
     # unqualified: Requery in an Access form.
     designer_members = designer_class_member_names(designer_class, host_model)
 
+    # An Event is no procedure: `Done` or `Call Done(1)` in the class that declares
+    # only the Event is "Sub or Function not defined" (XLIDE issue #266, measured in
+    # Excel 16.0). A Sub of the same name, here or public elsewhere, or a local,
+    # still binds it.
+    module_kinds: dict[str, set[VbaSymbolKind]] = {}
+    for symbol in symbols.root.children or ():
+        module_kinds.setdefault(symbol.name.lower(), set()).add(symbol.kind)
+
+    def event_only(lower: str) -> bool:
+        return lower in module_kinds and all(
+            kind is VbaSymbolKind.EVENT for kind in module_kinds[lower]
+        )
+
+    def bound(name: str, proc_sym: VbaSymbol | None) -> bool:
+        lower = name.lower()
+        if not event_only(lower):
+            return source_identifier_bound(
+                symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.CALL
+            )
+        return any(
+            child.name.lower() == lower for child in (proc_sym.children if proc_sym else None) or ()
+        ) or any(
+            symbol.kind is not VbaSymbolKind.EVENT and symbol.name.lower() == lower
+            for symbol in project_visible_symbols or ()
+        )
+
     def is_known(name: str, proc_sym: VbaSymbol | None) -> bool:
         lower = name.lower()
         return (
             lower in known
-            or source_identifier_bound(
-                symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.CALL
-            )
+            or bound(name, proc_sym)
             or lower in app_members
             or lower in designer_members
+            or lower in own_members
             or resolve_host_global(name, host_model) is not None
             # The host's hidden Global interface is bare-callable too (XLIDE #34).
             or resolve_host_global_member(name, host_model) is not None
@@ -447,6 +829,7 @@ def check_undeclared_variables(
     designer_class: str | None,
     referenced_hosts: Sequence[str] | None,
     push: PushFn,
+    own_members: AbstractSet[str] = frozenset(),
 ) -> None:
     """With Option Explicit, a variable must be declared before it is assigned or
     read. Self-gated on the caller supplying the project-visible identifier set, so
@@ -461,14 +844,11 @@ def check_undeclared_variables(
     library_qualifiers = _library_qualifier_names(host_model, referenced_hosts)
     # A form's controls are declared by its DESIGNER, not its text. No control list
     # at all is not an empty one: reading it as empty claimed every control the
-    # form's own code-behind names was undeclared (XLIDE issue #48).
+    # form's own code-behind names was undeclared (XLIDE issue #48). An Access form
+    # or report answers with the list its TypeInfo stream holds, record-source fields
+    # included, and the VBE checks a bare name against that list the same way (XLIDE
+    # issue #206).
     if module_kind is ModuleSymbolKind.USERFORM and implicit_members is None:
-        return
-    # An Access form or report answers with a list too, but never the whole one:
-    # every field of its record source is a member as well, and only the running
-    # database knows them. A bare `CustomerID` there is a field, so the list cannot
-    # call it undeclared.
-    if is_data_bound_designer_class(designer_class):
         return
     implicit_member_names = {member.name.lower() for member in implicit_members or ()}
 
@@ -496,6 +876,9 @@ def check_undeclared_variables(
             # module's text; referring to one is correct VBA.
             or lower in implicit_member_names
             or lower in designer_members
+            # The module's own object: UsedRange in a sheet, Tag in a form (XLIDE
+            # issue #228).
+            or lower in own_members
             or source_identifier_bound(symbols, proc_sym, project_visible_symbols, name, context)
             or lower in known
             or lower in app_members
@@ -557,6 +940,73 @@ def check_undeclared_variables(
                 report(ref.name, ref.span, "using it", BareIdentifierContext.EXPRESSION)
 
         for_each_undeclared_reference_span(source, member.body, visit, activity)
+
+    # A Const's value and an Enum member's value name things too: `Const K = asdf`
+    # is "Variable not defined", and `eB = asdf` in an Enum "Constant expression
+    # required" (XLIDE issue #369, measured in Excel 16.0).
+    def check_value(
+        span: Span, proc_sym: VbaSymbol | None, enum_member: bool, what: str = "a Const's value"
+    ) -> None:
+        # The names in each value, after its `=`. A value calls nothing, so every
+        # name in it not after a `.` is read; a declaration's own names stand
+        # before an `=`.
+        toks = statement_tokens(source, span)
+        in_value = False
+        for i, tok in enumerate(toks):
+            if tok.raw_text == "=":
+                in_value = True
+                continue
+            if tok.raw_text == ",":
+                in_value = False
+                continue
+            name = token_name(tok) if tok.kind is TokenKind.IDENTIFIER else None
+            # A name before a `.` qualifies: `Module2.B1`, `Excel.xlUp`.
+            qualifier = _raw_at(toks, i + 1) == "."
+            if (
+                not in_value
+                or not name
+                or qualifier
+                or _raw_at(toks, i - 1) == "."
+                or _raw_at(toks, i - 1) == "!"
+                or is_known(name, proc_sym, BareIdentifierContext.EXPRESSION)
+            ):
+                continue
+            push(
+                "undeclaredVariable",
+                f"'{name}' is not defined, and an Enum member's value must be a constant. "
+                "This is a VBE compile error: Constant expression required."
+                if enum_member
+                else f"Variable not defined: '{name}'. Declare it before using it in {what}, "
+                "or remove Option Explicit.",
+                Span(span.start + tok.start, span.start + tok.end),
+            )
+
+    redim_declared = frozenset()
+    for member in active_module_members(mod, activity):
+        if isinstance(member, VariableGroupNode) and member.is_const:
+            check_value(member.span, None, False)
+        elif isinstance(member, EnumNode):
+            for item in member.members:
+                if item.value_raw is not None and not (
+                    activity is not None and activity.is_inactive(item.span)
+                ):
+                    check_value(item.span, None, True)
+        elif isinstance(member, ProcedureNode):
+            # An Optional parameter's default is a constant from outside the
+            # procedure: `Optional x As Long = y` with nothing named y is "Variable
+            # not defined" (XLIDE issue #445, measured in Excel 16.0).
+            for param in member.params:
+                if param.default_raw is not None:
+                    check_value(param.span, None, False, "an Optional parameter's default")
+            const_proc_sym = procedure_symbol_for(symbols, member)
+
+            def check_const_group(
+                group: VariableGroupNode, proc_sym: VbaSymbol | None = const_proc_sym
+            ) -> None:
+                if group.is_const:
+                    check_value(group.span, proc_sym, False)
+
+            for_each_variable_group(member.body, check_const_group, activity)
 
 
 def _host_evaluates_bracketed_names(host_model: HostObjectModel | None) -> bool:

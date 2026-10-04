@@ -14,9 +14,10 @@ non-constant Const/Enum values, and parameter order.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from typing import Literal, Union
+from typing import Literal, Union, cast
 
 from ...completion.member_access import MemberCompletionContext
 from ...completion.type_completion import (
@@ -29,6 +30,8 @@ from ...conditional import (
     ConditionalActivityTracker,
     collect_conditional_directives,
 )
+from ...host.library_type_names import library_type_names
+from ...js_compat import js_trim
 from ...lexer.keyword_table import OPERATOR_IDENTIFIERS, is_reserved_identifier
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize
@@ -56,6 +59,7 @@ from ...parser.nodes import (
 )
 from ...parser.type_declaration_suffix import is_type_declaration_suffix
 from ...runtime import resolve_runtime_function
+from ...symbols.symbol_model import ModuleSymbolKind
 from ...types.type_names import is_known_scalar_type, normalize_type
 from ..const_expr import (
     collect_body_literal_integer_constants,
@@ -73,12 +77,14 @@ from ..walker import (
     is_inactive_node,
     match_paren_from,
     pluralize_count,
+    span_for_tokens,
     statement_tokens_after_leading_label,
     strip_header_brackets,
     token_name,
     token_text,
     top_level_operator_index,
 )
+from .expressions import juxtaposed_value_index
 from .shared import (
     DEFTYPE_KEYWORDS,
     NameTokenHit,
@@ -96,6 +102,8 @@ from ...completion.member_access import resolve_known_object_assignment_type
 # Access/storage modifiers that may lead a procedure declaration.
 _PROC_MODIFIERS: frozenset[str] = frozenset({"public", "private", "friend", "global", "static"})
 _MAX_PROCEDURE_PARAMETERS = 60
+# In a class module the most is 59 (XLIDE issue #210).
+_MAX_CLASS_PROCEDURE_PARAMETERS = 59
 _MAX_IDENTIFIER_LENGTH = 255
 
 # Nodes that may carry a legacy type-declaration suffix plus an As clause.
@@ -104,6 +112,12 @@ _TypeDeclarationSuffixNode = Union[ParameterNode, ProcedureNode, TypeFieldNode, 
 
 def _at(toks: Sequence[VbaToken], i: int) -> VbaToken | None:
     return toks[i] if 0 <= i < len(toks) else None
+
+
+def _raw_at(toks: Sequence[VbaToken], i: int) -> str | None:
+    """`toks[i]?.rawText`."""
+    tok = _at(toks, i)
+    return tok.raw_text if tok is not None else None
 
 
 def _is_digit_started_token(tok: VbaToken) -> bool:
@@ -373,6 +387,78 @@ def _procedure_name_hit(source: str, proc: ProcedureNode) -> NameTokenHit | None
     return name_token_hit(header, tok, name) if tok is not None and name else None
 
 
+# The names the VBE refuses for a module (XLIDE issues #247 and #357, measured in
+# Excel 16.0): adding one fails with 0x800AC3D4, renaming to one with
+# 50132. Line, Width, Name, Err, Mid, Time, Error, Reset, Beep, Load,
+# Unload, Access, Base, Compare, Explicit, Object, Property and Step are
+# accepted.
+_REFUSED_MODULE_NAMES = frozenset(
+    {
+        "addressof", "and", "any", "array", "as", "attribute", "boolean", "byref", "byte", "byval",
+        "call", "case", "cdate", "circle", "close", "const", "currency", "date", "debug", "decimal",
+        "declare", "dim", "do", "double", "each", "else", "elseif", "empty", "end", "enum", "eqv",
+        "erase", "event", "exit", "false", "for", "friend", "function", "get", "global", "gosub",
+        "goto", "if", "imp", "implements", "in", "input", "integer", "is", "lbound", "len", "lenb",
+        "let", "like", "lock", "long", "longlong", "longptr", "loop", "lset", "me", "mod", "new",
+        "next", "not", "nothing", "null", "on", "open", "option", "optional", "or", "paramarray",
+        "preserve", "print", "private", "pset", "public", "put", "raiseevent", "redim", "rem",
+        "resume", "return", "rset", "scale", "seek", "select", "set", "shared", "single", "spc",
+        "static", "stop", "string", "sub", "tab", "then", "to", "true", "type", "typeof", "unlock",
+        "until", "variant", "wend", "while", "with", "withevents", "write", "xor",
+    }
+)  # fmt: skip
+
+# The libraries every project of a host references, which a module cannot
+# share a name with: renaming one to Excel, VBA, Office or stdole fails
+# with 32813, "Name conflicts with existing module, project, or object
+# library" (XLIDE issue #357, measured in Excel 16.0). Word, Access and
+# PowerPoint are accepted there, being libraries an Excel project does
+# not reference.
+_REFERENCED_LIBRARIES = frozenset({"vba", "office", "stdole"})
+_HOST_LIBRARIES = frozenset({"excel", "word", "powerpoint", "access"})
+
+# `/^[ \t]*Attribute[ \t]+VB_Name[ \t]*=[ \t]*"([^"]*)"/im`: JavaScript's `^`
+# under the m flag also follows a lone CR, U+2028 and U+2029, and its i flag
+# folds ASCII only.
+_VB_NAME_ATTRIBUTE_RE = re.compile(
+    '(?:^|(?<=[\\r\\u2028\\u2029]))[ \\t]*Attribute[ \\t]+VB_Name[ \\t]*=[ \\t]*"([^"]*)"',
+    re.IGNORECASE | re.MULTILINE | re.ASCII,
+)
+_FIRST_LINE_END_RE = re.compile(r"\r?\n|\Z")
+
+
+def check_module_name(
+    source: str, module_name: str | None, push: PushFn, host_name: str | None = None
+) -> None:
+    """A module named a word the VBE refuses. A file can still hold one, and its
+    procedures run called bare, but a call through its name does not compile.
+    The `Attribute VB_Name` line is marked, or else the first line."""
+    lower = module_name.lower() if module_name is not None else ""
+    library = lower in _REFERENCED_LIBRARIES or (
+        lower in _HOST_LIBRARIES and lower == (host_name if host_name is not None else "Excel").lower()
+    )
+    if not module_name or (not library and lower not in _REFUSED_MODULE_NAMES):
+        return
+    attribute = _VB_NAME_ATTRIBUTE_RE.search(source)
+    if attribute is not None:
+        start = attribute.end() - len(attribute.group(1)) - 2
+        end = start + len(attribute.group(1)) + 2
+    else:
+        start = 0
+        line_end = _FIRST_LINE_END_RE.search(source)
+        end = max(0, line_end.start() if line_end is not None else len(source))
+    push(
+        "invalidDeclarationName",
+        f"'{module_name}' names an object library every project here references, so it cannot "
+        "name a module: the VBE refuses the name (\"Name conflicts with existing module, "
+        'project, or object library").'
+        if library
+        else f"Reserved VBA keyword '{module_name}' cannot name a module: the VBE refuses to add "
+        f"one, and a call through the name, {module_name}.Proc, does not compile.",
+        Span(start, end),
+    )
+
+
 def check_reserved_declaration_names(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
     def report(kind: str, hit: NameTokenHit | None) -> None:
         if hit is None or hit.bracketed or not is_reserved_identifier(hit.name):
@@ -476,7 +562,9 @@ def check_property_setter_value_parameters(source: str, mod: ModuleNode, activit
                 "use the final value parameter for the assigned value.",
                 _property_setter_return_type_span(source, member),
             )
-        if len(member.params) > 0:
+        # A ParamArray cannot be the value: `Property Let P(ParamArray v())` is
+        # "Argument not optional" (XLIDE issue #266, measured in Excel 16.0).
+        if len(member.params) > 0 and not member.params[-1].param_array:
             value_param = member.params[-1]
             if member.proc_kind is ProcKind.PROPERTY_SET:
                 normalized = normalize_type(value_param.as_type)
@@ -496,7 +584,10 @@ def check_property_setter_value_parameters(source: str, mod: ModuleNode, activit
             continue
         push(
             "propertySetterMissingValue",
-            f"{label} '{member.name}' must include a final value parameter.",
+            f"{label} '{member.name}' must take its value in a parameter after its ParamArray. "
+            "This is a VBE compile error: Argument not optional."
+            if len(member.params) > 0
+            else f"{label} '{member.name}' must include a final value parameter.",
             declared_name_span(source, member.span, member.name),
         )
 
@@ -758,9 +849,15 @@ def _collect_with_events_new_declaration_spans(
     return spans
 
 
+# The Scripting Runtime's types, which missing-library-reference judges (XLIDE issue #349).
+_SCRIPTING_TYPE_NAMES = frozenset({"dictionary", "filesystemobject", "textstream"})
+
+
 def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, opts: AnalyzeModuleOptions, push: PushFn) -> None:
     with_events_new_spans = _collect_with_events_new_declaration_spans(mod, activity)
     known_non_type_names = opts.known_non_type_names or frozenset()
+    variables: set[str] | None = None
+    own_types: set[str] | None = None
     for ref in _collect_type_name_references(source, mod):
         if activity is not None and activity.is_inactive(ref.span):
             continue
@@ -792,6 +889,28 @@ def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: Conditio
             continue
         if resolved is not None:
             continue
+        # A Private Type or Enum of another module, bare or qualified, and any
+        # name qualified by a variable, are no type here (XLIDE issue #490,
+        # measured in Excel 16.0).
+        if opts.hidden_type_names is not None and lookup_name.lower() in opts.hidden_type_names:
+            push(
+                "invalidAsTypeName",
+                f"'{lookup_name}' is Private to the module that declares it, so this module cannot "
+                "use it as a type. This is a VBE compile error: User-defined type not defined.",
+                ref.span,
+            )
+            continue
+        if ref.qualifier:
+            if variables is None:
+                variables = _declared_variable_names(mod, activity)
+            if ref.qualifier.lower() in variables:
+                push(
+                    "invalidAsTypeName",
+                    f"'{ref.qualifier}' is a variable, and a variable never qualifies a type. This "
+                    "is a VBE compile error: User-defined type not defined.",
+                    ref.span,
+                )
+                continue
         if is_reserved_identifier(ref.name):
             push(
                 "invalidAsTypeName",
@@ -813,6 +932,57 @@ def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: Conditio
                 ref.span,
             )
             continue
+        # No type of the project and none of a referenced library spells it,
+        # where every library the project references is one whose names are
+        # all known (XLIDE issue #234, measured in Excel 16.0).
+        # The Scripting Runtime's own types are missing-library-reference's, which
+        # names the reference to add.
+        libraries = (
+            [
+                cast("AbstractSet[str] | None", library_type_names(library))
+                for library in opts.referenced_libraries
+            ]
+            if opts.referenced_libraries is not None
+            else None
+        )
+        if own_types is None:
+            own_types = {
+                member.name.lower()
+                for member in active_module_members(mod, activity)
+                if isinstance(member, (TypeNode, EnumNode))
+            }
+        name_lower = ref.name.lower()
+        if (
+            not ref.qualifier
+            and name_lower not in _SCRIPTING_TYPE_NAMES
+            and name_lower not in own_types
+            and libraries is not None
+            and len(libraries) > 0
+            and all(names is not None and name_lower not in names for names in libraries)
+        ):
+            push(
+                "invalidAsTypeName",
+                f"No type of this project and none of the libraries it references is named "
+                f"'{ref.name}'. This is a VBE compile error: User-defined type not defined.",
+                ref.span,
+            )
+
+
+def _declared_variable_names(mod: ModuleNode, activity: ConditionalActivityTracker | None) -> set[str]:
+    """The variables the module declares, at module level or in a procedure, lowercased."""
+    out: set[str] = set()
+
+    def add(group: VariableGroupNode) -> None:
+        if not group.is_const:
+            for decl in group.declarations:
+                out.add(decl.name.lower())
+
+    for member in active_module_members(mod, activity):
+        if isinstance(member, VariableGroupNode):
+            add(member)
+        elif isinstance(member, ProcedureNode):
+            for_each_variable_group(member.body, add, activity)
+    return out
 
 
 # -- checkDimInitializer ---------------------------------------------------
@@ -922,6 +1092,71 @@ def _parameter_array_as_type_syntax_hit(source: str, param: ParameterNode) -> tu
     return (Span(param.span.start + open_tok.start, param.span.start + close_tok.end), type_name)
 
 
+@dataclass(frozen=True, slots=True)
+class _DeclarationJunk:
+    text: str
+    span: Span
+    why: str
+    error: str | None = None
+
+
+_TYPE_SUFFIX_TOKEN_RE = re.compile(r"^[$%&!#@]$")
+
+
+def _declaration_junk(source: str, span: Span, is_const: bool) -> _DeclarationJunk | None:
+    """What stands after a declared name where the VBE takes nothing: a second
+    word, `Dim asdf qwer`; no type name after As, `Private v As 123`; or a
+    second value in a Const, `Const K = asdf qwer` (XLIDE issue #234). A complete
+    type followed by more is unexpectedTokenAfterDeclarationType's."""
+    toks = statement_tokens(source, span)
+    i = 1 if token_text(_at(toks, 0)) == "withevents" else 0
+    name = _at(toks, i)
+    # A name that is no identifier, or runs on into what follows (`_name`,
+    # `1value`, `user-name`), is the identifier rules' to report.
+    if name is None or not _is_declaration_type_name_token(name):
+        return None
+    i += 1
+    after = _at(toks, i)
+    if after is not None and after.start == name.end and _TYPE_SUFFIX_TOKEN_RE.search(after.raw_text):
+        i += 1
+    elif after is not None and after.start == name.end and after.raw_text != "(":
+        return None
+    if _raw_at(toks, i) == "(":
+        close = match_paren_from(toks, i)
+        if close < 0:
+            return None
+        i = close + 1
+    nxt = _at(toks, i)
+    if nxt is None:
+        return None
+    if token_text(nxt) == "as":
+        type_tok = _at(toks, i + 2 if token_text(_at(toks, i + 1)) == "new" else i + 1)
+        # `As (Long)` is "Syntax error" (XLIDE issue #236).
+        if type_tok is not None and not _is_declaration_type_name_token(type_tok):
+            return _DeclarationJunk(
+                type_tok.raw_text,
+                absolute_span(span, type_tok),
+                "As needs a type name",
+                "Syntax error" if type_tok.raw_text == "(" else "Expected: New or type name",
+            )
+        return None
+    if nxt.raw_text == "=":
+        at = juxtaposed_value_index(toks, i + 1) if is_const else -1
+        if at < 0:
+            return None
+        return _DeclarationJunk(
+            toks[at].raw_text,
+            absolute_span(span, toks[at]),
+            "a Const takes one value",
+            "Expected: end of statement",
+        )
+    return _DeclarationJunk(
+        nxt.raw_text,
+        absolute_span(span, nxt),
+        "a declaration takes As and a type there, or nothing",
+    )
+
+
 def check_unexpected_declaration_tokens(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
     def inspect(span: Span, allow_equals: bool) -> None:
         hit = _unexpected_token_after_declaration_type(source, span, allow_equals)
@@ -935,13 +1170,31 @@ def check_unexpected_declaration_tokens(source: str, mod: ModuleNode, activity: 
             hit_span,
         )
 
-    def inspect_group(group: VariableGroupNode) -> None:
+    # A declaration that is not `name [As type]` (XLIDE issue #234, measured in
+    # Excel 16.0): "Syntax error" in a procedure, "Expected: end of statement"
+    # at module level.
+    def inspect_group(group: VariableGroupNode, error: str = "Syntax error") -> None:
         for decl in group.declarations:
             inspect(decl.span, True)
+            junk = _declaration_junk(source, decl.span, group.is_const is True)
+            if junk is not None:
+                push(
+                    "unexpectedDeclarationToken",
+                    f"Unexpected '{junk.text}' after '{decl.name}': {junk.why}. This is a VBE "
+                    f"compile error: {junk.error if junk.error is not None else error}.",
+                    junk.span,
+                )
 
+    first_procedure = next((m for m in mod.members if isinstance(m, ProcedureNode)), None)
     for member in active_module_members(mod, activity):
         if isinstance(member, VariableGroupNode):
-            inspect_group(member)
+            # After a procedure the VBE says only "Syntax error".
+            inspect_group(
+                member,
+                "Syntax error"
+                if first_procedure is not None and member.span.start > first_procedure.span.start
+                else "Expected: end of statement",
+            )
         elif isinstance(member, TypeNode):
             for field_node in member.fields:
                 inspect(field_node.span, False)
@@ -998,7 +1251,7 @@ _FIXED_LENGTH_STRING_MAX = 65526
 def check_fixed_length_string_bounds(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
     module_constants = collect_module_literal_integer_constants(mod, activity)
 
-    def inspect_declaration(decl: VariableDeclNode | TypeFieldNode, constants: dict[str, int | None]) -> None:
+    def inspect_declaration(decl: VariableDeclNode | TypeFieldNode, constants: dict[str, float | None]) -> None:
         if decl.fixed_length is None or is_inactive_node(activity, decl):
             return
         value = resolve_fixed_length_string_size(decl.fixed_length, constants)
@@ -1180,11 +1433,7 @@ def check_option_statement_form(
             continue
         # A trailing comment is not trailing junk, and a line continuation is
         # trivia the lexer already attached to the token that follows it.
-        toks = [
-            tok
-            for tok in statement_tokens(source, member.span)
-            if tok.kind is not TokenKind.COMMENT and tok.kind is not TokenKind.NEWLINE
-        ]
+        toks = statement_tokens(source, member.span)
 
         def report(index: int, message: str, _toks: list[VbaToken] = toks, _span: Span = member.span) -> None:
             tok = _toks[index] if index < len(_toks) else None
@@ -1254,13 +1503,45 @@ def check_option_statement_form(
 # -- checkTooManyParameters ------------------------------------------------
 
 
-def check_too_many_parameters(mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+def check_too_many_parameters(
+    mod: ModuleNode,
+    module_kind: ModuleSymbolKind | None,
+    activity: ConditionalActivityTracker | None,
+    push: PushFn,
+) -> None:
+    """Rule: a procedure, Event or Declare may declare at most 60 parameters, and
+    at most 59 in a class module. VBE rejects one more with "Too many
+    arguments" (oracle-verified `corpus_arg_limit_001b_compile`; XLIDE issue #210,
+    measured in Excel 16.0: a class Sub, Friend Sub, Function, Property Get,
+    Property Let with its value, Event and Private Declare each compile with
+    59 and are refused with 60, and a ParamArray counts as one). Document
+    modules and UserForms could not be measured the same way, so they keep 60."""
+    limit = (
+        _MAX_CLASS_PROCEDURE_PARAMETERS
+        if module_kind is ModuleSymbolKind.CLASS
+        else _MAX_PROCEDURE_PARAMETERS
+    )
     for member in active_module_members(mod, activity):
-        if not isinstance(member, ProcedureNode) or len(member.params) <= _MAX_PROCEDURE_PARAMETERS:
+        if (
+            not isinstance(member, (ProcedureNode, EventNode, DeclareNode))
+            or len(member.params) <= limit
+        ):
             continue
+        what = (
+            "a procedure"
+            if isinstance(member, ProcedureNode)
+            else "an Event"
+            if isinstance(member, EventNode)
+            else "a Declare"
+        )
+        subject = (
+            f"In a class module, {what}"
+            if module_kind is ModuleSymbolKind.CLASS
+            else f"{what[0].upper()}{what[1:]}"
+        )
         push(
             "tooManyParameters",
-            f"A procedure may have at most {_MAX_PROCEDURE_PARAMETERS} parameters; "
+            f"{subject} may have at most {limit} parameters; "
             f"'{member.name}' declares {len(member.params)}.",
             member.name_span if member.name_span is not None else member.span,
         )
@@ -1316,7 +1597,10 @@ def check_udt_parameter_constraints(mod: ModuleNode, activity: ConditionalActivi
     if not udt_names:
         return
     for member in active_module_members(mod, activity):
-        if not isinstance(member, ProcedureNode):
+        # A Declare's parameters are held to both (XLIDE issue #253, measured in
+        # Excel 16.0: "User-defined type may not be passed ByVal" and "Invalid
+        # optional parameter type").
+        if not isinstance(member, (ProcedureNode, DeclareNode)):
             continue
         for param in member.params:
             if not param.as_type or param.as_type.strip().lower() not in udt_names:
@@ -1378,7 +1662,10 @@ def check_parameter_order(source: str, mod: ModuleNode, activity: ConditionalAct
                         "Optional arguments.",
                         declared_name_span(source, p.span, p.name),
                     )
-                if i != len(params) - 1:
+                # A Property Let or Set takes its value after the ParamArray:
+                # `Property Let P(ParamArray v() As Variant, ByVal x As Long)`
+                # compiles (XLIDE issue #266, measured in Excel 16.0).
+                if i != len(params) - 1 and not (last_is_value_param and i == len(params) - 2):
                     push(
                         "paramArrayNotLast",
                         f"ParamArray '{p.name}' must be the last parameter.",
@@ -1458,7 +1745,33 @@ def _property_index_parameter_mismatch(
         type_reason = _property_parameter_type_mismatch(expected, actual, i + 1)
         if type_reason:
             return type_reason
+        name_reason = _property_parameter_name_mismatch(expected, actual, i + 1)
+        if name_reason:
+            return name_reason
     return None
+
+
+_BRACKET_EDGE_RE = re.compile(r"^\[|\]$")
+
+
+def _property_parameter_name_mismatch(
+    expected: ParameterNode, actual: ParameterNode, index: int
+) -> str | None:
+    """An index parameter keeps its name across the property's procedures: `Get
+    P(ByVal i As Long)` with `Let P(ByVal k As Long, ...)` is "Definitions of
+    property procedures for the same property are inconsistent" (XLIDE issue #266,
+    measured in Excel 16.0). Case does not count, and the value parameter may
+    have any name."""
+
+    def bare(name: str) -> str:
+        return _BRACKET_EDGE_RE.sub("", name).lower()
+
+    if bare(expected.name) == bare(actual.name):
+        return None
+    return (
+        f"Index parameter {index} must keep its name: expected '{expected.name}', "
+        f"found '{actual.name}'."
+    )
 
 
 def check_property_accessor_signatures(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
@@ -1477,6 +1790,27 @@ def check_property_accessor_signatures(source: str, mod: ModuleNode, activity: C
             group.setters.append(member)
 
     for group in groups.values():
+        if len(group.gets) == 0 and len(group.setters) == 2:
+            # A Let and a Set with no Get: their indexes keep one set of names
+            # (XLIDE issue #266, measured in Excel 16.0).
+            first, second = group.setters
+            first_indexes = first.params[:-1]
+            second_indexes = second.params[:-1]
+            if len(first_indexes) == len(second_indexes):
+                for i in range(len(first_indexes)):
+                    name_reason = _property_parameter_name_mismatch(
+                        first_indexes[i], second_indexes[i], i + 1
+                    )
+                    if name_reason:
+                        push(
+                            "propertyAccessorSignatureMismatch",
+                            f"{_property_procedure_label(second.proc_kind)} '{second.name}' argument "
+                            f"list must match {_property_procedure_label(first.proc_kind)} "
+                            f"'{first.name}' before the final value parameter. {name_reason}",
+                            declared_name_span(source, second.span, second.name),
+                        )
+                        break
+            continue
         if len(group.gets) != 1:
             continue
         getter = group.gets[0]
@@ -1507,11 +1841,21 @@ def check_property_accessor_signatures(source: str, mod: ModuleNode, activity: C
             value_type = normalize_type(value_param.as_type)
             if value_type is None and not value_param.type_suffix:
                 value_type = "variant"
+            # An object Get beside a Variant Let compiles: `Get M() As Collection`
+            # with `Let M(ByVal v As Variant)` (XLIDE issue #414, measured in Excel
+            # 16.0). A Collection Get with an Object Let does not.
+            object_get_variant_let = (
+                value_type == "variant"
+                and get_type is not None
+                and get_type != "variant"
+                and not is_known_scalar_type(get_type)
+            )
             if (
                 get_type is not None
                 and value_type is not None
                 and get_type != value_type
                 and not value_param.is_array
+                and not object_get_variant_let
             ):
                 push(
                     "propertyAccessorSignatureMismatch",
@@ -1571,7 +1915,8 @@ def _non_constant_default_element(
     return None
 
 
-def _value_tokens_after_equals(source: str, span: Span) -> list[VbaToken] | None:
+def _value_tokens_after_equals(source: str, span: Span) -> tuple[list[VbaToken], Span] | None:
+    """The value's tokens after the top-level `=`, and the span they cover."""
     toks = [
         t
         for t in tokenize(source[span.start : span.end])
@@ -1580,7 +1925,8 @@ def _value_tokens_after_equals(source: str, span: Span) -> list[VbaToken] | None
     eq = top_level_operator_index(toks, "=")
     if eq < 0 or eq + 1 >= len(toks):
         return None
-    return toks[eq + 1 :]
+    tokens = toks[eq + 1 :]
+    return tokens, span_for_tokens(tokens, span.start)
 
 
 def check_non_constant_parameter_defaults(
@@ -1604,10 +1950,10 @@ def check_non_constant_parameter_defaults(
                 continue
             if resolve_known_object_assignment_type(param.as_type, member_ctx) is not None:
                 continue
-            tokens = _value_tokens_after_equals(source, param.span)
-            if tokens is None:
+            value_tokens = _value_tokens_after_equals(source, param.span)
+            if value_tokens is None:
                 continue
-            non_constant = _non_constant_default_element(tokens, param.span.start, "enumOrOptional")
+            non_constant = _non_constant_default_element(value_tokens[0], param.span.start, "enumOrOptional")
             if non_constant is None:
                 continue
             label, hit_span = non_constant
@@ -1620,16 +1966,33 @@ def check_non_constant_parameter_defaults(
 
 
 def check_non_constant_const_values(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+    """VBA's functions that take no argument, `Now`, `Date`, `Time`, `Timer` and
+    `Rnd`, are calls without the parentheses unless the module declares the name
+    (XLIDE issue #255, measured)."""
+    declared: set[str] = set()
+    for member in active_module_members(mod, activity):
+        if isinstance(member, VariableGroupNode):
+            for decl in member.declarations:
+                declared.add(decl.name.lower())
+        else:
+            # `'name' in member && typeof member.name === 'string'`.
+            member_name = getattr(member, "name", None)
+            if isinstance(member_name, str):
+                declared.add(member_name.lower())
+
     def inspect_group(group: VariableGroupNode) -> None:
         if not group.is_const:
             return
         for decl in group.declarations:
             if decl.default_raw is None or is_inactive_node(activity, decl):
                 continue
-            tokens = _value_tokens_after_equals(source, decl.span)
-            if tokens is None:
+            value_tokens = _value_tokens_after_equals(source, decl.span)
+            if value_tokens is None:
                 continue
+            tokens = value_tokens[0]
             non_constant = _non_constant_default_element(tokens, decl.span.start, "const")
+            if non_constant is None:
+                non_constant = _argumentless_function(tokens, decl.span.start, declared)
             if non_constant is None:
                 continue
             label, hit_span = non_constant
@@ -1646,26 +2009,112 @@ def check_non_constant_const_values(source: str, mod: ModuleNode, activity: Cond
             for_each_variable_group(member.body, inspect_group, activity)
 
 
+# VBA's functions measured as refused in a Const without parentheses (XLIDE issue #255).
+_ARGUMENTLESS_FUNCTIONS = frozenset({"now", "date", "time", "timer", "rnd"})
+
+
+def _argumentless_function(
+    toks: Sequence[VbaToken], base: int, declared: AbstractSet[str]
+) -> tuple[str, Span] | None:
+    """`Const K = Now`: a VBA function named without parentheses, which still calls it."""
+    for i, tok in enumerate(toks):
+        word = token_text(tok)
+        if word in _ARGUMENTLESS_FUNCTIONS and word not in declared and _raw_at(toks, i - 1) != ".":
+            return (
+                f"'{tok.raw_text}', a VBA function evaluated as the code runs,",
+                Span(base + tok.start, base + tok.end),
+            )
+    return None
+
+
 def check_non_constant_enum_member_values(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
+    string_consts: dict[str, str | None] | None = None
     for member in active_module_members(mod, activity):
         if not isinstance(member, EnumNode):
             continue
+        if string_consts is None:
+            string_consts = _module_string_constants(source, mod, activity)
         for enum_member in member.members:
             if enum_member.value_raw is None or is_inactive_node(activity, enum_member):
                 continue
-            tokens = _value_tokens_after_equals(source, enum_member.span)
-            if tokens is None:
+            value_tokens = _value_tokens_after_equals(source, enum_member.span)
+            if value_tokens is None:
                 continue
+            tokens, value_span = value_tokens
             non_constant = _non_constant_default_element(tokens, enum_member.span.start, "enumOrOptional")
-            if non_constant is None:
+            if non_constant is not None:
+                label, hit_span = non_constant
+                push(
+                    "enumMemberNotConstant",
+                    f"Enum member '{enum_member.name}' value must be a constant expression; "
+                    f"{label} is not constant.",
+                    hit_span,
+                )
                 continue
-            label, hit_span = non_constant
-            push(
-                "enumMemberNotConstant",
-                f"Enum member '{enum_member.name}' value must be a constant expression; "
-                f"{label} is not constant.",
-                hit_span,
+            text = _constant_string_value(tokens, string_consts)
+            if text is not None and _string_is_never_numeric(text):
+                push(
+                    "enumMemberTypeMismatch",
+                    f"Enum member '{enum_member.name}' is the string \"{text}\", and an Enum member "
+                    "is a Long. This is a VBE compile error: Type mismatch.",
+                    value_span,
+                )
+
+
+def _module_string_constants(
+    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None
+) -> dict[str, str | None]:
+    """The module's Consts whose value is a string: `Const S As String = "x"` or
+    one built from others with `&`. Keyed by lowercased name; a name declared
+    twice maps to None (undefined)."""
+    out: dict[str, str | None] = {}
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, VariableGroupNode) or not member.is_const:
+            continue
+        for decl in member.declarations:
+            value_tokens = (
+                None if decl.default_raw is None else _value_tokens_after_equals(source, decl.span)
             )
+            tokens = value_tokens[0] if value_tokens is not None else None
+            key = decl.name.lower()
+            out[key] = None if key in out or not tokens else _constant_string_value(tokens, out)
+    return out
+
+
+def _constant_string_value(
+    tokens: Sequence[VbaToken], string_consts: Mapping[str, str | None] | None
+) -> str | None:
+    """A constant expression's value when it is a string: a literal, a Const that
+    is one, or those joined with `&`. None (undefined) for anything else."""
+    parts = [tok for tok in tokens if tok.kind is not TokenKind.COMMENT and tok.kind is not TokenKind.NEWLINE]
+    out = ""
+    for i, tok in enumerate(parts):
+        if i % 2 == 1:
+            if tok.raw_text != "&":
+                return None
+            continue
+        if tok.kind is TokenKind.STRING_LITERAL:
+            out += tok.raw_text[1:-1].replace('""', '"')
+        elif tok.kind is TokenKind.IDENTIFIER:
+            value = string_consts.get(tok.raw_text.lower()) if string_consts is not None else None
+            if value is None:
+                return None
+            out += value
+        else:
+            return None
+    return out if len(parts) % 2 == 1 else None
+
+
+_ASCII_DIGIT_RE = re.compile(r"\d", re.ASCII)
+
+
+def _string_is_never_numeric(text: str) -> bool:
+    """Whether no locale could read the string as a number: it has no digit and is
+    not a `&H`/`&O` literal. Measured in Excel 16.0 (XLIDE issue #210): `"1"` and
+    `"&H10"` are Longs to VBA, and `"x"`, `""` and `"True"` are a Type mismatch,
+    though CLng("True") runs."""
+    trimmed = js_trim(text)
+    return not _ASCII_DIGIT_RE.search(trimmed) and not trimmed.startswith("&")
 
 
 # -- module-declaration placement rules ------------------------------------

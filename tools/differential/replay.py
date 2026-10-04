@@ -16,19 +16,22 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from offsets import utf16_offsets
 from recorder import STAMPED_METHODS
 
 from pyvbaanalysis import analyze_module
 from pyvbaanalysis.conditional import ConditionalCompilationEnvironment
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions, VbaDiagnostic
+from pyvbaanalysis.diagnostics.opened_file_numbers import OpenedFileNumbers
 from pyvbaanalysis.host import get_excel_object_model, host_object_model_for_token
 from pyvbaanalysis.symbols import (
-    ImplicitMember,
     ModuleInput,
     ModuleSymbolKind,
     ProjectIndex,
     ProjectIndexOptions,
 )
+from pyvbaanalysis.symbols.project_index import FormControlInfo
+from pyvbaanalysis.symbols.sheet_changes import SheetChanges, WorkbookSheetInfo
 
 _KIND = {kind.value: kind for kind in ModuleSymbolKind}
 
@@ -43,10 +46,16 @@ _PLAIN_KEYS = frozenset(
         "implicitMembers",
         "documentType",
         "referencedHosts",
+        "referencedLibraries",
+        "workbookSheets",
         "severityOverrides",
         "designerClass",
     }
 )
+
+# Keys upstream's tests pass that analyzeModule itself never reads: the editor
+# contexts' meType and the module wrapper's moduleType. Not reported.
+_UNREAD_KEYS = frozenset({"meType", "moduleType"})
 
 # Project options, by upstream name, with the AnalyzeModuleOptions field each fills.
 _PROJECT_FIELDS = {
@@ -60,10 +69,41 @@ _PROJECT_FIELDS = {
     "projectIntegerConstants": "project_integer_constants",
     "projectStringLiteralWords": "project_string_literal_words",
     "implementedInterfaces": "implemented_interfaces",
+    "hiddenTypeNames": "hidden_type_names",
+    "projectRunnableProcedures": "project_runnable_procedures",
+    "projectWrittenNames": "project_written_names",
+    "projectNameMentions": "project_name_mentions",
+    "projectSheetChanges": "project_sheet_changes",
+    "projectOpenedFileNumbers": "project_opened_file_numbers",
 }
 _SET_FIELDS = frozenset(
-    {"knownIdentifiers", "knownProcedures", "knownNonTypeNames", "projectStringLiteralWords", "implementedInterfaces"}
+    {
+        "knownIdentifiers",
+        "knownProcedures",
+        "knownNonTypeNames",
+        "projectStringLiteralWords",
+        "implementedInterfaces",
+        "hiddenTypeNames",
+        "projectRunnableProcedures",
+        "projectWrittenNames",
+    }
 )
+
+
+def _literal(key: str, value: Any) -> Any:
+    """A hand-built project option as the recorder wrote it, in the port's shape.
+    The recorder writes a Set as a list and an object's Sets as lists."""
+    if key in _SET_FIELDS:
+        return set(value)
+    if key == "projectSheetChanges":
+        return SheetChanges(
+            adds_sheets=value["addsSheets"],
+            names_assigned=frozenset(value["namesAssigned"]),
+            assigns_computed_name=value["assignsComputedName"],
+        )
+    if key == "projectOpenedFileNumbers":
+        return OpenedFileNumbers(any=value["any"], numbers=frozenset(value["numbers"]))
+    return value
 
 
 def _environment(recorded: Mapping[str, Any] | None) -> ConditionalCompilationEnvironment | None:
@@ -75,10 +115,24 @@ def _environment(recorded: Mapping[str, Any] | None) -> ConditionalCompilationEn
     )
 
 
-def _implicit_members(recorded: list[Mapping[str, str]] | None) -> list[ImplicitMember] | None:
+def _implicit_members(recorded: list[Mapping[str, Any]] | None) -> list[FormControlInfo] | None:
     if recorded is None:
         return None
-    return [ImplicitMember(member["name"], member["type"]) for member in recorded]
+    return [
+        FormControlInfo(
+            name=member["name"],
+            type=member["type"],
+            pages=tuple(member["pages"]) if member.get("pages") is not None else None,
+            list_starts_empty=member.get("listStartsEmpty"),
+        )
+        for member in recorded
+    ]
+
+
+def _workbook_sheets(recorded: list[Mapping[str, Any]] | None) -> list[WorkbookSheetInfo] | None:
+    if recorded is None:
+        return None
+    return [WorkbookSheetInfo(name=sheet["name"], kind=sheet["kind"]) for sheet in recorded]
 
 
 def _plain_options(opts: Mapping[str, Any], **project: Any) -> AnalyzeModuleOptions:
@@ -92,6 +146,8 @@ def _plain_options(opts: Mapping[str, Any], **project: Any) -> AnalyzeModuleOpti
         # Upstream reads an absent list as "nothing referenced"; the port reads None
         # as unknown and stays silent, so the replay passes what upstream assumed.
         referenced_hosts=opts.get("referencedHosts", []),
+        referenced_libraries=opts.get("referencedLibraries"),
+        workbook_sheets=_workbook_sheets(opts.get("workbookSheets")),
         severity_overrides=opts.get("severityOverrides"),
         designer_class=opts.get("designerClass"),
         # The recorded calls are upstream's analyzeModule: the rules' own list.
@@ -126,8 +182,7 @@ def _project_options(row: Mapping[str, Any]) -> AnalyzeModuleOptions:
     fields: dict[str, Any] = {}
     for key, origin in project["derived"].items():
         if origin["method"] == "__literal":
-            value = origin["args"][0]
-            fields[_PROJECT_FIELDS[key]] = set(value) if key in _SET_FIELDS else value
+            fields[_PROJECT_FIELDS[key]] = _literal(key, origin["args"][0])
         else:
             fields[_PROJECT_FIELDS[key]] = getattr(index, STAMPED_METHODS[origin["method"]])(*origin["args"])
     host_model = project.get("hostModel")
@@ -146,7 +201,12 @@ def _shown(code: str, start: int, end: int, message: str) -> str:
 
 def _port_result(source: str, opts: AnalyzeModuleOptions) -> Counter[str]:
     found: list[VbaDiagnostic] = analyze_module(source, opts)
-    return Counter(_shown(d.code, d.span.start, d.span.end, d.message) for d in found)
+    offsets = utf16_offsets(source)
+    return Counter(
+        _shown(d.code, offsets[d.span.start] if offsets is not None else d.span.start,
+               offsets[d.span.end] if offsets is not None else d.span.end, d.message)
+        for d in found
+    )
 
 
 def replay(calls: Path, show: int = 10, only_code: str | None = None) -> int:
@@ -170,7 +230,7 @@ def replay(calls: Path, show: int = 10, only_code: str | None = None) -> int:
         if key in seen:
             continue
         seen.add(key)
-        ignored.update(name for name in row["opts"] if name not in _PLAIN_KEYS)
+        ignored.update(name for name in row["opts"] if name not in _PLAIN_KEYS and name not in _UNREAD_KEYS)
         # A call the port cannot rebuild is reported with the rest, not raised.
         try:
             opts = _plain_options(row["opts"]) if kind == "standalone" else _project_options(row)

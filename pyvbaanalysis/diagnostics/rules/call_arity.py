@@ -14,10 +14,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 
-from ...completion.member_access import MemberCompletionContext
+from ...completion.member_access import MemberCompletionContext, resolve_exact_member_completion
+from ...host.host_model import resolve_host_global_member
+from ...lexer.token_helpers import split_top_level_token_groups
+from ...lexer.token_kinds import VbaToken
 from ...parser.nodes import LeafStatementNode, ProcedureNode, Span
 from ...runtime.vba_runtime import resolve_runtime_function
 from ...symbols.symbol_model import ModuleSymbols, VbaProcedureSignature, VbaSymbol
+from ...types.type_inference import type_environment_for
+from ...types.type_names import normalize_type
 from ..call_extraction import (
     CallableTypeSignature,
     CallArguments,
@@ -32,15 +37,21 @@ from ..callable_signatures import (
     expression_calls,
     member_expression_calls,
     member_statement_calls,
+    parse_runtime_display_signature,
     runtime_arity_signature,
     runtime_callable_source_shadowed,
     same_module_callable_signatures,
     source_name_scope_for,
     unique_project_type_signatures,
 )
-from ..context import PushFn
+from ..context import PushFn, statement_tokens
 from ..model import VbaDiagnosticData
-from ..walker import ProcedureStatementVisitor, statement_and_branch_spans
+from ..walker import (
+    ProcedureStatementVisitor,
+    match_paren_from,
+    statement_and_branch_spans,
+    token_name,
+)
 
 
 def check_argument_count(
@@ -57,8 +68,11 @@ def check_argument_count(
 
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
         source_names = source_name_scope_for(symbols, member, project_visible_symbols)
+        env = type_environment_for(symbols, member)
 
         def visitor(stmt: LeafStatementNode) -> None:
+            for span in statement_and_branch_spans(stmt):
+                _check_unmodelled_arity(source, span, env, source_names, member_ctx, push)
             project_qualified_call_spans: set[tuple[int, int]] = set()
             statement_call = extract_call(source, stmt.span)
             qualified_statement_call = (
@@ -81,7 +95,9 @@ def check_argument_count(
                 *member_expression_calls(source, stmt.span, member_ctx),
                 *member_statement_calls(source, stmt.span, member_ctx),
             ):
-                if _call_target_span_key(member_call.call) in project_qualified_call_spans:
+                if _call_target_span_key(
+                    member_call.call
+                ) in project_qualified_call_spans or _takes_print_list(member_call.signature):
                     continue
                 validate_arity(source, member_call.signature, member_call.call, push)
             # A single-line If is one statement, so a CALL STATEMENT it carries,
@@ -103,13 +119,150 @@ def check_argument_count(
                     )
                     _record_project_qualified_call_span(branch_call, project_qualified_call_spans)
                 for member_call in member_statement_calls(source, branch, member_ctx):
-                    if _call_target_span_key(member_call.call) in project_qualified_call_spans:
+                    if _call_target_span_key(
+                        member_call.call
+                    ) in project_qualified_call_spans or _takes_print_list(member_call.signature):
                         continue
                     validate_arity(source, member_call.signature, member_call.call, push)
 
         return visitor
 
     return factory
+
+
+# VBA's Collection methods, which no host model carries (XLIDE issue #304).
+_COLLECTION_SIGNATURES: dict[str, str] = {
+    "add": "Add(Item, [Key], [Before], [After])",
+    "item": "Item(Index)",
+    "count": "Count()",
+    "remove": "Remove(Index)",
+}
+
+# Excel's Global properties that take an index: Cells reaches Range.Item.
+_INDEXED_GLOBALS: dict[str, str] = {
+    "cells": "Cells([RowIndex], [ColumnIndex])",
+    "range": "Range(Cell1, [Cell2])",
+}
+
+_SCALAR_TYPES: frozenset[str] = frozenset(
+    {"long", "integer", "byte", "double", "single", "currency", "boolean", "longlong"}
+)
+
+
+def _check_unmodelled_arity(
+    source: str,
+    span: Span,
+    env: Mapping[str, str],
+    source_names: SourceNameScope | None,
+    member_ctx: MemberCompletionContext,
+    push: PushFn,
+) -> None:
+    """The calls the signature tables above do not reach (XLIDE issue #304, each
+    measured in Excel 16.0): a Collection's Add, Item, Count and Remove; a bare
+    Excel Global method such as Evaluate, Intersect or Union, and Cells or Range
+    given more than they take; and a host property that holds a number,
+    `Sheets.Count(1)`, given an argument."""
+    toks = statement_tokens(source, span)
+
+    def at(index: int) -> VbaToken | None:
+        return toks[index] if 0 <= index < len(toks) else None
+
+    def raw_at(index: int) -> str | None:
+        tok = at(index)
+        return tok.raw_text if tok is not None else None
+
+    def validate(signature: str, display: str, name_index: int, slots: list[list[VbaToken]]) -> None:
+        call = CallArguments(
+            name=display,
+            name_span=Span(span.start + toks[name_index].start, span.start + toks[name_index].end),
+            slots=slots,
+            slice_start=span.start,
+        )
+        validate_arity(source, parse_runtime_display_signature(display, signature), call, push)
+
+    def arguments_at(open_index: int) -> list[list[VbaToken]] | None:
+        close = match_paren_from(toks, open_index)
+        if close < 0:
+            return None
+        return [] if close == open_index + 1 else split_top_level_token_groups(toks, open_index + 1, ",", close)
+
+    for i, tok in enumerate(toks):
+        name = token_name(tok)
+        if not name:
+            continue
+        lower = name.lower()
+        member = raw_at(i - 1) == "."
+        # `c.Add 1`, `c.Item()`: a local As Collection's own methods.
+        receiver_name = token_name(at(i - 2)) if member else None
+        receiver = receiver_name.lower() if receiver_name else None
+        if (
+            member
+            and receiver
+            and raw_at(i - 3) != "."
+            and normalize_type(env.get(receiver)) == "collection"
+            and lower in _COLLECTION_SIGNATURES
+        ):
+            # A project class named Collection keeps its own members.
+            own = resolve_exact_member_completion(source, name, span.start + tok.end, member_ctx)
+            if own is not None and own.definitions is not None:
+                continue
+            statement = i == 2 and raw_at(i + 1) != "(" and raw_at(i + 1) != "="
+            slots: list[list[VbaToken]] | None
+            if raw_at(i + 1) == "(":
+                slots = arguments_at(i + 1)
+            elif statement:
+                slots = split_top_level_token_groups(toks, i + 1, ",", len(toks)) if i + 1 < len(toks) else []
+            else:
+                slots = None
+            if slots is not None:
+                validate(_COLLECTION_SIGNATURES[lower], name, i, slots)
+            continue
+        if raw_at(i + 1) != "(":
+            continue
+        # `Evaluate()`, `Union(r)`, `Cells(1, 1, 1)`: a bare Excel Global member.
+        if (
+            not member
+            and not bare_callable_source_shadowed(name, source_names)
+            and not runtime_callable_source_shadowed(name, source_names)
+            and lower not in env
+        ):
+            global_member = resolve_host_global_member(name, member_ctx.model)
+            signature = (
+                global_member.get("signature")
+                if global_member is not None and global_member.get("kind") == "method"
+                else _INDEXED_GLOBALS.get(lower) if global_member is not None else None
+            )
+            global_slots = arguments_at(i + 1) if signature else None
+            if signature and global_slots is not None:
+                validate(signature, name, i, global_slots)
+            continue
+        # `Sheets.Count(1)`: a host property that holds a number takes no argument.
+        if member:
+            resolved = resolve_exact_member_completion(source, name, span.start + tok.end, member_ctx)
+            declared = resolved.declared_type if resolved is not None else None
+            value_type = normalize_type(
+                declared if declared is not None else resolved.returns if resolved is not None else None
+            )
+            member_slots = arguments_at(i + 1)
+            if (
+                resolved is not None
+                and resolved.kind == "property"
+                and not resolved.signature
+                and resolved.definitions is None
+                and resolved.let_accessor is None
+                and value_type
+                and value_type in _SCALAR_TYPES
+                and member_slots
+            ):
+                validate(f"{resolved.name}()", name, i, member_slots)
+
+
+def _takes_print_list(signature: CallableTypeSignature) -> bool:
+    """A host method named Print, a VB6 form's or picture box's (XLIDE issue #358)
+    or an Access report's, takes what the Print statement takes:
+    `Form1.Print "a"; x`. Its listed signature has no parameters, so its arity is
+    not judged."""
+    return signature.name.lower() == "print"
 
 
 def _record_project_qualified_call_span(call: CallArguments, out: set[tuple[int, int]]) -> None:

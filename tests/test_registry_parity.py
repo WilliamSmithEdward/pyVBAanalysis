@@ -8,8 +8,9 @@ section 6 says CI must flag: "a code in the audit ... has no Python rule
 emitting it (unported code)".
 
 Every ported rule reports through ``push("<ruleName>", ...)`` with a literal
-rule-name string (the DIAGNOSTIC_RULES key), or through a local ``report`` helper
-that forwards one to push, so a static scan of the diagnostics package recovers
+rule-name string (the DIAGNOSTIC_RULES key), through a local ``report`` helper
+that forwards one to push, through a name chosen between two literals, or through
+a ``rule`` field a helper returns for its caller to push, so a static scan of the diagnostics package recovers
 the emitted-rule set without executing any rule. After an
 upstream data re-pin, this gate turns red on precisely the rules that still
 need porting.
@@ -34,6 +35,11 @@ _SELECTED_RE = re.compile(r'"(\w+)"\s*\n?\s*if\s.+?\selse\s+"(\w+)"', re.DOTALL)
 # `report` take a word that is not a rule name ("variable", "enum", ...), so only
 # catalogue names count, exactly as for the runtime-selected names above.
 _REPORT_RE = re.compile(r'report\(\s*"(\w+)"')
+# rule="ruleName" or "rule": "ruleName" - a finding a helper returns for its caller
+# to push under its `rule` (upstream's `{ rule: 'wrongNumberOfDimensions', ... }`
+# in arrays.ts and typeFieldArrays.ts, and omittedArguments.ts's divisionByZero).
+# Only catalogue names count.
+_RULE_FIELD_RE = re.compile(r'\brule"?\s*[=:]\s*"(\w+)"')
 
 # Catalogue rules the Python port deliberately does not emit.
 _NOT_PORTED = {
@@ -70,6 +76,7 @@ def _scan() -> tuple[set[str], set[str]]:
         for pair in _SELECTED_RE.findall(text):
             selected |= {name for name in pair if name in DIAGNOSTIC_RULES}
         selected |= {name for name in _REPORT_RE.findall(text) if name in DIAGNOSTIC_RULES}
+        selected |= {name for name in _RULE_FIELD_RE.findall(text) if name in DIAGNOSTIC_RULES}
     return pushed, selected
 
 

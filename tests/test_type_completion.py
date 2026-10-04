@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from pyvbaanalysis.completion import resolve_type_name
 from pyvbaanalysis.completion.type_completion import (
+    host_type_names,
     project_type_candidates,
     type_completion_candidates,
 )
+from pyvbaanalysis.host import get_word_object_model, host_object_model_for_tokens
 from pyvbaanalysis.symbols.symbol_model import VbaProjectTypeKind, VbaProjectTypeName
 
 
@@ -90,3 +92,29 @@ def test_qualified_project_type_resolves() -> None:
 def test_qualified_unknown_module_resolves_to_none() -> None:
     project_types = [_project_type("Color", VbaProjectTypeKind.ENUM, "Module1")]
     assert resolve_type_name("Other.Color", project_types) is None
+
+
+def test_qualified_host_library_type_resolves() -> None:
+    # typeCompletion.ts resolves `Excel.Range` through the model's own libraries.
+    resolved = resolve_type_name("excel.range")
+    assert resolved is not None and (resolved.name, resolved.kind) == ("Range", "host")
+    assert resolve_type_name("Excel.NoSuchType") is None
+    assert resolve_type_name("Excel.Range", None, get_word_object_model()) is None
+    merged = host_object_model_for_tokens(["word", "excel"])
+    assert resolve_type_name("Excel.Range", None, merged) is not None
+    # A project module of the library's name shadows it.
+    project_types = [_project_type("Range", VbaProjectTypeKind.CLASS, "Excel")]
+    shadowed = resolve_type_name("Excel.Range", project_types)
+    assert shadowed is not None and shadowed.kind == "class"
+
+
+def test_host_enum_resolves_as_type() -> None:
+    resolved = resolve_type_name("XlAxisType")
+    assert resolved is not None and resolved.kind == "enum"
+
+
+def test_own_host_types_come_first() -> None:
+    merged = host_object_model_for_tokens(["word", "excel"])
+    assert merged is not None
+    names = host_type_names(merged)
+    assert names.index("Document") < names.index("Workbook")

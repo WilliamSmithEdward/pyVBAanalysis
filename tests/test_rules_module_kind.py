@@ -79,8 +79,10 @@ def test_declare_ptr_safe_for_win64() -> None:
     assert "declare-missing-ptrsafe" not in _codes(
         'Declare PtrSafe Sub Beep Lib "k" ()', conditional_compilation=win64
     )
-    # Without an explicit win64 the rule stays silent.
-    assert "declare-missing-ptrsafe" not in _codes('Declare Sub Beep Lib "k" ()')
+    # Upstream 44c5af98 (#215): Win64 is read with the default compiler constants
+    # merged in, so the rule fires without an explicit win64; VB6 is never 64-bit.
+    assert "declare-missing-ptrsafe" in _codes('Declare Sub Beep Lib "k" ()')
+    assert "declare-missing-ptrsafe" not in _codes('Declare Sub Beep Lib "k" ()', host="vb6")
 
 
 @pytest.mark.parametrize("code", _MK_CODES)

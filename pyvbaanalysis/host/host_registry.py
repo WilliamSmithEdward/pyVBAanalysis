@@ -22,6 +22,7 @@ from typing import Any, cast
 
 from .host_model import (
     HostConstant,
+    HostEnum,
     HostObjectModel,
     HostType,
     get_access_object_model,
@@ -162,7 +163,7 @@ def host_object_model_for_tokens(tokens: list[str]) -> HostObjectModel | None:
         "aliases": cast("Mapping[str, str]", merged("aliases")),
         "globals": cast("Mapping[str, str]", merged("globals")),
         "constants": cast("Mapping[str, HostConstant]", merged("constants")),
-        "enums": MappingProxyType(enums),
+        "enums": MappingProxyType(cast("dict[str, HostEnum]", enums)),
         "memberSignatures": cast("Mapping[str, Mapping[str, str]]", merged("memberSignatures")),
     }
     _MERGED_BY_KEY[key] = result

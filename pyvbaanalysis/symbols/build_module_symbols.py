@@ -31,6 +31,7 @@ from ..parser.nodes import (
     VariableGroupNode,
     iter_body_nodes,
 )
+from ..js_compat import JS_WHITESPACE
 from ..parser.parse_module import parse_module
 from .symbol_model import (
     ModuleSymbolKind,
@@ -103,13 +104,16 @@ def _symbol_attribute(node: AttributeNode) -> VbaSymbolAttribute:
 def _attach_member_attributes(
     symbols: list[VbaSymbol], attributes: list[VbaSymbolAttribute]
 ) -> None:
+    if not attributes:
+        return
+    by_name: dict[str, list[VbaSymbol]] = {}
+    for symbol in symbols:
+        by_name.setdefault(symbol.name.lower(), []).append(symbol)
     for attr in attributes:
         if not attr.target_name:
             continue
-        lower_target = attr.target_name.lower()
-        for symbol in symbols:
-            if symbol.name.lower() != lower_target:
-                continue
+        # Every accessor/duplicate receives the attribute, in source order.
+        for symbol in by_name.get(attr.target_name.lower(), ()):
             symbol.attributes = [*(symbol.attributes or []), attr]
 
 
@@ -259,6 +263,7 @@ def _build_type(node: TypeNode, module_name: str, flat: list[VbaSymbol]) -> VbaS
             container_name=node.name,
             as_type=field_node.as_type,
             fixed_length=field_node.fixed_length,
+            is_array=True if field_node.is_array else None,
         )
         children.append(field_symbol)
         flat.append(field_symbol)
@@ -374,4 +379,95 @@ def build_module_symbols(
         children=root_children,
         attributes=module_attributes,
     )
-    return ModuleSymbols(module_name=module_name, module_kind=module_kind, root=root, all=flat)
+
+    def_types = _module_def_types(source)
+    implicit_locals = (
+        _module_implicit_locals(source, module, root_children)
+        if def_types and _OPTION_EXPLICIT_RE.search(source) is None
+        else None
+    )
+    return ModuleSymbols(
+        module_name=module_name,
+        module_kind=module_kind,
+        root=root,
+        all=flat,
+        def_types=def_types or None,
+        implicit_locals=implicit_locals or None,
+    )
+
+
+_OPTION_EXPLICIT_RE = re.compile(r"^[ \t]*Option[ \t]+Explicit\b", re.IGNORECASE | re.MULTILINE | re.ASCII)
+_IMPLICIT_ASSIGNMENT_RE = re.compile(
+    r"^[ \t]*(?:\d+[ \t]+)?(?:Let[ \t]+|For[ \t]+)?([A-Za-z]\w*)[ \t]*=(?!=)",
+    re.IGNORECASE | re.MULTILINE | re.ASCII,
+)
+_NOT_IMPLICIT_LOCAL_RE = re.compile(
+    r"(let|set|for|if|elseif|while|until|case|call|dim|redim|static|const|private|public|global|end|exit"
+    r"|on|resume|mid|lset|rset)"
+)
+
+
+def _module_implicit_locals(
+    source: str, module: ModuleNode, root_children: list[VbaSymbol]
+) -> dict[int, frozenset[str]]:
+    """The names each procedure assigns, ``i = 40000`` or ``For i = 1 To 3``,
+    that nothing in the procedure or the module declares: with no Option
+    Explicit VBA makes each a local, and a DefType line types it (XLIDE issue
+    #285)."""
+    module_names = {symbol.name.lower() for symbol in root_children}
+    by_name_start: dict[int, VbaSymbol] = {}
+    for symbol in root_children:
+        # Preserve the first-match contract of the previous Array.find.
+        by_name_start.setdefault(symbol.name_span.start, symbol)
+    out: dict[int, frozenset[str]] = {}
+    for member in module.members:
+        if not isinstance(member, ProcedureNode):
+            continue
+        declared = {name.lower() for name in [member.name, *(param.name for param in member.params)]}
+        proc_symbol = by_name_start.get((member.name_span or member.span).start)
+        for child in (proc_symbol.children if proc_symbol is not None else None) or []:
+            declared.add(child.name.lower())
+        names: set[str] = set()
+        text = source[member.span.start : member.span.end]
+        for match in _IMPLICIT_ASSIGNMENT_RE.finditer(text):
+            lower = match.group(1).lower()
+            if (
+                lower not in declared
+                and lower not in module_names
+                and _NOT_IMPLICIT_LOCAL_RE.fullmatch(lower) is None
+            ):
+                names.add(lower)
+        if names:
+            out[member.span.start] = frozenset(names)
+    return out
+
+
+_DEF_TYPE_NAMES: dict[str, str] = {
+    "bool": "Boolean", "byte": "Byte", "int": "Integer", "lng": "Long", "lnglng": "LongLong",
+    "lngptr": "LongPtr", "cur": "Currency", "sng": "Single", "dbl": "Double", "dec": "Decimal",
+    "date": "Date", "str": "String", "obj": "Object", "var": "Variant",
+}
+_DEF_TYPE_RE = re.compile(
+    r"^[ \t]*Def(Bool|Byte|Int|LngLng|LngPtr|Lng|Cur|Sng|Dbl|Dec|Date|Str|Obj|Var)[ \t]+([A-Za-z][A-Za-z \t,-]*)",
+    re.IGNORECASE | re.MULTILINE | re.ASCII,
+)
+_WS = "[" + re.escape(JS_WHITESPACE) + "]"
+_DEF_TYPE_RANGE_RE = re.compile(r"^" + _WS + r"*([A-Za-z])" + _WS + r"*(?:-" + _WS + r"*([A-Za-z]))?" + _WS + r"*\Z")
+
+
+def _module_def_types(source: str) -> dict[str, str]:
+    """The type each first letter gives a name declared with no type, from the
+    module's DefType lines: ``DefInt A-Z``, ``DefStr S, T-U`` (MS-VBAL 5.2.2;
+    XLIDE issue #285, measured in Excel 16.0)."""
+    out: dict[str, str] = {}
+    for match in _DEF_TYPE_RE.finditer(source):
+        type_ = _DEF_TYPE_NAMES[match.group(1).lower()]
+        for range_ in match.group(2).split(","):
+            ends = _DEF_TYPE_RANGE_RE.match(range_)
+            if ends is None:
+                continue
+            start = ord(ends.group(1).lower())
+            stop = ord((ends.group(2) or ends.group(1)).lower())
+            for code in range(start, stop + 1):
+                out[chr(code)] = type_
+    return out

@@ -11,13 +11,17 @@ from pathlib import Path
 
 import pytest
 
-from pyvbaanalysis import AnalyzeModuleOptions
+from pyvbaanalysis import AnalysisFailure, AnalyzeModuleOptions
 from pyvbaanalysis.diagnostics.analyze_module import _run_rules, with_resolved_host_model
 from pyvbaanalysis.lexer import tokenize
 from pyvbaanalysis.parser.parse_module import parse_module
 
 CORPUS = Path(__file__).parent / "fuzz_corpus" / "vba"
 SEEDS = sorted(CORPUS.glob("*"))
+
+
+def _raise_internal_error(error: BaseException, where: AnalysisFailure) -> None:
+    raise error
 
 
 def _source(path: Path) -> str:
@@ -40,4 +44,4 @@ def test_a_seed_round_trips_parses_and_analyzes(path: Path) -> None:
         parts.extend(trivia.text for trivia in tokens[-1].trailing_trivia)
         assert "".join(parts) == source
     parse_module(source)
-    _run_rules(source, with_resolved_host_model(AnalyzeModuleOptions()))
+    _run_rules(source, with_resolved_host_model(AnalyzeModuleOptions()), _raise_internal_error)

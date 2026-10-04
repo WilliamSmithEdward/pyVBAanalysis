@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from .conditional import DEFAULT_COMPILER_CONSTANTS, ConditionalCompilationEnvironment
 from .diagnostics import (
+    AnalysisFailure,
     AnalyzeModuleOptions,
     DiagnosticSeverity,
     VbaDiagnostic,
@@ -44,6 +45,7 @@ from .symbols import ModuleInput, ModuleSymbolKind, ProjectIndex, ProjectIndexOp
 __version__ = "2.3.1"
 
 __all__ = [
+    "AnalysisFailure",
     "AnalyzeModuleOptions",
     "ConditionalCompilationEnvironment",
     "DEFAULT_COMPILER_CONSTANTS",

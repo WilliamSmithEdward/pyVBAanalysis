@@ -12,6 +12,8 @@ Type-suffixed integers (suffix_integer_pct_* oracle cases, and #133):
   2147483647&, &HFFFFFFFF&                        accepted  (hex wraps to 32 bits)
   9223372036854775808^                            refused   (^ is LongLong)
   9223372036854775807^                            accepted
+  &H100000000, &O40000000000 (unsuffixed)         refused   (32 bits at most, issue #369)
+  &HFF#, &HFF!                                    refused   (no float suffix on hex)
 Type-suffixed floats:
   3.5E+38!                                        refused   (! is Single)
   3.402823E+38!                                   accepted
@@ -35,11 +37,12 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 
 from ...conditional import ConditionalActivityTracker
-from ...js_compat import JS_WHITESPACE, js_number, js_trim
+from ...js_compat import JS_WHITESPACE, js_number, js_number_to_string, js_trim
 from ...lexer.token_kinds import TokenKind, VbaToken
-from ...lexer.tokenize import tokenize_cached
+from ...lexer.tokenize import date_literal_month, tokenize_cached
 from ...parser.nodes import Span
 from ..context import PushFn
 
@@ -71,10 +74,14 @@ _FLOAT_SUFFIX_RE = re.compile(r"[!#@]$")
 _D_EXPONENT_RE = re.compile(r"[dD]")
 _PLAIN_CURRENCY_RE = re.compile(r"([0-9]+)(?:\.([0-9]*))?@")
 _JS_SPACE = "[" + JS_WHITESPACE + "]"
-_DATE_BODY_RE = re.compile(
-    r"(?:([0-9]{1,2})/([0-9]{1,2})/([0-9]{1,5}))?" + _JS_SPACE + r"*"
-    r"(?:([0-9]{1,2}):([0-9]{1,2})(?::([0-9]{1,2}))?" + _JS_SPACE + r"*([AaPp][Mm])?)?"
+# The time comes last: h:m[:s] with ':' or '.' between, or h and AM/PM.
+_DATE_TIME_RE = re.compile(
+    r"(?:^|" + _JS_SPACE + r")([0-9]+)" + _JS_SPACE + r"*[:.]" + _JS_SPACE + r"*([0-9]+)"
+    r"(?:" + _JS_SPACE + r"*[:.]" + _JS_SPACE + r"*([0-9]+))?" + _JS_SPACE + r"*(?:[apAP][mM]?)?\Z"
+    r"|(?:^|" + _JS_SPACE + r")([0-9]+)" + _JS_SPACE + r"*[apAP][mM]?\Z"
 )
+_DATE_PART_SPLIT_RE = re.compile(_JS_SPACE + r"*[/,-]" + _JS_SPACE + r"*|" + _JS_SPACE + r"+")
+_DIGITS_RE = re.compile(r"[0-9]+")
 
 
 def check_suffixed_literal_overflow(
@@ -100,6 +107,30 @@ def check_suffixed_literal_overflow(
                     span,
                 )
             continue
+        if (
+            tok.raw_text == "#"
+            and _starts_date_literal(tokens, index)
+            and not (activity is not None and activity.is_inactive(span))
+        ):
+            # `#2000#` and `#1/1/-5#` are no date literal, so the lexer read the
+            # '#' alone and a Double after it. After `=`, an operator or `(`,
+            # a '#' starts no file number (issue #190).
+            end = index + 1
+            while (
+                end < len(tokens)
+                and tokens[end].kind is not TokenKind.NEWLINE
+                and not tokens[end].raw_text.endswith("#")
+            ):
+                end += 1
+            last = tokens[end] if end < len(tokens) and tokens[end].kind is not TokenKind.NEWLINE else tok
+            text = source[tok.start : last.end]
+            push(
+                "dateLiteralInvalid",
+                f"{text} is no date literal: a date needs a month and a day, or a time. VBE rejects "
+                "this at compile time as a Syntax error.",
+                Span(tok.start, last.end),
+            )
+            continue
         if tok.kind is not TokenKind.INTEGER_LITERAL or (activity is not None and activity.is_inactive(span)):
             continue
         _check_integer(tok, tokens[index + 1] if index + 1 < len(tokens) else None, push)
@@ -117,6 +148,17 @@ def _check_integer(tok: VbaToken, following: VbaToken | None, push: PushFn) -> N
         letter, digits, suffix = radix.groups()
         if len(digits) == 0:
             reject(f"'{raw}' names a radix with no digits after it.")
+            return
+        # `&HFF#` and `&HFF!`: only a decimal number takes a Double or Single
+        # suffix (issue #369, measured in Excel 16.0).
+        if following is not None and following.start == tok.end and following.raw_text in ("#", "!"):
+            kind = "Double" if following.raw_text == "#" else "Single"
+            push(
+                "suffixedLiteralOverflow",
+                f"The literal '{raw}{following.raw_text}' gives a hex or octal number a {kind} suffix, "
+                "which only a decimal number takes. VBE rejects this at compile time as a Syntax error.",
+                Span(tok.start, following.end),
+            )
             return
         try:
             value = int(digits, 16 if letter.lower() == "h" else 8)
@@ -136,8 +178,13 @@ def _check_integer(tok: VbaToken, following: VbaToken | None, push: PushFn) -> N
             )
         elif suffix == "^" and value > 0xFFFFFFFFFFFFFFFF:
             reject(f"The literal '{raw}' does not fit the LongLong its '^' suffix asks for.")
-        # An unsuffixed hex or octal literal wider than 32 bits has not been
-        # measured against the VBE and is left alone.
+        elif suffix == "" and value > 0xFFFFFFFF:
+            # &H100000000 and &O40000000000 are refused, 64-bit Office too
+            # (issue #369, measured in Excel 16.0).
+            reject(
+                f"The literal '{raw}' is wider than 32 bits, the most a hex or octal literal holds "
+                "without the '^' suffix."
+            )
         return
     decimal = _DECIMAL_LITERAL_RE.fullmatch(raw)
     if decimal is None:
@@ -234,6 +281,21 @@ def _days_in_month(year: int, month: int) -> int:
     return 30 if month in (4, 6, 9, 11) else 31
 
 
+def _starts_date_literal(tokens: Sequence[VbaToken], index: int) -> bool:
+    """Whether the '#' at `index` stands where only a value can: after `=`, an
+    operator or `(`."""
+    if index - 1 < 0:
+        return False
+    before = tokens[index - 1]
+    return before.raw_text == "(" or (
+        before.kind is TokenKind.OPERATOR and before.raw_text != "#" and before.raw_text != ":="
+    )
+
+
+def _num(value: float) -> str:
+    return js_number_to_string(value)
+
+
 def _date_literal_problem(raw: str) -> str | None:
     """What is wrong with a `#...#` date literal, or None when it is one the VBE
     accepts or one this check does not judge (named months and other regional
@@ -241,37 +303,78 @@ def _date_literal_problem(raw: str) -> str | None:
     body = js_trim(raw[1:-1])
     if len(body) == 0:
         return "is empty"
-    match = _DATE_BODY_RE.fullmatch(body)
-    if match is None or (match.group(1) is None and match.group(4) is None):
+    # The time comes last: h:m[:s] with ':' or '.' between, or h and AM/PM.
+    # `#1.2.2000#` is such a time, and 2000 is no second.
+    time = _DATE_TIME_RE.search(body)
+    if time is not None:
+        hour_text = time.group(1) if time.group(1) is not None else time.group(4)
+        hour = js_number(hour_text)
+        minute = 0.0 if time.group(2) is None else js_number(time.group(2))
+        seconds = 0.0 if time.group(3) is None else js_number(time.group(3))
+        if hour > 23:
+            return f"names hour {_num(hour)}; hours run 0 to 23"
+        if minute > 59:
+            return f"names minute {_num(minute)}; minutes run 0 to 59"
+        if seconds > 59:
+            return f"names second {_num(seconds)}; seconds run 0 to 59"
+    date_part = js_trim(body[: time.start()] if time is not None else body)
+    return None if len(date_part) == 0 else _date_part_problem(date_part)
+
+
+def _date_part_problem(text: str) -> str | None:
+    """The date of a date literal: two or three parts, numbers or a month name,
+    between '/', '-', ',' or blanks (issue #190, each measured in Excel 16.0).
+    Numbers read month/day/year, and #13/1/2000# as 13 January. A first number
+    of three digits or more is a year: #2000/12/1# is December 1 and
+    #2000/13/1# is refused. With a month name the numbers are day and year:
+    `#Jan 1, 2000#`, `#1 Sept 2000#`."""
+    parts = [part for part in _DATE_PART_SPLIT_RE.split(text) if len(part) > 0]
+    if len(parts) < 2 or len(parts) > 3:
         return None
-    first, second, year_text, hour_text, minute_text, second_text, _meridiem = match.groups()
-    if first is not None:
-        month = int(first)
-        day = int(second)
-        year = int(year_text)
-        if year > 9999:
-            return "names a year past 9999"
+    named = next((i for i, part in enumerate(parts) if _DIGITS_RE.fullmatch(part) is None), -1)
+    year_text: str | None
+    if named >= 0:
+        from_name = date_literal_month(parts[named])
+        numbers = [part for i, part in enumerate(parts) if i != named]
+        if not isinstance(from_name, int) or any(_DIGITS_RE.fullmatch(part) is None for part in numbers):
+            return None
+        month = float(from_name)
+        day = js_number(numbers[0])
+        year_text = numbers[1] if len(numbers) > 1 else None
+        if len(numbers) == 1 and day > 31:
+            return None  # `#Jan 2000#` is a month and a year
+    elif len(parts[0]) >= 3:
+        if len(parts) != 3:
+            return None
+        year_text = parts[0]
+        month = js_number(parts[1])
+        day = js_number(parts[2])
         if month > 12:
-            # The VBE reads #13/1/2000# as 13 January when the first number cannot
-            # be a month and the second can.
+            return f"names month {_num(month)}, which no calendar has"
+    else:
+        month = js_number(parts[0])
+        day = js_number(parts[1])
+        year_text = parts[2] if len(parts) > 2 else None
+        if month > 12:
+            # The VBE reads #13/1/2000# as 13 January when the first number
+            # cannot be a month and the second can.
             if day <= 12:
                 month, day = day, month
             else:
-                return f"names month {month}, which no calendar has"
-        if month < 1:
-            return "names month 0"
-        full_year = (2000 + year if year < 30 else 1900 + year) if len(year_text) <= 2 else year
-        days_in_month = _days_in_month(full_year, month)
-        if day < 1 or day > days_in_month:
-            return f"names day {day} in a month of {days_in_month} days"
-    if hour_text is not None:
-        hour = int(hour_text)
-        minute = int(minute_text)
-        seconds = 0 if second_text is None else int(second_text)
-        if hour > 23:
-            return f"names hour {hour}; hours run 0 to 23"
-        if minute > 59:
-            return f"names minute {minute}; minutes run 0 to 59"
-        if seconds > 59:
-            return f"names second {seconds}; seconds run 0 to 59"
+                return f"names month {_num(month)}, which no calendar has"
+    year = None if year_text is None else js_number(year_text)
+    if year is not None and year > 9999:
+        return "names a year past 9999"
+    if month < 1:
+        return "names month 0"
+    # With no year, February may have 29 days.
+    if year is None or year_text is None:
+        full_year = 2000
+    elif len(year_text) <= 2:
+        full_year = int(2000 + year if year < 30 else 1900 + year)
+    else:
+        full_year = int(year)
+    days_in_month = _days_in_month(full_year, int(month))
+    if day < 1 or day > days_in_month:
+        return f"names day {_num(day)} in a month of {days_in_month} days"
     return None

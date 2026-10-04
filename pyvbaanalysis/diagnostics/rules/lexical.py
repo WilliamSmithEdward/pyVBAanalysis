@@ -6,7 +6,9 @@ string literals and invalid line continuations. Self-contained (source + tokens)
 
 from __future__ import annotations
 
-from ...lexer.token_kinds import TokenKind
+import re
+
+from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import Span
 from ..context import PushFn
@@ -36,11 +38,50 @@ def _count_quotes(text: str) -> int:
     return text.count('"')
 
 
+# A blank, an underscore and nothing but blanks after it: what the VBE reads as a
+# line continuation. (JavaScript's `$` without the m flag is the end of the text,
+# which Python spells `\Z`.)
+_CONTINUATION_AT_END = re.compile(r"[ \t]_[ \t]*\Z")
+
+
 def check_unterminated_strings(source: str, push: PushFn) -> None:
-    """A string literal with an odd number of quotes is never closed."""
-    for tok in tokenize_cached(source):
+    """A string left open at the end of its line, when that line ends like a line
+    continuation.
+
+    The VBE closes any other open string at the end of its line, so `Main = "abc`
+    compiles and gives "abc" (issue #681, measured in Excel 16.0); one that
+    swallowed a needed `)` is unbalanced-parens. But `Main = "abc _` is a Syntax
+    error, and so is `"abc _ `, while `"abc_`, `"abc __` and `"a _b` compile.
+    """
+    toks = tokenize_cached(source)
+    previous: VbaToken | None = None
+    for tok in toks:
         if tok.kind is TokenKind.STRING_LITERAL and _count_quotes(tok.raw_text) % 2 == 1:
-            push("unterminatedString", "Unterminated string literal.", Span(tok.start, tok.end))
+            # One that opens a statement stands alone once closed, `"` or `"abc`
+            # on a line of its own, after `:` or a label, or after Then: no
+            # statement (issue #740, measured in Excel 16.0).
+            opens_statement = (
+                previous is None
+                or previous.kind is TokenKind.NEWLINE
+                or previous.raw_text == ":"
+                or (previous.kind is TokenKind.KEYWORD and previous.raw_text.lower() in ("then", "else"))
+            )
+            if _CONTINUATION_AT_END.search(tok.raw_text):
+                push(
+                    "unterminatedString",
+                    "Unterminated string literal: its line ends with ' _', which the VBE reads as a "
+                    "line continuation. This is a VBE compile error: Syntax error.",
+                    Span(tok.start, tok.end),
+                )
+            elif opens_statement:
+                push(
+                    "unterminatedString",
+                    "Unterminated string literal: closed at the end of its line, it stands alone "
+                    "where a statement goes. This is a VBE compile error: Syntax error.",
+                    Span(tok.start, tok.end),
+                )
+        if tok.kind is not TokenKind.COMMENT:
+            previous = tok
 
 
 def check_invalid_line_continuations(source: str, push: PushFn) -> None:

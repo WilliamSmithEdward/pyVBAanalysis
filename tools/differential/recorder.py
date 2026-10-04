@@ -50,6 +50,12 @@ STAMPED_METHODS: dict[str, str] = {
     "visibleExternalIntegerConstantExpressions": "visible_external_integer_constant_expressions",
     "stringLiteralWords": "string_literal_words",
     "implementedInterfaceNames": "implemented_interface_names",
+    "hiddenTypeNames": "hidden_type_names",
+    "runnableProcedureNames": "runnable_procedure_names",
+    "writtenNames": "written_names",
+    "nameMentions": "name_mentions",
+    "sheetChanges": "sheet_changes",
+    "openedFileNumbers": "opened_file_numbers",
 }
 
 # The exported function is renamed and a recording wrapper takes its name, so the
@@ -83,8 +89,27 @@ const __RECORD_PROJECT_KEYS = [
 \t'knownProcedures', 'knownIdentifiers', 'projectProcedures', 'projectClassMembers',
 \t'projectTypes', 'implementedInterfaces', 'projectVisibleSymbols', 'knownNonTypeNames',
 \t'projectIntegerConstants', 'projectStringLiteralWords', 'hostModel', 'parsedModule',
-\t'walkProcedureFilter',
+\t'walkProcedureFilter', 'hiddenTypeNames', 'projectRunnableProcedures', 'projectWrittenNames',
+\t'projectNameMentions', 'projectSheetChanges', 'projectOpenedFileNumbers',
 ];
+
+// A hand-built object option whose Sets JSON would drop: its Sets become arrays.
+function __recordPlainObject(value: unknown): unknown {
+\tif (!value || typeof value !== 'object' || value instanceof Map || Array.isArray(value)) {
+\t\treturn undefined;
+\t}
+\tconst out: Record<string, unknown> = {};
+\tfor (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+\t\tif (item instanceof Set) {
+\t\t\tout[key] = [...item];
+\t\t} else if (typeof item === 'boolean' || typeof item === 'number' || typeof item === 'string') {
+\t\t\tout[key] = item;
+\t\t} else {
+\t\t\treturn undefined;
+\t\t}
+\t}
+\treturn out;
+}
 
 function __recordAnalysis(source: string, opts: AnalyzeModuleOptions, result: VbaDiagnostic[]): void {
 \tconst path = process.env.XLIDE_RECORD;
@@ -117,8 +142,13 @@ function __recordAnalysis(source: string, opts: AnalyzeModuleOptions, result: Vb
 \t\t\t\t\tcontinue;
 \t\t\t\t}
 \t\t\t\tif (value instanceof Map && [...value.keys()].every((item) => typeof item === 'string')
-\t\t\t\t\t&& [...value.values()].every((item) => item === undefined || typeof item === 'string')) {
+\t\t\t\t\t&& [...value.values()].every((item) => item === undefined || typeof item === 'string' || typeof item === 'number')) {
 \t\t\t\t\tderived[key] = { method: '__literal', args: [Object.fromEntries(value)] };
+\t\t\t\t\tcontinue;
+\t\t\t\t}
+\t\t\t\tconst plain = __recordPlainObject(value);
+\t\t\t\tif (plain !== undefined) {
+\t\t\t\t\tderived[key] = { method: '__literal', args: [plain] };
 \t\t\t\t\tcontinue;
 \t\t\t\t}
 \t\t\t\tunreplayable = `unstamped ${key}`;

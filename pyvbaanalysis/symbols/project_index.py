@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from typing import TypeVar, cast
+from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
 from ..conditional import ConditionalCompilationEnvironment
 from ..constants.integer_constant_expression import (
@@ -25,6 +26,8 @@ from ..lexer.token_kinds import TokenKind
 from ..lexer.tokenize import tokenize_cached
 from ..parser.nodes import Span
 from .build_module_symbols import BuildModuleSymbolsOptions, build_module_symbols
+from .class_member_facts import class_member_values
+from .sheet_changes import SheetChanges, merge_sheet_changes, sheet_changes_in
 from .user_form_controls import has_authoritative_designer_header, parse_user_form_controls
 from .name_resolution import (
     BareIdentifierContext,
@@ -49,7 +52,6 @@ from .symbol_model import (
     VbaSymbolKind,
     format_procedure_param_label,
     is_bare_callable_kind,
-    is_data_bound_designer_class,
     is_procedure_kind,
     procedure_params_from_symbol,
     procedure_signature_from_symbol,
@@ -57,7 +59,17 @@ from .symbol_model import (
     qualified_procedure_key,
 )
 
+if TYPE_CHECKING:
+    from ..diagnostics.opened_file_numbers import OpenedFileNumbers
+
 _T = TypeVar("_T")
+
+# A control on a UserForm, as the designer stores it: its name and type
+# ("MSForms.ListBox"), and what the designer knows of its contents where the
+# native reader got it (XLIDE issue #315). The port's ImplicitMember carries it.
+FormControlInfo = ImplicitMember
+
+ReferenceScopeKind = Literal["local", "module", "project"]
 
 _PREDECLARED_ID_RE = re.compile(r"^\s*Attribute\s+VB_PredeclaredId\s*=\s*([^\r\n]*)", re.IGNORECASE | re.MULTILINE)
 
@@ -121,7 +133,7 @@ class ShadowedSpan:
 class ReferenceScope:
     """The binding scope of an identifier, restricting reference/rename search."""
 
-    kind: str  # "local" | "module" | "project"
+    kind: ReferenceScopeKind
     definitions: list[VbaSymbol]
     search_modules: list[str]
     shadowed_spans: list[ShadowedSpan]
@@ -142,7 +154,11 @@ def _is_exported(symbol: VbaSymbol, module_kind: ModuleSymbolKind | None = None)
         return True
     if symbol.visibility:
         return False
-    return module_kind is ModuleSymbolKind.STANDARD and is_procedure_kind(symbol.kind)
+    # A Declare with no scope keyword is Public in a standard module, as a Sub
+    # is (XLIDE issue #423, measured in Excel 16.0).
+    return module_kind is ModuleSymbolKind.STANDARD and (
+        is_procedure_kind(symbol.kind) or symbol.kind is VbaSymbolKind.DECLARE
+    )
 
 
 def _add_procedure_signature(
@@ -332,12 +348,17 @@ def _project_object_member_definition(symbol: VbaSymbol) -> VbaProjectClassMembe
     )
 
 
-# OLE Automation DISPID for a type's default member (DISPID_VALUE).
+# OLE Automation DISPID for a type's default member (DISPID_VALUE). A Public
+# field is marked with `VB_VarUserMemId`, which the VBE honours the same way
+# (XLIDE issue #256).
 _DISPID_VALUE = 0
 
 
 def _is_default_member_attribute(attr: VbaSymbolAttribute) -> bool:
-    return attr.name.lower() == "vb_usermemid" and parse_vba_integer_literal(attr.value_raw) == _DISPID_VALUE
+    return (
+        attr.name.lower() in ("vb_usermemid", "vb_varusermemid")
+        and parse_vba_integer_literal(attr.value_raw) == _DISPID_VALUE
+    )
 
 
 def _is_default_project_object_member(symbol: VbaSymbol) -> bool:
@@ -380,12 +401,33 @@ def _module_implements(source: str) -> list[str]:
     return out
 
 
+_MEMBER_PROCEDURE_KINDS = (
+    VbaSymbolKind.SUB,
+    VbaSymbolKind.FUNCTION,
+    VbaSymbolKind.PROPERTY_GET,
+    VbaSymbolKind.PROPERTY_LET,
+    VbaSymbolKind.PROPERTY_SET,
+)
+
+
+def _member_procedure_kind(symbol: VbaSymbol) -> str | None:
+    """The procedure kind a member symbol is, for its recorded parameters
+    (XLIDE issue #291): "sub", "function", "propertyGet", "propertyLet" or
+    "propertySet"."""
+    return symbol.kind.value if symbol.kind in _MEMBER_PROCEDURE_KINDS else None
+
+
 def _project_object_member_signature(symbol: VbaSymbol) -> str | None:
     procedure = procedure_signature_from_symbol(symbol)
     if procedure is not None:
         return procedure_signature_label(procedure)
     if symbol.kind is VbaSymbolKind.EVENT:
-        params = ", ".join(format_procedure_param_label(p) for p in procedure_params_from_symbol(symbol))
+        # A handler must pass each parameter as the event does (XLIDE issue
+        # #220), so the event's label says ByVal and ByRef.
+        params = ", ".join(
+            format_procedure_param_label(p, include_passing=True)
+            for p in procedure_params_from_symbol(symbol, include_passing=True)
+        )
         return f"{symbol.name}({params})"
     if symbol.kind is not VbaSymbolKind.PROPERTY_GET:
         return None
@@ -418,6 +460,18 @@ def _string_literal_words_in(source: str) -> frozenset[str]:
     return frozenset(words)
 
 
+def _mentioned_names_in(source: str) -> frozenset[str]:
+    """The lowercased names one module mentions: its identifiers, and the
+    identifier-shaped words of its strings."""
+    names: set[str] = set()
+    for token in tokenize_cached(source):
+        if token.kind is TokenKind.IDENTIFIER:
+            names.add(token.raw_text.lower())
+        elif token.kind is TokenKind.STRING_LITERAL:
+            names.update(identifier_words(token.raw_text))
+    return frozenset(names)
+
+
 class ProjectIndex:
     """A project-wide symbol index built from a set of module sources."""
 
@@ -431,6 +485,8 @@ class ProjectIndex:
         "_module_predeclared_ids",
         "_module_designer_classes",
         "_module_string_literal_words",
+        "_module_written_names",
+        "_module_mentioned_names",
         "_query_cache",
     )
 
@@ -438,7 +494,7 @@ class ProjectIndex:
         self._options = options or ProjectIndexOptions()
         self._modules: dict[str, ModuleSymbols] = {}
         self._module_sources: dict[str, str] = {}
-        self._module_resolved_constants: dict[str, dict[str, int | None]] = {}
+        self._module_resolved_constants: dict[str, dict[str, float | None]] = {}
         self._module_implements_lists: dict[str, list[str]] = {}
         self._module_implicit_members: dict[str, Sequence[ImplicitMember]] = {}
         self._module_predeclared_ids: dict[str, bool] = {}
@@ -448,6 +504,10 @@ class ProjectIndex:
         # The whole-project set unions these; re-tokenizing every module for it was
         # one full lex per module per project build (XLIDE issue #139).
         self._module_string_literal_words: dict[str, frozenset[str]] = {}
+        # The names each module's code may write (XLIDE issue #241), and the
+        # names it mentions, computed when first asked.
+        self._module_written_names: dict[str, AbstractSet[str]] = {}
+        self._module_mentioned_names: dict[str, frozenset[str]] = {}
         self._query_cache: dict[str, object] = {}
 
     # --- mutation ---------------------------------------------------------
@@ -467,6 +527,8 @@ class ProjectIndex:
         self._modules[key] = symbols
         self._module_sources[key] = input.source
         self._module_string_literal_words[key] = _string_literal_words_in(input.source)
+        self._module_written_names.pop(key, None)
+        self._module_mentioned_names.pop(key, None)
         _set_or_forget(self._module_implicit_members, key, input.implicit_members)
         _set_or_forget(self._module_predeclared_ids, key, input.predeclared_id)
         _set_or_forget(self._module_designer_classes, key, input.designer_class)
@@ -478,6 +540,8 @@ class ProjectIndex:
         self._modules.pop(key, None)
         self._module_sources.pop(key, None)
         self._module_string_literal_words.pop(key, None)
+        self._module_written_names.pop(key, None)
+        self._module_mentioned_names.pop(key, None)
         self._module_implicit_members.pop(key, None)
         self._module_predeclared_ids.pop(key, None)
         self._module_designer_classes.pop(key, None)
@@ -547,7 +611,20 @@ class ProjectIndex:
         self._query_cache[key] = value
         return value
 
-    def _module_integer_constants(self, mod: ModuleSymbols) -> Mapping[str, int | None]:
+    def _contribution(self, query: str, mod: ModuleSymbols, same_module: bool, compute: Callable[[], _T]) -> _T:
+        """Memoizes one module's part of a per-module visibility query until the
+        indexed modules change. A module contributes one of two answers, to its
+        own queries or to every other module's, so asking a query for each of N
+        modules no longer walks every module's symbols N times. Callers keep
+        their loop over modules, so answers and their order are unchanged.
+
+        The answer itself is built fresh on each call rather than memoized per
+        asking module: one memoized answer per module kept the whole project's
+        names once for every module (425 MB for 200 modules upstream)."""
+        side = "own" if same_module else "other"
+        return self._cached(f"contribution:{query}:{side}:{mod.module_name.lower()}", compute)
+
+    def _module_integer_constants(self, mod: ModuleSymbols) -> Mapping[str, float | None]:
         key = mod.module_name.lower()
         resolved = self._module_resolved_constants.get(key)
         if resolved is None:
@@ -596,31 +673,115 @@ class ProjectIndex:
     def module_names(self) -> list[str]:
         return [m.module_name for m in self._modules.values()]
 
+    def name_mentions(self) -> Mapping[str, int]:
+        """How many modules mention each lowercased name, as an identifier or a
+        word inside a string (XLIDE issue #315). A form's control that one module
+        alone names can be reached from nowhere else, short of the Controls
+        collection."""
+
+        def compute() -> dict[str, int]:
+            counts: dict[str, int] = {}
+            for key, source in self._module_sources.items():
+                module_names = self._module_mentioned_names.get(key)
+                if module_names is None:
+                    module_names = _mentioned_names_in(source)
+                    self._module_mentioned_names[key] = module_names
+                for name in module_names:
+                    counts[name] = counts.get(name, 0) + 1
+            return counts
+
+        return self._cached("nameMentions", compute)
+
+    def written_names(self) -> AbstractSet[str]:
+        """Lowercased names any module's code may write: an assignment target, a
+        name in Set, ReDim, Erase and the like, or a whole name passed to a call
+        (XLIDE issue #241). A Public variable outside it keeps its initial value."""
+        # Imported here: the diagnostics package imports this one.
+        from ..diagnostics.module_state import written_names_in
+
+        def compute() -> frozenset[str]:
+            names: set[str] = set()
+            for key, source in self._module_sources.items():
+                module_names = self._module_written_names.get(key)
+                if module_names is None:
+                    module_names = written_names_in(source)
+                    self._module_written_names[key] = module_names
+                names.update(module_names)
+            return frozenset(names)
+
+        return self._cached("writtenNames", compute)
+
+    def runnable_procedure_names(self) -> frozenset[str]:
+        """Lowercased names `Application.Run` can reach: each Sub and Function of
+        a standard or document module, Private ones included, bare and as
+        `module.name`. A class module's members are not reached (XLIDE issue
+        #243, measured in Excel 16.0)."""
+
+        def compute() -> frozenset[str]:
+            names: set[str] = set()
+            for symbols in self._modules.values():
+                if symbols.module_kind not in (ModuleSymbolKind.STANDARD, ModuleSymbolKind.DOCUMENT):
+                    continue
+                module_lower = symbols.module_name.lower()
+                for child in symbols.root.children or []:
+                    if child.kind is VbaSymbolKind.SUB or child.kind is VbaSymbolKind.FUNCTION:
+                        name = child.name.lower()
+                        names.add(name)
+                        names.add(f"{module_lower}.{name}")
+            return frozenset(names)
+
+        return self._cached("runnableProcedureNames", compute)
+
+    def sheet_changes(self) -> SheetChanges:
+        """What the project's code may do to its workbook's sheets at run time:
+        add or copy one, or name one (XLIDE issue #229). A sheet the saved
+        workbook lacks may be one of these."""
+        return self._cached(
+            "sheetChanges",
+            lambda: merge_sheet_changes([sheet_changes_in(source) for source in self._module_sources.values()]),
+        )
+
+    def opened_file_numbers(self) -> OpenedFileNumbers:
+        """The file numbers the project's Open statements name, and whether one
+        names a number that is no literal (XLIDE issue #419)."""
+        # Imported here: the diagnostics package imports this one.
+        from ..diagnostics.opened_file_numbers import merge_opened_file_numbers, opened_file_numbers_in
+
+        return self._cached(
+            "openedFileNumbers",
+            lambda: merge_opened_file_numbers(
+                [opened_file_numbers_in(source) for source in self._module_sources.values()]
+            ),
+        )
+
     def visible_procedure_names(self, module_name: str) -> set[str]:
         current_lower = module_name.lower()
+        names: set[str] = set()
+        for mod in self._modules.values():
+            same_module = mod.module_name.lower() == current_lower
 
-        def compute() -> set[str]:
-            names: set[str] = set()
-            for mod in self._modules.values():
-                same_module = mod.module_name.lower() == current_lower
+            def compute(mod: ModuleSymbols = mod, same_module: bool = same_module) -> list[str]:
+                out: list[str] = []
                 for symbol in mod.root.children or []:
                     if not is_bare_callable_kind(symbol.kind):
                         continue
                     if same_module or (
                         mod.module_kind is ModuleSymbolKind.STANDARD and _is_exported(symbol, mod.module_kind)
                     ):
-                        names.add(symbol.name.lower())
-            return names
+                        out.append(symbol.name.lower())
+                return out
 
-        return set(self._cached(f"procedureNames:{current_lower}", compute))
+            names.update(self._contribution("procedureNames", mod, same_module, compute))
+        return names
 
     def visible_procedure_signatures(self, module_name: str) -> list[VbaProcedureSignature]:
         current_lower = module_name.lower()
+        out: list[VbaProcedureSignature] = []
+        for mod in self._modules.values():
+            same_module = mod.module_name.lower() == current_lower
 
-        def compute() -> list[VbaProcedureSignature]:
-            out: list[VbaProcedureSignature] = []
-            for mod in self._modules.values():
-                same_module = mod.module_name.lower() == current_lower
+            def compute(mod: ModuleSymbols = mod, same_module: bool = same_module) -> list[VbaProcedureSignature]:
+                part: list[VbaProcedureSignature] = []
                 for symbol in mod.root.children or []:
                     if not is_bare_callable_kind(symbol.kind):
                         continue
@@ -631,101 +792,101 @@ class ProjectIndex:
                         continue
                     signature = procedure_signature_from_symbol(symbol)
                     if signature is not None:
-                        out.append(signature)
-            return out
+                        part.append(signature)
+                return part
 
-        return list(self._cached(f"procedureSignatures:{current_lower}", compute))
+            out.extend(self._contribution("procedureSignatures", mod, same_module, compute))
+        return out
 
     def visible_identifier_names(self, module_name: str) -> set[str]:
         current_lower = module_name.lower()
+        names: set[str] = set()
+        for mod in self._modules.values():
+            same_module = mod.module_name.lower() == current_lower
 
-        def compute() -> set[str]:
-            names: set[str] = set()
-            for mod in self._modules.values():
-                same_module = mod.module_name.lower() == current_lower
+            def compute(mod: ModuleSymbols = mod, same_module: bool = same_module) -> list[str]:
+                out: list[str] = []
                 if mod.module_kind is ModuleSymbolKind.DOCUMENT or mod.module_kind is ModuleSymbolKind.USERFORM:
-                    names.add(mod.module_name.lower())
+                    out.append(mod.module_name.lower())
                 # A class with `VB_PredeclaredId = True` has a default instance, so
                 # its bare name is a value exactly as a document module's is. A plain
                 # class name is a TYPE, and stays out (XLIDE issue #47).
                 if mod.module_kind is ModuleSymbolKind.CLASS and self.module_predeclared_id(mod.module_name) is True:
-                    names.add(mod.module_name.lower())
+                    out.append(mod.module_name.lower())
                 for symbol in self._visible_module_level_identifier_symbols(mod, same_module):
-                    names.add(symbol.name.lower())
-            return names
+                    out.append(symbol.name.lower())
+                return out
 
-        return set(self._cached(f"identifierNames:{current_lower}", compute))
+            names.update(self._contribution("identifierNames", mod, same_module, compute))
+        return names
 
     def visible_identifier_symbols(self, module_name: str) -> list[VbaSymbol]:
         current_lower = module_name.lower()
-
-        def compute() -> list[VbaSymbol]:
-            out: list[VbaSymbol] = []
-            for mod in self._modules.values():
-                same_module = mod.module_name.lower() == current_lower
-                out.extend(self._visible_module_level_identifier_symbols(mod, same_module))
-            return out
-
-        return list(self._cached(f"identifierSymbols:{current_lower}", compute))
+        out: list[VbaSymbol] = []
+        for mod in self._modules.values():
+            same_module = mod.module_name.lower() == current_lower
+            out.extend(self._visible_module_level_identifier_symbols(mod, same_module))
+        return out
 
     def visible_external_integer_constant_expressions(self, module_name: str) -> dict[str, str | None]:
         current_lower = module_name.lower()
+        out: dict[str, str | None] = {}
+        seen: set[str] = set()
 
-        def compute() -> dict[str, str | None]:
-            out: dict[str, str | None] = {}
-            seen: set[str] = set()
+        def add(name: str, raw: str | None) -> None:
+            key = name.lower()
+            if key in seen:
+                out[key] = None
+                return
+            seen.add(key)
+            out[key] = raw
 
-            def add(name: str, raw: str | None) -> None:
-                key = name.lower()
-                if key in seen:
-                    out[key] = None
-                    return
-                seen.add(key)
-                out[key] = raw
+        def add_qualified(mod: ModuleSymbols, name: str, raw: str | None) -> None:
+            out[f"{mod.module_name.lower()}.{name.lower()}"] = raw
 
-            def add_qualified(mod: ModuleSymbols, name: str, raw: str | None) -> None:
-                out[f"{mod.module_name.lower()}.{name.lower()}"] = raw
+        def resolved_raw(resolved: Mapping[str, float | None], key: str, fallback: str | None) -> str | None:
+            value = resolved.get(key.lower())
+            return fallback if value is None else str(value)
 
-            def resolved_raw(resolved: Mapping[str, int | None], key: str, fallback: str | None) -> str | None:
-                value = resolved.get(key.lower())
-                return fallback if value is None else str(value)
+        for mod in self._modules.values():
+            if mod.module_name.lower() == current_lower or mod.module_kind is not ModuleSymbolKind.STANDARD:
+                continue
 
-            for mod in self._modules.values():
-                if mod.module_name.lower() == current_lower or mod.module_kind is not ModuleSymbolKind.STANDARD:
-                    continue
+            def compute(mod: ModuleSymbols = mod) -> list[tuple[str, str | None]]:
+                exported: list[tuple[str, str | None]] = []
                 module_resolved = self._module_integer_constants(mod)
                 for symbol in mod.root.children or []:
                     if symbol.kind is VbaSymbolKind.CONSTANT and _is_exported(symbol, mod.module_kind):
-                        raw = resolved_raw(module_resolved, symbol.name, symbol.default_raw)
-                        add(symbol.name, raw)
-                        add_qualified(mod, symbol.name, raw)
+                        exported.append((symbol.name, resolved_raw(module_resolved, symbol.name, symbol.default_raw)))
                         continue
                     if symbol.kind is VbaSymbolKind.ENUM and _is_enum_member_exported(symbol, mod.module_kind):
                         previous_name: str | None = None
                         for member in symbol.children or []:
                             fallback = enum_member_raw_expression(member.default_raw, previous_name)
-                            raw = resolved_raw(module_resolved, member.name, fallback)
-                            add(member.name, raw)
-                            add_qualified(mod, member.name, raw)
+                            exported.append((member.name, resolved_raw(module_resolved, member.name, fallback)))
                             previous_name = member.name
-            return out
+                return exported
 
-        return dict(self._cached(f"integerConstants:{current_lower}", compute))
+            for name, raw in self._contribution("integerConstants", mod, False, compute):
+                add(name, raw)
+                add_qualified(mod, name, raw)
+        return out
 
     def visible_non_type_names(self, module_name: str) -> set[str]:
         current_lower = module_name.lower()
+        names: set[str] = set()
+        for mod in self._modules.values():
+            same_module = mod.module_name.lower() == current_lower
 
-        def compute() -> set[str]:
-            names: set[str] = set()
-            for mod in self._modules.values():
-                same_module = mod.module_name.lower() == current_lower
-                for symbol in self._visible_module_level_identifier_symbols(mod, same_module):
-                    if _project_type_kind(symbol):
-                        continue
-                    names.add(symbol.name.lower())
-            return names
+            def compute(mod: ModuleSymbols = mod, same_module: bool = same_module) -> list[str]:
+                return [
+                    symbol.name.lower()
+                    for symbol in self._visible_module_level_identifier_symbols(mod, same_module)
+                    if not _project_type_kind(symbol)
+                ]
 
-        return set(self._cached(f"nonTypeNames:{current_lower}", compute))
+            names.update(self._contribution("nonTypeNames", mod, same_module, compute))
+        return names
 
     def procedure_signatures(self) -> dict[str, list[VbaProcedureSignature]]:
         def compute() -> dict[str, list[VbaProcedureSignature]]:
@@ -750,41 +911,70 @@ class ProjectIndex:
 
     def visible_type_names(self, module_name: str) -> list[VbaProjectTypeName]:
         current_lower = module_name.lower()
+        out: list[VbaProjectTypeName] = []
+        for mod in self._modules.values():
+            same_module = mod.module_name.lower() == current_lower
+            out.extend(
+                self._contribution(
+                    "typeNames",
+                    mod,
+                    same_module,
+                    lambda mod=mod, same_module=same_module: self._module_type_names(mod, same_module),  # type: ignore[misc]
+                )
+            )
+        return _shadowed_by_own_module(out, current_lower)
 
-        def compute() -> list[VbaProjectTypeName]:
-            out: list[VbaProjectTypeName] = []
-            for mod in self._modules.values():
-                same_module = mod.module_name.lower() == current_lower
-                module_type_kind = _module_kind_as_type_name(mod.module_kind)
-                if module_type_kind is not None:
-                    out.append(
-                        VbaProjectTypeName(
-                            name=mod.module_name,
-                            kind=module_type_kind,
-                            module_name=mod.module_name,
-                            name_span=mod.root.name_span,
-                            full_span=mod.root.full_span,
-                        )
-                    )
-                for symbol in mod.root.children or []:
-                    kind = _project_type_kind(symbol)
-                    if kind is None:
-                        continue
-                    if not same_module and not _is_type_exported(symbol):
-                        continue
-                    out.append(
-                        VbaProjectTypeName(
-                            name=symbol.name,
-                            kind=kind,
-                            module_name=mod.module_name,
-                            name_span=symbol.name_span,
-                            full_span=symbol.full_span,
-                            visibility=symbol.visibility,
-                        )
-                    )
-            return _shadowed_by_own_module(out, current_lower)
+    def hidden_type_names(self, module_name: str) -> set[str]:
+        """The Private Type and Enum names of the other modules, lowercased, bare
+        and as `module.name`: names `module_name` cannot use as a type, which the
+        VBE refuses as "User-defined type not defined" (XLIDE issue #490). A name
+        some module exports, or the asking module declares, is left out."""
+        current_lower = module_name.lower()
+        visible = {type_name.name.lower() for type_name in self.visible_type_names(module_name)}
+        out: set[str] = set()
+        for mod in self._modules.values():
+            if mod.module_name.lower() == current_lower:
+                continue
+            for symbol in mod.root.children or []:
+                if not _project_type_kind(symbol) or _is_type_exported(symbol):
+                    continue
+                lower = symbol.name.lower()
+                out.add(f"{mod.module_name.lower()}.{lower}")
+                if lower not in visible:
+                    out.add(lower)
+        return out
 
-        return list(self._cached(f"typeNames:{current_lower}", compute))
+    def _module_type_names(self, mod: ModuleSymbols, same_module: bool) -> list[VbaProjectTypeName]:
+        """One module's part of visible_type_names."""
+        out: list[VbaProjectTypeName] = []
+        module_type_kind = _module_kind_as_type_name(mod.module_kind)
+        if module_type_kind is not None:
+            out.append(
+                VbaProjectTypeName(
+                    name=mod.module_name,
+                    kind=module_type_kind,
+                    module_name=mod.module_name,
+                    name_span=mod.root.name_span,
+                    full_span=mod.root.full_span,
+                )
+            )
+        for symbol in mod.root.children or []:
+            kind = _project_type_kind(symbol)
+            if kind is None:
+                continue
+            if not same_module and not _is_type_exported(symbol):
+                continue
+            out.append(
+                VbaProjectTypeName(
+                    name=symbol.name,
+                    kind=kind,
+                    module_name=mod.module_name,
+                    name_span=symbol.name_span,
+                    full_span=symbol.full_span,
+                    visibility=symbol.visibility,
+                )
+            )
+        return out
 
     def resolve_type_definitions(self, module_name: str, name: str) -> list[VbaProjectTypeName]:
         lower = name.lower()
@@ -798,7 +988,21 @@ class ProjectIndex:
                 if kind not in (VbaProjectTypeKind.CLASS, VbaProjectTypeKind.DOCUMENT, VbaProjectTypeKind.USERFORM):
                     continue
                 members = list(self._visible_object_members(mod))
-                if kind is VbaProjectTypeKind.USERFORM:
+                module_key = mod.module_name.lower()
+                if kind is VbaProjectTypeKind.CLASS:
+                    values = class_member_values(self._module_sources.get(module_key, ""), mod.root.children or [])
+                    for member in members:
+                        value = values.get(member.name.lower())
+                        if value:
+                            member.known_value = value
+                # A worksheet's ActiveX controls are members of it the same way
+                # (XLIDE issue #225), when the workbook supplied them.
+                sheet_controls = (
+                    kind is VbaProjectTypeKind.DOCUMENT
+                    and module_key in self._module_designer_classes
+                    and module_key in self._module_implicit_members
+                )
+                if kind is VbaProjectTypeKind.USERFORM or sheet_controls:
                     # A form's controls are members of the form, declared by the
                     # designer rather than by code, so a qualified reference from
                     # another module (`EntryForm.NameBox`) must find them on the
@@ -825,17 +1029,20 @@ class ProjectIndex:
                         # its control list is authoritative (XLIDE #26): with the
                         # controls and code-behind here and the MSForms UserForm
                         # base merged at resolution, the surface proves absence the
-                        # way the VBE's compiler does. Document modules stay
-                        # non-exhaustive, their host base carrying more than any
-                        # list here, and so does an Access form or report, whose
-                        # record-source fields are members no list here can name.
+                        # way the VBE's compiler does. That holds for an Access form
+                        # or report too, whose list is its TypeInfo stream's,
+                        # record-source fields included (XLIDE #206). A worksheet is
+                        # too when the workbook supplied its class and its ActiveX
+                        # controls (XLIDE #225); other document modules stay
+                        # non-exhaustive: their host base carries more than any
+                        # list here.
                         exhaustive=(
                             kind is VbaProjectTypeKind.CLASS
                             or (
                                 kind is VbaProjectTypeKind.USERFORM
                                 and self.module_implicit_members_known(mod.module_name)
-                                and not is_data_bound_designer_class(designer_class)
                             )
+                            or sheet_controls
                         ),
                         designer_class=designer_class,
                         # Documents and forms always have a default instance; only
@@ -846,6 +1053,12 @@ class ProjectIndex:
                             else True
                         ),
                         members=members,
+                        private_members=[
+                            symbol.name
+                            for symbol in _project_member_candidate_symbols(mod, False)
+                            if not _is_visible_project_object_member(symbol)
+                            and _project_object_member_kind(symbol) is not None
+                        ],
                     )
                 )
             return out
@@ -859,15 +1072,17 @@ class ProjectIndex:
             if mod.module_kind is not ModuleSymbolKind.STANDARD:
                 continue
             same_module = mod.module_name.lower() == current_lower
-            out.append(
-                VbaProjectClassMembers(
+
+            def compute(mod: ModuleSymbols = mod, same_module: bool = same_module) -> VbaProjectClassMembers:
+                return VbaProjectClassMembers(
                     name=mod.module_name,
                     kind="standardModule",
                     module_name=mod.module_name,
                     exhaustive=True,
                     members=self._visible_standard_module_members(mod, same_module),
                 )
-            )
+
+            out.append(self._contribution("standardModuleMembers", mod, same_module, compute))
         return out
 
     def project_member_surfaces(self, module_name: str) -> list[VbaProjectClassMembers]:
@@ -924,7 +1139,7 @@ class ProjectIndex:
                 context=context,
                 enclosing_procedure=self._enclosing_procedure(home, offset),
                 offset=offset,
-                project_visible_symbols=self.visible_identifier_symbols(module_name),
+                project_visible_symbols=self._bare_resolution_symbols(module_name),
             )
         )
         # Document/UserForm code names (Sheet1, UserForm1) are object-module
@@ -1028,6 +1243,23 @@ class ProjectIndex:
 
     # --- private helpers --------------------------------------------------
 
+    def _bare_resolution_symbols(self, module_name: str) -> list[VbaSymbol]:
+        """The visible identifier symbols resolve_bare_identifier searches, kept
+        for the last module asked until the indexed modules change.
+
+        The resolver indexes this list by name, keyed on the list itself, so a
+        fresh list per call rebuilt that index for every reference. Hover and
+        Find References ask from one module at a time, so one kept list serves
+        them, and memory stays at one module's list rather than one per module.
+        The list never leaves the index: resolution filters it into new lists."""
+        current_lower = module_name.lower()
+        kept = cast(tuple[str, list[VbaSymbol]] | None, self._query_cache.get("bareResolutionSymbols"))
+        if kept is not None and kept[0] == current_lower:
+            return kept[1]
+        symbols = self.visible_identifier_symbols(module_name)
+        self._query_cache["bareResolutionSymbols"] = (current_lower, symbols)
+        return symbols
+
     def _enclosing_procedure(self, mod: ModuleSymbols, offset: int) -> VbaSymbol | None:
         return next(
             (
@@ -1080,6 +1312,17 @@ class ProjectIndex:
         return _is_exported(symbol, mod.module_kind)
 
     def _visible_module_level_identifier_symbols(self, mod: ModuleSymbols, same_module: bool) -> list[VbaSymbol]:
+        """Memoized per module and side; the result is shared, so callers only read it."""
+        return self._contribution(
+            "identifierSymbols",
+            mod,
+            same_module,
+            lambda: self._compute_visible_module_level_identifier_symbols(mod, same_module),
+        )
+
+    def _compute_visible_module_level_identifier_symbols(
+        self, mod: ModuleSymbols, same_module: bool
+    ) -> list[VbaSymbol]:
         out: list[VbaSymbol] = []
         for symbol in mod.root.children or []:
             if not self._is_bare_identifier_visible(symbol, mod, same_module):
@@ -1146,6 +1389,12 @@ class ProjectIndex:
                     existing.let_accessor = True
                 elif symbol.kind is VbaSymbolKind.PROPERTY_SET:
                     existing.set_accessor = True
+                procedure_kind = _member_procedure_kind(symbol)
+                if procedure_kind is not None:
+                    existing.procedure_params = {
+                        **(existing.procedure_params or {}),
+                        procedure_kind: procedure_params_from_symbol(symbol, include_passing=True),
+                    }
                 existing.attributes = _merge_member_attributes(existing.attributes, symbol.attributes)
                 existing.definitions = [
                     *(existing.definitions or []),
@@ -1165,6 +1414,12 @@ class ProjectIndex:
                 default_member=True if _is_default_project_object_member(symbol) else None,
                 let_accessor=True if symbol.kind is VbaSymbolKind.PROPERTY_LET else None,
                 set_accessor=True if symbol.kind is VbaSymbolKind.PROPERTY_SET else None,
+                sub=True if symbol.kind is VbaSymbolKind.SUB else None,
+                procedure_params=(
+                    {new_kind: procedure_params_from_symbol(symbol, include_passing=True)}
+                    if (new_kind := _member_procedure_kind(symbol)) is not None
+                    else None
+                ),
                 attributes=_merge_member_attributes(None, symbol.attributes),
             )
         return list(by_name.values())
@@ -1174,20 +1429,26 @@ class ProjectIndex:
         out: list[VbaProjectClassMembers] = []
         for mod in self._modules.values():
             same_module = mod.module_name.lower() == current_lower
-            for symbol in mod.root.children or []:
-                if symbol.kind is not VbaSymbolKind.TYPE:
-                    continue
-                if not same_module and not _is_type_exported(symbol):
-                    continue
-                out.append(
-                    VbaProjectClassMembers(
-                        name=symbol.name,
-                        kind="userType",
-                        module_name=mod.module_name,
-                        exhaustive=True,
-                        members=self._user_type_field_members(symbol),
+
+            def compute(mod: ModuleSymbols = mod, same_module: bool = same_module) -> list[VbaProjectClassMembers]:
+                part: list[VbaProjectClassMembers] = []
+                for symbol in mod.root.children or []:
+                    if symbol.kind is not VbaSymbolKind.TYPE:
+                        continue
+                    if not same_module and not _is_type_exported(symbol):
+                        continue
+                    part.append(
+                        VbaProjectClassMembers(
+                            name=symbol.name,
+                            kind="userType",
+                            module_name=mod.module_name,
+                            exhaustive=True,
+                            members=self._user_type_field_members(symbol),
+                        )
                     )
-                )
+                return part
+
+            out.extend(self._contribution("userTypeMembers", mod, same_module, compute))
         return out
 
     def _project_enum_members(self, module_name: str) -> list[VbaProjectClassMembers]:
@@ -1197,20 +1458,26 @@ class ProjectIndex:
         out: list[VbaProjectClassMembers] = []
         for mod in self._modules.values():
             same_module = mod.module_name.lower() == current_lower
-            for symbol in mod.root.children or []:
-                if symbol.kind is not VbaSymbolKind.ENUM:
-                    continue
-                if not same_module and not _is_type_exported(symbol):
-                    continue
-                out.append(
-                    VbaProjectClassMembers(
-                        name=symbol.name,
-                        kind="enum",
-                        module_name=mod.module_name,
-                        exhaustive=True,
-                        members=self._enum_constant_members(symbol),
+
+            def compute(mod: ModuleSymbols = mod, same_module: bool = same_module) -> list[VbaProjectClassMembers]:
+                part: list[VbaProjectClassMembers] = []
+                for symbol in mod.root.children or []:
+                    if symbol.kind is not VbaSymbolKind.ENUM:
+                        continue
+                    if not same_module and not _is_type_exported(symbol):
+                        continue
+                    part.append(
+                        VbaProjectClassMembers(
+                            name=symbol.name,
+                            kind="enum",
+                            module_name=mod.module_name,
+                            exhaustive=True,
+                            members=self._enum_constant_members(symbol),
+                        )
                     )
-                )
+                return part
+
+            out.extend(self._contribution("enumMembers", mod, same_module, compute))
         return out
 
     def _enum_constant_members(self, symbol: VbaSymbol) -> list[VbaProjectClassMember]:
@@ -1241,6 +1508,7 @@ class ProjectIndex:
                     signature=_user_type_field_signature(field_symbol),
                     writable=True,
                     write_type=field_symbol.as_type,
+                    is_array=True if field_symbol.is_array else None,
                     module_name=field_symbol.module_name,
                     definitions=[_project_object_member_definition(field_symbol)],
                 )

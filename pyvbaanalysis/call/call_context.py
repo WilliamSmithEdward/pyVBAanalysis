@@ -17,6 +17,7 @@ from ..lexer.token_helpers import (
     cached_raw_statement_tokens,
     cached_statement_tokens,
     match_paren_from,
+    starts_physical_line,
     token_name,
     token_word,
     tokens_without_leading_line_number,
@@ -125,7 +126,8 @@ def bare_call_statement_target(source: str, span: Span) -> BareCallStatementTarg
             j = span.start + callee.end
             while j < len(source) and source[j] in (" ", "\t"):
                 j += 1
-            if j < len(source) and source[j] == ":":
+            # `Name:` is a label only at the start of its line; `10: L1:` calls L1.
+            if j < len(source) and source[j] == ":" and starts_physical_line(source, span.start):
                 return None
         return result
 

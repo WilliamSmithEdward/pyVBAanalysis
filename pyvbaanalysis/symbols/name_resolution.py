@@ -127,10 +127,28 @@ def local_identifier_matches(
     return_variable = _procedure_return_variable(procedure, context, offset)
     if return_variable is not None and return_variable.name.lower() == lower_name:
         out.append(return_variable)
-    for symbol in procedure.children or []:
-        if _is_local_identifier_symbol(symbol) and symbol.name.lower() == lower_name:
-            out.append(symbol)
+    out.extend(_local_match_index(procedure).get(lower_name, ()))
     return out
+
+
+# A procedure's local identifiers by lowercased name, cached per procedure
+# symbol: every bare reference used to filter all of the procedure's locals,
+# statements times locals in a procedure of many (XLIDE issue #322). Upstream
+# keys a WeakMap by the symbol; a slotted VbaSymbol takes no weak reference, so
+# this is an identity LRU, which the per-procedure order of references suits.
+_LOCAL_MATCH_INDEX = IdentityLru(16)
+
+
+def _local_match_index(procedure: VbaSymbol) -> dict[str, list[VbaSymbol]]:
+    index: dict[str, list[VbaSymbol]] | None = _LOCAL_MATCH_INDEX.get(procedure)
+    if index is None:
+        index = {}
+        for symbol in procedure.children or []:
+            if not is_local_identifier_symbol(symbol):
+                continue
+            index.setdefault(symbol.name.lower(), []).append(symbol)
+        _LOCAL_MATCH_INDEX.put(index, procedure)
+    return index
 
 
 # Every identifier reference resolves against the module-level declarations, so
@@ -197,7 +215,7 @@ def source_identifier_names(
     if return_variable is not None:
         out.add(return_variable.name.lower())
     for symbol in (enclosing_procedure.children if enclosing_procedure is not None else None) or []:
-        if _is_local_identifier_symbol(symbol):
+        if is_local_identifier_symbol(symbol):
             out.add(symbol.name.lower())
     return out
 
@@ -229,7 +247,7 @@ def _procedure_returns_through_name(procedure: VbaSymbol) -> bool:
     return procedure.kind is VbaSymbolKind.FUNCTION or procedure.kind is VbaSymbolKind.PROPERTY_GET
 
 
-def _is_local_identifier_symbol(symbol: VbaSymbol) -> bool:
+def is_local_identifier_symbol(symbol: VbaSymbol) -> bool:
     return (
         symbol.kind is VbaSymbolKind.PARAMETER
         or symbol.kind is VbaSymbolKind.LOCAL_VARIABLE
@@ -300,10 +318,11 @@ def _definition_tier(
     if not definitions:
         return None
     first = definitions[0]
-    if _is_local_identifier_symbol(first):
+    if is_local_identifier_symbol(first):
         return BareIdentifierResolutionScope.LOCAL
     return (
         BareIdentifierResolutionScope.MODULE
         if first.module_name.lower() == current_module.module_name.lower()
         else BareIdentifierResolutionScope.PROJECT
     )
+

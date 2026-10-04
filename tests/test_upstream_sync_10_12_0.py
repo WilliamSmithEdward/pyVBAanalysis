@@ -177,7 +177,7 @@ def test_a_set_between_interfaces_of_one_class_compiles() -> None:
             "assignment-object-type-mismatch",
             "a",
             "Object assignment to 'o' expects Other, but got a As IFoo. This object type is not "
-            "compatible with Other.",
+            "compatible with Other. This will raise Run-time error '13': Type mismatch.",
         )
     ]
 
@@ -480,7 +480,7 @@ def test_file_statements_whose_failure_the_code_proves() -> None:
         ("f", "File number 'f' was closed above and not opened again. This will raise Run-time error '52': Bad file name or number.")
     ]
     assert _found(_main("Main = LOF(0)"), "file-number-zero") == [
-        ("0", "File number 0 is never open: file numbers run from 1 to 511. This will raise Run-time error '52': Bad file name or number.")
+        ("0", "File number 0 is never open: file numbers run from 1 to 512. This will raise Run-time error '52': Bad file name or number.")
     ]
 
 
@@ -577,7 +577,8 @@ def test_stray_characters_and_long_lines() -> None:
     ]
     long_line = "Option Explicit\nSub S()\n    Debug.Print \"" + "x" * 1100 + "\"\nEnd Sub\n"
     assert [message for _, message in _found(long_line, "line-too-long")] == [
-        "Line 3 is 1118 characters long; the VBE accepts 1023. Break it with a line continuation. This is a VBE compile error."
+        "Line 3 is 1118 characters long. The VBE reads a line in pieces of 1023 characters, and this line's "
+        "code runs past the end of one. Break it with a line continuation. This is a VBE compile error."
     ]
 
 
@@ -677,7 +678,12 @@ def test_runtime_values_the_code_states() -> None:
     ]
     assert [text for text, _ in _found(_main("Err.Raise 0", "Err.Raise 5"), "runtime-argument-value")] == ["0"]
     assert _found(_main("Main = \"b\" Like \"[z-a]\""), "runtime-argument-value") == [
-        ("\"[z-a]\"", "The Like pattern \"[z-a]\" has the reversed range z-a. This will raise Run-time error '93': Invalid pattern string.")
+        # Upstream 4494ffda (XLIDE #193) names the string matched, which decides it.
+        (
+            "\"[z-a]\"",
+            "The Like pattern \"[z-a]\" has the reversed range z-a, and matching \"b\" reaches it. This will "
+            "raise Run-time error '93': Invalid pattern string.",
+        )
     ]
     assert _found(_main("Main = CBool(\"yes\")"), "runtime-conversion-value") == [
         ("\"yes\"", "CBool cannot convert \"yes\" to Boolean. This will raise Run-time error '13': Type mismatch.")

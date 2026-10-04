@@ -10,6 +10,7 @@ host model), and the conditional-compilation branch-order rule (shared cc helper
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -20,6 +21,8 @@ from ...flow.procedure_labels import (
     collect_procedure_label_declarations,
     collect_procedure_label_references,
 )
+from ...lexer.keyword_table import is_reserved_identifier
+from ...lexer.token_helpers import is_decimal_line_number, starts_physical_line
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize
 from ...parser.nodes import (
@@ -58,6 +61,7 @@ from ..walker import (
     ProcedureStatementVisitor,
     absolute_span,
     active_module_members,
+    for_each_procedure_body_line,
     for_each_statement,
     is_inactive_node,
     raw_expression_tokens,
@@ -66,7 +70,11 @@ from ..walker import (
     token_name,
     token_text,
 )
-from .shared import report_repeated_keys, scan_conditional_compilation_branch_order
+from .shared import (
+    report_repeated_keys,
+    scan_conditional_compilation_branch_order,
+    source_expression_syntax_problem,
+)
 
 # -- checkForEachLoopTypes -------------------------------------------------
 
@@ -176,6 +184,15 @@ def _check_for_each_source_type(
     resolve_shape: _ShapeResolver,
 ) -> None:
     if not node.each or not node.source_expression or node.source_expression_span is None:
+        return
+    what = source_expression_syntax_problem(node.source_expression)
+    if what:
+        push(
+            "malformedStatement",
+            f"For Each takes a variable, a member or a call after In, and {what} is none of them. "
+            "This is a VBE compile error: Syntax error.",
+            node.source_expression_span,
+        )
         return
     source_name = _simple_for_each_source_name(node.source_expression)
     if not source_name:
@@ -515,6 +532,115 @@ def check_duplicate_labels(
                 )
 
 
+# The reserved words a line may start with before a colon without a syntax error,
+# because the VBE reads them as their own statement there: `End:`, `Stop:`,
+# `Close:`, `Do:` (Do without Loop), `Print:` and the like (issue #272, measured in
+# Excel 16.0). Every other reserved word is "Syntax error" as a label. Rem starts a
+# comment.
+_RESERVED_LINE_STARTS: frozenset[str] = frozenset(
+    {"close", "end", "resume", "return", "stop", "doevents", "do", "else", "endif", "loop", "next", "wend", "rem"}
+)
+
+# The reserved words that, before a colon, are a statement the VBE refuses for
+# another reason.
+_RESERVED_LINE_ERRORS: Mapping[str, str] = {
+    "print": "Method not valid without suitable object",
+    "scale": "Method not valid without suitable object",
+    "cdec": "Argument not optional",
+    "date": "Invalid use of property",
+}
+
+# /^([ \t]*)([A-Za-z][A-Za-z0-9_]*)[ \t]*:(?!=)/
+_LINE_LABEL_RE = re.compile(r"([ \t]*)([A-Za-z][A-Za-z0-9_]*)[ \t]*:(?!=)")
+# /[ \t]_[ \t]*\r?\n$/ (JavaScript's `$` without the m flag is the end of the text)
+_CONTINUED_LINE_END_RE = re.compile(r"[ \t]_[ \t]*\r?\n\Z")
+
+
+def check_reserved_labels(
+    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    """A line label cannot be a reserved word (issue #272, measured in Excel 16.0
+    for every reserved word): `GoTo Fix` and a line `Fix:` are "Syntax error", where
+    `GoTo Mid` and `Mid:` compile, since Mid is a library function a label may
+    shadow. A jump's target is checked after GoTo, GoSub, On ... GoTo and Resume,
+    `On Error GoTo 0` and `Resume Next` aside."""
+
+    def reserved(tok: VbaToken | None) -> bool:
+        return (
+            tok is not None
+            and tok.kind is not TokenKind.INTEGER_LITERAL
+            and is_reserved_identifier(tok.raw_text)
+        )
+
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode):
+            continue
+
+        # A line that starts `Word:`. Read from the source, since the parser takes
+        # `Dim:` and `Const:` as declarations and splits `Fix:` at the colon (issue
+        # #272).
+        def visit_line(line: Span) -> None:
+            if activity is not None and activity.is_inactive(line):
+                return
+            label = _LINE_LABEL_RE.match(source[line.start : line.end])
+            lower = label.group(2).lower() if label is not None else None
+            if (
+                label is None
+                or not lower
+                or not is_reserved_identifier(lower)
+                or lower in _RESERVED_LINE_STARTS
+                or (
+                    line.start > 0
+                    and _CONTINUED_LINE_END_RE.search(source[max(0, line.start - 64) : line.start])
+                    is not None
+                )
+            ):
+                return
+            indent = len(label.group(1))
+            word = label.group(2)
+            span = Span(line.start + indent, line.start + indent + len(word))
+            error = _RESERVED_LINE_ERRORS.get(lower)
+            push(
+                "malformedStatement",
+                f"'{word}:' is the statement {word}, not a line label. This is a VBE compile "
+                f"error: {error}."
+                if error
+                else f"'{word}' is a reserved word, so '{word}:' cannot be a line label. This is "
+                "a VBE compile error: Syntax error.",
+                span,
+            )
+
+        for_each_procedure_body_line(source, member, visit_line)
+
+        def visit_statement(stmt: LeafStatementNode) -> None:
+            toks = statement_tokens(source, stmt.span)
+            for k in range(len(toks) - 1):
+                word = token_text(toks[k])
+                jumps = (
+                    word == "goto"
+                    or word == "gosub"
+                    or (word == "resume" and token_text(toks[k + 1]) != "next")
+                )
+                if not jumps:
+                    continue
+                # `On x GoTo A, B`: each target after the comma too.
+                for t in range(k + 1, len(toks), 2):
+                    if reserved(toks[t]):
+                        push(
+                            "malformedStatement",
+                            f"'{toks[t].raw_text}' is a reserved word, so it cannot name a line "
+                            "label to jump to. This is a VBE compile error: Syntax error.",
+                            absolute_span(stmt.span, toks[t]),
+                        )
+                        break
+                    if (word != "goto" and word != "gosub") or (
+                        t + 1 >= len(toks) or toks[t + 1].raw_text != ","
+                    ):
+                        break
+
+        for_each_statement(member.body, visit_statement, activity)
+
+
 def check_undefined_labels(
     source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
 ) -> None:
@@ -538,6 +664,73 @@ def check_undefined_labels(
                     f"Label '{ref.text}' is not defined in procedure '{member.name}'.",
                     ref.span,
                 )
+
+
+# The largest line number the VBE accepts, the top of the Long range.
+_MAX_LINE_NUMBER = 2147483647
+
+# /^\d+$/: JavaScript's `\d` is ASCII only.
+_DIGITS_RE = re.compile(r"[0-9]+")
+
+
+def check_line_number_range(
+    source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
+) -> None:
+    """A line number is 0 to 2147483647. `2147483648 x = 1` and `-1 x = 1` are each
+    "Syntax error" in the VBE (issue #210, measured in Excel 16.0)."""
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode):
+            continue
+
+        def visit(stmt: LeafStatementNode) -> None:
+            toks = statement_tokens(source, stmt.span)
+            first = toks[0] if toks else None
+            if (
+                first is not None
+                and first.kind is TokenKind.INTEGER_LITERAL
+                and _DIGITS_RE.fullmatch(first.raw_text) is not None
+                and int(first.raw_text) > _MAX_LINE_NUMBER
+            ):
+                push(
+                    "invalidLineNumber",
+                    f"Line number {first.raw_text} is past {_MAX_LINE_NUMBER}, the largest the VBE "
+                    "accepts. This is a VBE compile error: Syntax error.",
+                    absolute_span(stmt.span, first),
+                )
+                return
+            # `x = 1: 20 y = 2`, `10 L1: 20`: a line number after a colon, even in a
+            # one-line If's tail (issue #230, measured in Excel 16.0).
+            if first is not None and is_decimal_line_number(first) and not starts_physical_line(
+                source, stmt.span.start
+            ):
+                push(
+                    "invalidLineNumber",
+                    f"Line number {first.raw_text} is not at the start of its line, the only place "
+                    "one goes. This is a VBE compile error: Syntax error.",
+                    absolute_span(stmt.span, first),
+                )
+                return
+            # `-1 x = 1`: a negative number where a line number goes. A statement
+            # never opens with a minus, so this is no expression.
+            number = toks[1] if len(toks) > 1 else None
+            following = toks[2] if len(toks) > 2 else None
+            if (
+                first is not None
+                and first.raw_text == "-"
+                and number is not None
+                and number.kind is TokenKind.INTEGER_LITERAL
+                and _DIGITS_RE.fullmatch(number.raw_text) is not None
+                and following is not None
+                and following.kind in (TokenKind.IDENTIFIER, TokenKind.KEYWORD)
+            ):
+                push(
+                    "invalidLineNumber",
+                    f"A line number cannot be negative: -{number.raw_text}. This is a VBE compile "
+                    "error: Syntax error.",
+                    Span(absolute_span(stmt.span, first).start, absolute_span(stmt.span, number).end),
+                )
+
+        for_each_statement(member.body, visit, activity)
 
 
 # -- checkElseBranchOrder --------------------------------------------------

@@ -63,7 +63,8 @@ def test_helper_call_argument_demotes_to_unknown() -> None:
 
 
 def test_with_block_on_unset_object_fires() -> None:
-    assert _CODE in _codes("Sub S\n    Dim obj As Object\n    With obj\n    End With\nEnd Sub")
+    assert _CODE in _codes("Sub S\n    Dim obj As Object\n    With obj\n        .Method\n    End With\nEnd Sub")
+    assert _CODE not in _codes("Sub S\n    Dim obj As Object\n    With obj\n    End With\nEnd Sub")
 
 
 def test_unstructured_flow_falls_back_to_conservative() -> None:

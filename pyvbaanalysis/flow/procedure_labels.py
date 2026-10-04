@@ -11,27 +11,23 @@ and are not ported.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..conditional import ConditionalActivityTracker, inactive_node_skip
+from ..conditional import ConditionalActivityTracker
 from ..lexer.keyword_table import is_reserved_identifier
 from ..lexer.token_helpers import (
-    split_top_level_token_groups,
     cached_statement_tokens,
+    split_top_level_token_groups,
+    starts_physical_line,
     token_name,
     token_word,
     tokens_without_leading_line_number,
 )
 from ..lexer.token_kinds import TokenKind, VbaToken
-from ..parser.nodes import (
-    BodyNode,
-    LeafStatementNode,
-    ProcedureNode,
-    Span,
-    is_leaf_statement,
-    iter_body_nodes,
-)
+from ..parser.nodes import LeafStatementNode, ProcedureNode, Span
+from ..parser.parse_module import parse_module
+from ..parser.statement_walk import for_each_statement
 
 _DECIMAL_LABEL_RE = re.compile(r"^\d+$")
 
@@ -76,11 +72,9 @@ def collect_procedure_label_declarations(
     labels: list[VbaProcedureLabel] = []
 
     def visit(stmt: LeafStatementNode) -> None:
-        label = statement_label_declaration(source, stmt.span)
-        if label is not None:
-            labels.append(label)
+        labels.extend(statement_label_declarations(source, stmt.span))
 
-    _for_each_procedure_statement(procedure.body, visit, activity)
+    for_each_statement(procedure.body, visit, activity)
     return labels
 
 
@@ -93,16 +87,27 @@ def collect_procedure_label_references(
     def visit(stmt: LeafStatementNode) -> None:
         refs.extend(statement_label_references(source, stmt.span))
 
-    _for_each_procedure_statement(procedure.body, visit, activity)
+    for_each_statement(procedure.body, visit, activity)
     return refs
 
 
 def statement_label_references(source: str, span: Span) -> list[VbaProcedureLabelReference]:
     """Label references targeted by a single statement (GoTo/GoSub/Resume/On...)."""
-    toks = tokens_without_leading_line_number(cached_statement_tokens(source, span.start, span.end))
+    return _label_references_in(
+        tokens_without_leading_line_number(cached_statement_tokens(source, span.start, span.end)),
+        span,
+    )
+
+
+def _label_references_in(
+    tokens: Sequence[VbaToken], span: Span, first_word: str | None = None
+) -> list[VbaProcedureLabelReference]:
+    toks = tokens
+    if first_word is None:
+        first_word = token_word(_at(toks, 0))
     if not toks:
         return []
-    if token_word(toks[0]) == "on":
+    if first_word == "on":
         # `On Local Error GoTo 0` is `On Error GoTo 0` (XLIDE issue #98): drop the
         # Local so the target reads the same way.
         if token_word(_at(toks, 1)) == "local" and token_word(_at(toks, 2)) == "error":
@@ -110,7 +115,7 @@ def statement_label_references(source: str, span: Span) -> list[VbaProcedureLabe
         return _on_statement_label_references(toks, span)
     refs: list[VbaProcedureLabelReference] = []
     for i, tok in enumerate(toks):
-        word = token_word(tok)
+        word = first_word if i == 0 else token_word(tok)
         if word in ("goto", "gosub"):
             if word == "goto" and _is_on_error_goto_disable_at(toks, i):
                 continue
@@ -234,23 +239,96 @@ def _label_from_token(tok: VbaToken, base: Span) -> VbaProcedureLabel | None:
 
 
 def statement_label_declaration(source: str, span: Span) -> VbaProcedureLabel | None:
-    toks = cached_statement_tokens(source, span.start, span.end)
+    """The statement's first label, when it declares any: the line number of `10 L1:`."""
+    labels = statement_label_declarations(source, span)
+    return labels[0] if labels else None
+
+
+def jump_target_label_declaration(source: str, span: Span) -> VbaProcedureLabel | None:
+    """The statement's first label that a GoTo, GoSub, Resume or On ... GoTo
+    anywhere in the module names, or None. Control reaches any other label only
+    by falling into it, so a label nothing names, and a line number written for
+    Erl, carry what the statements before them knew (XLIDE issue #321, measured
+    in Excel 16.0)."""
+    labels = statement_label_declarations(source, span)
+    if not labels:
+        return None
+    targets = _module_label_targets(source)
+    return next((label for label in labels if label.key in targets), None)
+
+
+# The label keys each recent module's statements jump to, by source text.
+_MODULE_TARGETS: dict[str, frozenset[str]] = {}
+
+
+def _module_label_targets(source: str) -> frozenset[str]:
+    targets = _MODULE_TARGETS.get(source)
+    if targets is None:
+        keys: set[str] = set()
+        for member in parse_module(source).members:
+            if isinstance(member, ProcedureNode):
+                for ref in collect_procedure_label_references(source, member):
+                    keys.add(ref.key)
+        if len(_MODULE_TARGETS) >= 8:
+            _MODULE_TARGETS.clear()
+        targets = frozenset(keys)
+        _MODULE_TARGETS[source] = targets
+    return targets
+
+
+def statement_label_declarations(source: str, span: Span) -> list[VbaProcedureLabel]:
+    """Every label the statement declares. A line can carry a line number and a
+    name both, `10 L1: x = 1`, and each is a target: GoTo 10 and Erl see the
+    number, GoTo L1 and Resume L1 the name (XLIDE issue #230, measured in Excel
+    16.0). A name is a label only at the start of its physical line, after the
+    line number if there is one: in `10: L1:` and `10 L1: L2:` the VBE reads the
+    second word as a call."""
+    return _label_declarations_in(source, span, cached_statement_tokens(source, span.start, span.end))
+
+
+def _label_declarations_in(
+    source: str, span: Span, toks: Sequence[VbaToken]
+) -> list[VbaProcedureLabel]:
     first = _at(toks, 0)
     if first is None:
-        return None
+        return []
+    if first.kind is not TokenKind.INTEGER_LITERAL and len(toks) >= 2 and toks[1].raw_text != ":":
+        return []
     label = _label_from_token(first, span)
     if label is None:
-        return None
+        return []
     if first.kind is TokenKind.INTEGER_LITERAL:
         # A leading decimal integer is a line-label declaration whether or not a
         # statement follows it on the same line.
-        return label
+        named = (
+            _label_from_token(toks[1], span)
+            if len(toks) == 2
+            and toks[1].kind is not TokenKind.INTEGER_LITERAL
+            and _has_source_colon_after_token(source, span, toks[1])
+            else None
+        )
+        return [label, named] if named is not None else [label]
+    if not starts_physical_line(source, span.start):
+        return []
     second = _at(toks, 1)
     if second is not None and second.raw_text == ":":
-        return label
+        return [label]
     if len(toks) == 1 and _has_source_colon_after_token(source, span, first):
-        return label
-    return None
+        return [label]
+    return []
+
+
+def statement_has_unstructured_flow(source: str, span: Span) -> bool:
+    """One statement's existing label/error predicates, sharing one token lookup."""
+    tokens = cached_statement_tokens(source, span.start, span.end)
+    significant = tokens_without_leading_line_number(tokens)
+    first = token_word(_at(significant, 0))
+    return (
+        first == "resume"
+        or (first == "on" and token_word(_at(significant, 1)) == "error")
+        or len(_label_declarations_in(source, span, tokens)) > 0
+        or len(_label_references_in(significant, span, first)) > 0
+    )
 
 
 def _normalized_decimal_label(raw: str) -> str | None:
@@ -265,16 +343,6 @@ def _has_source_colon_after_token(source: str, span: Span, tok: VbaToken) -> boo
     while i < len(source) and source[i] in (" ", "\t"):
         i += 1
     return i < len(source) and source[i] == ":"
-
-
-def _for_each_procedure_statement(
-    body: Sequence[BodyNode],
-    visit: Callable[[LeafStatementNode], None],
-    activity: ConditionalActivityTracker | None,
-) -> None:
-    for node in iter_body_nodes(body, inactive_node_skip(activity)):
-        if is_leaf_statement(node):
-            visit(node)
 
 
 def _absolute_span(base: Span, token: VbaToken) -> Span:

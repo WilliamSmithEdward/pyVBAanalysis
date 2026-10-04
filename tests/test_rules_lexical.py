@@ -15,8 +15,13 @@ def _codes(source: str) -> list[str]:
 
 
 def test_unterminated_string_fires() -> None:
-    assert "unterminated-string" in _codes('s = "abc')
-    assert "unterminated-string" in _codes('Debug.Print "no close')
+    # Upstream 6408f855 (#681) and 54f3177b (#740): the VBE closes an open string at
+    # the end of its line, so only one ending like a line continuation, or one that
+    # opens a statement, is an error.
+    assert "unterminated-string" in _codes('s = "abc _')
+    assert "unterminated-string" in _codes('Sub S()\n    "no close\nEnd Sub')
+    assert "unterminated-string" not in _codes('s = "abc')
+    assert "unterminated-string" not in _codes('Debug.Print "no close')
 
 
 def test_terminated_string_is_clean() -> None:

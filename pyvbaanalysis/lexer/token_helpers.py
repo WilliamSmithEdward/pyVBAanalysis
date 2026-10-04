@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Sequence
+from typing import Literal, Protocol
 
 from .token_kinds import TokenKind, VbaToken
 from .tokenize import tokenize, tokenize_cached
@@ -148,6 +149,39 @@ def _derive_statement_tokens(
     return out
 
 
+class _HasStart(Protocol):
+    @property
+    def start(self) -> int: ...
+
+
+class _HasSpan(Protocol):
+    @property
+    def start(self) -> int: ...
+
+    @property
+    def end(self) -> int: ...
+
+
+def statement_tokens_cached(source: str, span: _HasSpan) -> list[VbaToken]:
+    """Significant tokens of a statement span, excluding comments and newlines
+    (memoized per pass): upstream's statementTokensCached signature over
+    cached_statement_tokens."""
+    return cached_statement_tokens(source, span.start, span.end)
+
+
+def first_token_at_or_after(tokens: Sequence[_HasStart], offset: int) -> int:
+    """Lower bound in a source-ordered token stream; returns length past the last token."""
+    lo = 0
+    hi = len(tokens)
+    while lo < hi:
+        mid = lo + (hi - lo) // 2
+        if tokens[mid].start < offset:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
 def _identifier_start(ch: str) -> bool:
     return ch == "_" or unicodedata.category(ch).startswith("L")
 
@@ -162,6 +196,19 @@ def is_identifier(text: str) -> bool:
     `^[\\p{L}_][\\p{L}\\p{M}\\p{N}_]*$`). VBA identifiers may use any locale's
     letters, and an ASCII-only test made `Dim g As Прибор` resolve to no type."""
     return bool(text) and _identifier_start(text[0]) and all(_identifier_part(ch) for ch in text[1:])
+
+
+class _IdentPattern:
+    """XLIDE's IDENT_RE, ``/^[\\p{L}_][\\p{L}\\p{M}\\p{N}_]*$/u``. Python's ``re``
+    has no Unicode property classes, so ``test`` checks by category."""
+
+    __slots__ = ()
+
+    def test(self, text: str) -> bool:
+        return is_identifier(text)
+
+
+IDENT_RE = _IdentPattern()
 
 
 def identifiers_in(text: str) -> list[str]:
@@ -203,6 +250,9 @@ def token_name(token: VbaToken | None) -> str | None:
         return raw[1:-1] if raw.startswith("[") and raw.endswith("]") else raw
     return None
 
+
+# A relational operator (MS-VBAL 5.6.9.5) in its standard spelling.
+RelationalOperator = Literal["=", "<>", "<", ">", "<=", ">="]
 
 _RELATIONAL_OPERATORS = frozenset({"=", "<>", "<", ">", "<=", ">="})
 
@@ -258,6 +308,16 @@ def is_decimal_line_number(token: VbaToken | None) -> bool:
     )
 
 
+def starts_physical_line(source: str, offset: int) -> bool:
+    """True when only spaces and tabs stand between the line's start and
+    ``offset``. A label is one only there, after the line number if there is
+    one: in ``10: L1:`` the VBE reads L1 as a call (XLIDE issue #230)."""
+    i = offset - 1
+    while i >= 0 and source[i] in (" ", "\t"):
+        i -= 1
+    return i < 0 or source[i] in ("\n", "\r")
+
+
 def tokens_without_leading_line_number(tokens: Sequence[VbaToken]) -> list[VbaToken]:
     """Drops the leading line-number token when one prefixes the statement."""
     if len(tokens) > 1 and is_decimal_line_number(tokens[0]):
@@ -304,3 +364,17 @@ def split_top_level_token_groups(
         current.append(tokens[i])
     groups.append(current)
     return groups
+
+
+def top_level_equals_index(tokens: Sequence[VbaToken]) -> int:
+    """First '=' outside parentheses, retaining raw-token assignment semantics."""
+    depth = 0
+    for i, token in enumerate(tokens):
+        raw = token.raw_text
+        if raw == "(":
+            depth += 1
+        elif raw == ")":
+            depth -= 1
+        elif raw == "=" and depth == 0:
+            return i
+    return -1

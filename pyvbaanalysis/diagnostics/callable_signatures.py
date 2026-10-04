@@ -13,12 +13,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..call.call_context import standalone_empty_parenthesized_call_statement
 from ..completion.member_access import (
     MemberCompletionContext,
-    MemberCompletionEntry,
     resolve_exact_member_completion,
 )
 from ..conditional import ConditionalActivityTracker
@@ -46,7 +45,15 @@ from ..symbols.symbol_model import (
     procedure_params_from_symbol,
     qualified_procedure_key,
 )
-from ..types.type_inference import procedure_symbol_for
+from ..types.type_inference import (
+    def_type_of,
+    is_member_parenless_argument_start,
+    is_property_result_indexing,
+    parse_runtime_param_type,
+    procedure_symbol_for,
+    runtime_signature_parameter_text,
+    split_signature_top_level,
+)
 from .call_extraction import (
     CallableParamType,
     CallableTypeSignature,
@@ -75,6 +82,9 @@ def is_by_ref_procedure_param(by_ref: bool | None, by_val: bool | None, param_ar
     return by_ref is True or by_val is not True
 
 
+_VALUED_KINDS = frozenset({VbaSymbolKind.FUNCTION, VbaSymbolKind.PROPERTY_GET})
+
+
 def callable_type_signature_from_symbol(symbol: VbaSymbol) -> CallableTypeSignature:
     params = [
         CallableParamType(
@@ -87,33 +97,75 @@ def callable_type_signature_from_symbol(symbol: VbaSymbol) -> CallableTypeSignat
         )
         for p in procedure_params_from_symbol(symbol, include_passing=True)
     ]
-    return CallableTypeSignature(name=symbol.name, params=params, return_type=symbol.as_type)
+    return CallableTypeSignature(
+        name=symbol.name,
+        params=params,
+        return_type=symbol.as_type,
+        valued=True if symbol.kind in _VALUED_KINDS else None,
+    )
+
+
+def _module_signature_from_symbol(symbols: ModuleSymbols, symbol: VbaSymbol) -> CallableTypeSignature:
+    """A procedure's signature, its untyped parameters and result typed by the
+    module's DefType lines (XLIDE issue #285)."""
+    declared = callable_type_signature_from_symbol(symbol)
+    if not symbols.def_types or symbol.kind is VbaSymbolKind.DECLARE:
+        return declared
+    return replace(
+        declared,
+        params=[
+            p if p.type_ or p.param_array else replace(p, type_=def_type_of(symbols, p.name))
+            for p in declared.params
+        ],
+        return_type=declared.return_type
+        if declared.return_type is not None
+        else (def_type_of(symbols, symbol.name) if symbol.kind in _VALUED_KINDS else None),
+    )
+
+
+# Signature tables are pure functions of the per-pass ModuleSymbols (plus the
+# per-pass project procedures), so they are memoized by identity. Results are
+# shared: callers must not mutate them.
+_MODULE_TYPE_SIGNATURES_CACHE = IdentityLru()
+_SAME_MODULE_CALLABLE_SIGNATURES_CACHE = IdentityLru()
+_CALLABLE_TYPE_SIGNATURES_CACHE = IdentityLru()
+_UNIQUE_PROJECT_TYPE_SIGNATURES_CACHE = IdentityLru()
+_EMPTY_PROJECT_TYPE_SIGNATURES: dict[str, CallableTypeSignature] = {}
 
 
 def build_module_type_signatures(symbols: ModuleSymbols) -> dict[str, CallableTypeSignature]:
+    cached = _MODULE_TYPE_SIGNATURES_CACHE.get(symbols)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
     out: dict[str, CallableTypeSignature] = {}
     for symbol in symbols.root.children or []:
         if is_procedure_kind(symbol.kind) or symbol.kind is VbaSymbolKind.DECLARE:
-            out[symbol.name.lower()] = callable_type_signature_from_symbol(symbol)
-    return out
+            out[symbol.name.lower()] = _module_signature_from_symbol(symbols, symbol)
+    return _MODULE_TYPE_SIGNATURES_CACHE.put(out, symbols)  # type: ignore[no-any-return]
 
 
 def same_module_callable_signatures(symbols: ModuleSymbols) -> dict[str, list[CallableTypeSignature]]:
+    cached = _SAME_MODULE_CALLABLE_SIGNATURES_CACHE.get(symbols)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
     out: dict[str, list[CallableTypeSignature]] = {}
     for symbol in symbols.root.children or []:
         if not is_bare_callable_kind(symbol.kind):
             continue
-        sig = callable_type_signature_from_symbol(symbol)
+        sig = _module_signature_from_symbol(symbols, symbol)
         out.setdefault(sig.name.lower(), []).append(sig)
-    return out
+    return _SAME_MODULE_CALLABLE_SIGNATURES_CACHE.put(out, symbols)  # type: ignore[no-any-return]
 
 
 def unique_project_type_signatures(
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None,
 ) -> dict[str, CallableTypeSignature]:
+    if project_procedures is None:
+        return _EMPTY_PROJECT_TYPE_SIGNATURES
+    cached = _UNIQUE_PROJECT_TYPE_SIGNATURES_CACHE.get(project_procedures)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
     out: dict[str, CallableTypeSignature] = {}
-    if not project_procedures:
-        return out
     for lower, candidates in project_procedures.items():
         if len(candidates) != 1:
             continue
@@ -130,19 +182,26 @@ def unique_project_type_signatures(
             for p in candidate.params
         ]
         out[lower] = CallableTypeSignature(
-            name=candidate.name, params=params, return_type=candidate.return_type
+            name=candidate.name,
+            params=params,
+            return_type=candidate.return_type,
+            valued=True if candidate.kind is VbaSymbolKind.FUNCTION else None,
         )
-    return out
+    return _UNIQUE_PROJECT_TYPE_SIGNATURES_CACHE.put(out, project_procedures)  # type: ignore[no-any-return]
 
 
 def callable_type_signatures_for(
     symbols: ModuleSymbols,
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None,
 ) -> dict[str, CallableTypeSignature]:
+    cached = _CALLABLE_TYPE_SIGNATURES_CACHE.get(symbols, project_procedures)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    # Copy: build_module_type_signatures' result is memoized and must stay pure.
     out = dict(build_module_type_signatures(symbols))
     for lower, sig in unique_project_type_signatures(project_procedures).items():
         out.setdefault(lower, sig)
-    return out
+    return _CALLABLE_TYPE_SIGNATURES_CACHE.put(out, symbols, project_procedures)  # type: ignore[no-any-return]
 
 
 # -- source-name shadow scope ----------------------------------------------
@@ -218,7 +277,10 @@ def source_name_scope_for(
 
 
 def runtime_callable_source_shadowed(name: str, source_names: SourceNameScope | None) -> bool:
-    return source_names is not None and name.lower() in source_names.runtime_shadows
+    # A Public Function InStr compiles, and `InStr(0, "abc", "a")` still calls
+    # VBA's, which raises 5 (XLIDE issue #280, measured in Excel 16.0).
+    lower = name.lower()
+    return lower != "instr" and source_names is not None and lower in source_names.runtime_shadows
 
 
 def bare_callable_source_shadowed(name: str, source_names: SourceNameScope | None) -> bool:
@@ -241,22 +303,17 @@ def callable_signature_for(
         return user
     if runtime_callable_source_shadowed(name, source_names):
         return None
+    # The runtime table leaves out the type names; called, `String(n, c)` is
+    # String$'s Variant twin and takes its arguments (XLIDE issue #332).
     runtime = resolve_runtime_function(name)
+    if runtime is None and name.lower() == "string":
+        runtime = resolve_runtime_function("String$")
     if runtime is None:
         return None
     return runtime_type_signature(runtime)
 
 
 # -- runtime-function signatures -------------------------------------------
-
-_AS_TYPE = re.compile(r"\bAs\s+([A-Za-z_][A-Za-z0-9_]*(?:\(\))?)", re.IGNORECASE)
-_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_LEADING_BRACKET = re.compile(r"^\[")
-_TRAILING_BRACKET = re.compile(r"\]$")
-_PARAM_ARRAY = re.compile(r"^ParamArray\b", re.IGNORECASE)
-_PARAM_ARRAY_PREFIX = re.compile(r"^ParamArray\b\s*", re.IGNORECASE)
-_PASSING_PREFIX = re.compile(r"^(?:ByVal|ByRef)\b\s*", re.IGNORECASE)
-_DEFAULT_SUFFIX = re.compile(r"\s*=\s*.*$")
 
 
 def runtime_type_signature(runtime: VbaRuntimeFunction) -> CallableTypeSignature:
@@ -267,6 +324,7 @@ def runtime_type_signature(runtime: VbaRuntimeFunction) -> CallableTypeSignature
                 type_=p.type_,
                 optional=p.optional,
                 param_array=p.param_array,
+                is_array=True if p.is_array else None,
                 null_raises=True if p.null_raises else None,
             )
             for p in runtime.params
@@ -276,7 +334,7 @@ def runtime_type_signature(runtime: VbaRuntimeFunction) -> CallableTypeSignature
 
 
 def runtime_arity_signature(runtime: VbaRuntimeFunction) -> CallableTypeSignature | None:
-    if runtime.params is not None or _runtime_signature_parameter_text(runtime.signature) is not None:
+    if runtime.params is not None or runtime_signature_parameter_text(runtime.signature) is not None:
         return runtime_type_signature(runtime)
     return None
 
@@ -284,91 +342,13 @@ def runtime_arity_signature(runtime: VbaRuntimeFunction) -> CallableTypeSignatur
 def parse_runtime_display_signature(
     name: str, signature: str, return_type: str | None = None
 ) -> CallableTypeSignature:
-    inner = _runtime_signature_parameter_text(signature)
+    inner = runtime_signature_parameter_text(signature)
     if inner is None:
         return CallableTypeSignature(name=name, params=[], return_type=return_type)
     params = [
-        p for p in (_parse_runtime_param_type(s) for s in _split_signature_top_level(inner)) if p is not None
+        p for p in (parse_runtime_param_type(s) for s in split_signature_top_level(inner)) if p is not None
     ]
     return CallableTypeSignature(name=name, params=params, return_type=return_type)
-
-
-def _runtime_signature_parameter_text(signature: str) -> str | None:
-    """The text of a display signature's parameter list: from its first `(` to the
-    `)` that closes it.
-
-    Not to the LAST `)`. A signature can go on past its parameter list with a
-    return type that has parentheses of its own, `Values() As Long()` for a Function
-    returning an array, and reading to the last one took `) As Long(` for the
-    parameters: one required parameter named `As`. Every call to such a member with
-    its empty argument list then reported "expected 1 argument". A `)` inside a
-    quoted default value closes nothing.
-    """
-    open_index = signature.find("(")
-    if open_index < 0:
-        return None
-    depth = 0
-    quoted = False
-    for i in range(open_index, len(signature)):
-        ch = signature[i]
-        if ch == '"':
-            quoted = not quoted
-        elif quoted:
-            continue
-        elif ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                return signature[open_index + 1 : i]
-    return None
-
-
-def _parse_runtime_param_type(raw: str) -> CallableParamType | None:
-    text = raw.strip()
-    if not text:
-        return None
-    optional = text.startswith("[") and text.endswith("]")
-    text = _TRAILING_BRACKET.sub("", _LEADING_BRACKET.sub("", text)).strip()
-    param_array = _PARAM_ARRAY.match(text) is not None
-    text = _PARAM_ARRAY_PREFIX.sub("", text)
-    text = _PASSING_PREFIX.sub("", text)
-    text = _DEFAULT_SUFFIX.sub("", text).strip()
-    as_match = _AS_TYPE.search(text)
-    first_match = _IDENTIFIER.search(text)
-    if first_match is None:
-        return None
-    return CallableParamType(
-        name=first_match.group(0),
-        type_=as_match.group(1) if as_match is not None else None,
-        optional=optional,
-        param_array=param_array,
-    )
-
-
-def _split_signature_top_level(text: str) -> list[str]:
-    """A parameter list split at its top-level commas. Quoted text is opaque, as in
-    _runtime_signature_parameter_text: a default of `")"` read as a bracket left the
-    depth unbalanced, and every comma after it was taken for the inside of a
-    parameter, so `F([s As String = ")"], [n As Long])` came out as one parameter."""
-    out: list[str] = []
-    depth = 0
-    start = 0
-    quoted = False
-    for i, ch in enumerate(text):
-        if ch == '"':
-            quoted = not quoted
-        elif quoted:
-            continue
-        elif ch in ("(", "["):
-            depth += 1
-        elif ch in (")", "]"):
-            depth -= 1
-        elif ch == "," and depth == 0:
-            out.append(text[start:i])
-            start = i + 1
-    out.append(text[start:])
-    return out
 
 
 def callable_signature_for_call(
@@ -530,9 +510,20 @@ def member_expression_calls(
             and standalone_empty_call.span.end == call_span.end
         ):
             continue
-        signature = parse_runtime_display_signature(member.name, member.signature)
-        if _is_property_result_indexing(member, signature, inner):
+        parsed = parse_runtime_display_signature(member.name, member.signature)
+        if is_property_result_indexing(member, parsed, inner):
             continue
+        # A Function of a project class gives a value, and `k.Items(1)` may index
+        # it (XLIDE issue #609).
+        signature = (
+            replace(
+                parsed,
+                valued=True,
+                return_type=member.returns if member.returns is not None else parsed.return_type,
+            )
+            if member.kind == "method" and not member.sub and len(member.definitions or ()) > 0
+            else parsed
+        )
         split = empty_arg_split() if not inner else split_arg_slots(inner, span.start)
         out.append(
             BoundMemberCall(
@@ -578,7 +569,7 @@ def member_statement_calls(
             continue  # `Call p.Save arg` is the call-requires-parens syntax error
         if next_tok is not None:
             gap = source[span.start + toks[i].end : span.start + next_tok.start]
-            if _WHITESPACE_RE.search(gap) is None or not _is_member_parenless_argument_start(next_tok):
+            if _WHITESPACE_RE.search(gap) is None or not is_member_parenless_argument_start(next_tok):
                 continue
         member = resolve_exact_member_completion(source, name, span.start + toks[i].end, member_ctx)
         if member is None or not member.signature:
@@ -601,13 +592,6 @@ def member_statement_calls(
     return []
 
 
-def _is_property_result_indexing(
-    member: MemberCompletionEntry, signature: CallableTypeSignature, inner: Sequence[VbaToken]
-) -> bool:
-    """`obj.Items(1)` on a parameterless property indexes its result; it is no call."""
-    return member.kind == "property" and not signature.params and len(inner) > 0
-
-
 def is_member_statement_chain_through(
     toks: Sequence[VbaToken], start_idx: int, member_idx: int
 ) -> bool:
@@ -620,6 +604,16 @@ def is_member_statement_chain_through(
             return True
         return is_member_statement_chain_through(toks, start_idx + 1, member_idx)
     if not token_name(toks[start_idx]):
+        return False
+    # A keyword spaced off a dot is a statement's keyword before a With member,
+    # not a receiver: `If .Count = 0 Then .Add 1` (XLIDE issue #198).
+    next_tok = toks[start_idx + 1] if start_idx + 1 < len(toks) else None
+    if (
+        toks[start_idx].kind is TokenKind.KEYWORD
+        and next_tok is not None
+        and next_tok.raw_text == "."
+        and next_tok.start > toks[start_idx].end
+    ):
         return False
     i = start_idx + 1
     while i < len(toks):
@@ -641,23 +635,6 @@ def is_member_statement_chain_through(
     return False
 
 
-_PARENLESS_ARGUMENT_KINDS = frozenset(
-    {
-        TokenKind.IDENTIFIER,
-        TokenKind.KEYWORD,
-        TokenKind.BRACKETED_IDENTIFIER,
-        TokenKind.STRING_LITERAL,
-        TokenKind.DATE_LITERAL,
-        TokenKind.INTEGER_LITERAL,
-        TokenKind.FLOAT_LITERAL,
-    }
-)
-
-
-def _is_member_parenless_argument_start(tok: VbaToken) -> bool:
-    return tok.kind in _PARENLESS_ARGUMENT_KINDS or tok.raw_text in (",", "+", "-")
-
-
 # -- scoped integer-constant lookup ----------------------------------------
 
 
@@ -670,7 +647,7 @@ class _ScopedIntegerConstantLookup:
 
     def __init__(
         self,
-        constants: Mapping[str, int | None],
+        constants: Mapping[str, float | None],
         symbols: ModuleSymbols,
         proc_sym: VbaSymbol | None,
         project_visible: Sequence[VbaSymbol] | None,
@@ -682,7 +659,7 @@ class _ScopedIntegerConstantLookup:
         self._project_visible = project_visible
         self._model = model
 
-    def get(self, name: str, /) -> int | None:
+    def get(self, name: str, /) -> float | None:
         key = name.lower()
         if "." in key:
             if key in self._constants:
@@ -709,7 +686,7 @@ class _ScopedIntegerConstantLookup:
 
 
 def scoped_integer_constant_lookup(
-    constants: Mapping[str, int | None],
+    constants: Mapping[str, float | None],
     symbols: ModuleSymbols,
     proc_sym: VbaSymbol | None,
     project_visible: Sequence[VbaSymbol] | None,
@@ -720,7 +697,7 @@ def scoped_integer_constant_lookup(
 
 def procedure_integer_constant_lookup(
     member: ProcedureNode,
-    module_constants: Mapping[str, int | None],
+    module_constants: Mapping[str, float | None],
     symbols: ModuleSymbols,
     project_visible: Sequence[VbaSymbol] | None,
     activity: ConditionalActivityTracker | None,
@@ -728,8 +705,12 @@ def procedure_integer_constant_lookup(
 ) -> IntegerConstantLookup:
     """The integer-constant lookup for one procedure: its own `Const`s over the
     module's, resolved the way names resolve from inside that procedure."""
-    procedure_constants = dict(module_constants)
-    collect_body_literal_integer_constants(member.body, procedure_constants, activity)
+    own: dict[str, float | None] = {}
+    collect_body_literal_integer_constants(member.body, own, activity)
     return scoped_integer_constant_lookup(
-        procedure_constants, symbols, procedure_symbol_for(symbols, member), project_visible, model
+        module_constants if not own else {**module_constants, **own},
+        symbols,
+        procedure_symbol_for(symbols, member),
+        project_visible,
+        model,
     )

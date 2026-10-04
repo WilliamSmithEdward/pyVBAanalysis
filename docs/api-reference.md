@@ -53,7 +53,10 @@ These are re-exported at the package root for convenience:
 * `read_office_project(path)` returns an `OfficeProject`: the container's
   `modules`, the `host` its extension implies, and `referenced_hosts`, the other
   Office libraries its project references (`None` when the reference list could
-  not be read).
+  not be read). It also carries `referenced_libraries` (all reference names),
+  `workbook_sheets` (saved Excel sheet names and kinds in tab order), and
+  `project_constants` (Conditional Compilation Arguments). Reference and sheet
+  metadata is `None` when unreadable and an empty list when known to be empty.
 * A `LoadedModule` carries a module's `name`, `kind`, and `source` (the code body
   the analyzer reads), plus `designer_block`, the export header the reader stripped
   ahead of `source` (empty when there was none).

@@ -127,8 +127,11 @@ def tokenize(src: str) -> list[VbaToken]:
             while pos < length and _is_ident_part(src[pos]):
                 pos = _ASCII_IDENT_RUN_RE.match(src, pos + 1).end()  # type: ignore[union-attr]
             word = src[start_pos:pos]
-            if word.lower() == "rem" and at_statement_start:
+            if word.lower() == "rem" and (at_statement_start or not _rem_stays_word(tokens)):
                 # Rem comment (MS-VBAL 3.3.5.2): rest of line is comment.
+                # After a statement it is one only in a one-line If's Then or Else
+                # list, and a syntax error elsewhere; either way its words are not
+                # code, and rem-after-statement judges the place (XLIDE issue #231).
                 pos = _comment_end(src, pos)
                 kind = TokenKind.COMMENT
             else:
@@ -234,6 +237,21 @@ def tokenize(src: str) -> list[VbaToken]:
 
     settle_contextual_keywords(tokens)
     return tokens
+
+
+def _rem_stays_word(tokens: list[VbaToken]) -> bool:
+    """True when a Rem after the last token is a word rather than a comment: a
+    member name after ``.`` or ``!``, or right after Then, where the VBE reads
+    ``If x Then Rem note`` as a one-line If whose statement is refused
+    (rem-after-then), not as a block If with a comment."""
+    if not tokens:
+        return False
+    last = tokens[-1]
+    return (
+        last.raw_text == "."
+        or last.raw_text == "!"
+        or (last.kind is TokenKind.KEYWORD and last.raw_text.lower() == "then")
+    )
 
 
 def _comment_end(src: str, start: int) -> int:
@@ -359,13 +377,29 @@ def _has_exponent_tail(src: str, pos: int) -> bool:
 # date-separator, so the grammar is ambiguous; the matchers return every candidate
 # end position and the body is accepted if any reading consumes it exactly.
 
-_MONTH_NAMES = frozenset(
-    (
-        "january", "february", "march", "april", "may", "june", "july", "august",
-        "september", "october", "november", "december",
-        "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
-    )
+_MONTH_NAMES = (
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
 )
+
+_LOWER_LETTERS_RE = re.compile(r"[a-z]+")
+
+
+def date_literal_month(word: str) -> int | None:
+    """The month (1 to 12) a date literal's month name spells, or None.
+    MS-VBAL 3.3.3 names the full name and three letters; the VBE takes any
+    prefix of three letters or more, with a period after it or not:
+    ``#Sept 1, 2000#``, ``#Januar 1, 2000#``, ``#Jan. 1, 2000#`` compile, and
+    ``#Ja 1, 2000#`` does not (XLIDE issue #190, measured in Excel 16.0)."""
+    lower = word.lower()
+    if lower.endswith("."):
+        lower = lower[:-1]
+    if len(lower) < 3 or _LOWER_LETTERS_RE.fullmatch(lower) is None:
+        return None
+    for index, name in enumerate(_MONTH_NAMES):
+        if name.startswith(lower):
+            return index + 1
+    return None
 
 
 def _is_date_literal_body(body: str) -> bool:
@@ -417,7 +451,9 @@ def _date_part_end(s: str, pos: int) -> int:
     p = pos
     while p < len(s) and (("A" <= s[p] <= "Z") or ("a" <= s[p] <= "z")):
         p += 1
-    return p if p > pos and s[pos:p].lower() in _MONTH_NAMES else -1
+    if p == pos or date_literal_month(s[pos:p]) is None:
+        return -1
+    return p + 1 if p < len(s) and s[p] == "." else p
 
 
 def _date_separator_end(s: str, pos: int) -> int:
@@ -513,4 +549,7 @@ def _lex_symbol(src: str, ch: str, p: int) -> tuple[TokenKind, int]:
         return TokenKind.PUNCTUATION, p
     if ch in ("=", "<", ">", "+", "-", "*", "/", "\\", "^", "&", "!", "?"):
         return TokenKind.OPERATOR, p
+    # Upstream joins a UTF-16 surrogate pair (an emoji) into one unknown token
+    # (XLIDE issue #234); a Python str holds such a character as one code point,
+    # so it is one token here already.
     return TokenKind.UNKNOWN, p

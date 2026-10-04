@@ -9,13 +9,13 @@ before any rule rides on it.
 from __future__ import annotations
 
 from pyvbaanalysis.diagnostics.dataflow import (
-    DataflowHooks,
+    StraightLineDataflowHooks,
     Lattice,
     tracked_locals_named_whole,
     walk_branch_merged_body,
     walk_straight_line_body,
 )
-from pyvbaanalysis.lexer.token_helpers import statement_tokens, token_name
+from pyvbaanalysis.lexer.token_helpers import cached_statement_tokens, statement_tokens, token_name
 from pyvbaanalysis.parser.nodes import ProcedureNode
 from pyvbaanalysis.parser.parse_module import parse_module
 
@@ -29,7 +29,7 @@ def _first_procedure_body(source: str) -> list:
 
 
 def _assigns_x(source: str, stmt) -> bool:
-    toks = statement_tokens(source, stmt.span.start, stmt.span.end)
+    toks = cached_statement_tokens(source, stmt.span.start, stmt.span.end)
     return len(toks) >= 2 and (token_name(toks[0]) or "").lower() == "x" and toks[1].raw_text == "="
 
 
@@ -52,7 +52,7 @@ def _track_x(source: str, *, merged: bool) -> str:
         state.clear()
         state.update(snapshot)
 
-    hooks = DataflowHooks(
+    hooks = StraightLineDataflowHooks(
         on_statement=on_statement,
         touches_in_statement=touches,
         demote_to_unknown=demote,
@@ -62,7 +62,7 @@ def _track_x(source: str, *, merged: bool) -> str:
         lattice=Lattice(init="unset", good="set", unknown="unknown"),
     )
     walk = walk_branch_merged_body if merged else walk_straight_line_body
-    walk(_first_procedure_body(source), lambda node: False, hooks)
+    walk(source, _first_procedure_body(source), lambda node: False, hooks)
     return state["x"]
 
 
@@ -85,7 +85,12 @@ def test_branch_merge_of_if_blocks_nested_past_the_recursion_limit() -> None:
         + "End Sub"
     )
     assert _track_x(src, merged=True) == "set"
-    assert _track_x(src, merged=False) == "unknown"
+    # A body with no label, jump or Resume runs in order, so the straight-line
+    # walk enters its blocks too (XLIDE 63aab6df).
+    assert _track_x(src, merged=False) == "set"
+    # A label keeps the conservative walk, which demotes what the block touches.
+    labelled = src.replace("Sub S\n", "Sub S\nStart:\n", 1)
+    assert _track_x(labelled, merged=False) == "unknown"
 
 
 def test_if_without_else_demotes_on_both_walks() -> None:
@@ -98,8 +103,11 @@ def test_balanced_if_set_on_every_arm_merges_to_good() -> None:
     # The precision win: branch merge proves x is set on every path.
     src = "Sub S\n    If c Then\n        x = 1\n    Else\n        x = 2\n    End If\nEnd Sub"
     assert _track_x(src, merged=True) == "set"
-    # The conservative straight-line walk demotes it.
-    assert _track_x(src, merged=False) == "unknown"
+    # The straight-line walk merges a structured body's arms as well (XLIDE
+    # 63aab6df); with a label in the body it stays conservative and demotes it.
+    assert _track_x(src, merged=False) == "set"
+    labelled = src.replace("Sub S\n", "Sub S\nStart:\n", 1)
+    assert _track_x(labelled, merged=False) == "unknown"
 
 
 def test_if_set_on_one_arm_only_merges_to_unknown() -> None:

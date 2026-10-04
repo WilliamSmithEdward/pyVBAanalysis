@@ -184,3 +184,11 @@ class StatementCursor:
 def code_tokens(statement: LogicalStatement) -> list[VbaToken]:
     """Significant tokens excluding any trailing comment (MS-VBAL 3.3.1)."""
     return [t for t in statement.tokens if t.kind is not TokenKind.COMMENT]
+
+
+def is_comment_line(statement: LogicalStatement) -> bool:
+    """A line that holds only a comment, ``'`` or ``Rem``. Inside a procedure it
+    is no statement (MS-VBAL 3.3.1): the flow rules read one as unreachable
+    after Exit, or as the line a GoSub target is fallen into from (XLIDE issue
+    #249)."""
+    return all(t.kind is TokenKind.COMMENT for t in statement.tokens)

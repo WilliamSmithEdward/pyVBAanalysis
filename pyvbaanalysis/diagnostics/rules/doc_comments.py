@@ -39,6 +39,7 @@ from ...docs.doc_comment import (
     line_start_at,
     scan_doc_tags,
 )
+from ...lexer.token_helpers import first_token_at_or_after
 from ...parser.nodes import (
     DeclareNode,
     EventNode,
@@ -358,11 +359,10 @@ class _DocBlock:
         return f"{prefix}{content}{self._eol}"
 
     def _line_at(self, offset: int) -> DocBlockLine:
-        found = self.lines[0]
-        for line in self.lines:
-            if line.start <= offset:
-                found = line
-        return found
+        index = first_token_at_or_after(self.lines, offset)
+        if index == len(self.lines) or self.lines[index].start > offset:
+            index -= 1
+        return self.lines[max(0, index)]
 
     def _line_end(self, line: DocBlockLine) -> int:
         return line.text_start + len(line.text)

@@ -195,3 +195,25 @@ def test_removing_a_misplaced_or_repeated_tag() -> None:
     assert _fixes(_doc_findings(repeated)[0]) == [
         ("Remove the repeated <summary>", False, [(28, 56, "")])
     ]
+
+
+def test_scan_doc_tags_reads_spans_across_lines() -> None:
+    from pyvbaanalysis.docs.doc_comment import leading_doc_lines, scan_doc_tags
+    from pyvbaanalysis.parser.nodes import Span
+
+    source = (
+        "''' <summary>Two\n"
+        "''' lines.</summary>\n"
+        "''' <param  name = \"x &amp; y\" type=\"Long\"/>\n"
+        "''' <returns>Open\n"
+        "Public Function F(x As Long) As Long\nEnd Function\n"
+    )
+    tags = scan_doc_tags(leading_doc_lines(source, source.index("Public")))
+    assert tags is not None
+    summary, param, returns = tags
+    assert (summary.tag, summary.text, summary.open) == ("summary", "Two lines.", Span(4, 13))
+    assert summary.end == source.index("</summary>") + len("</summary>")
+    assert (param.name, param.has_hints, param.text, param.end) == ("x & y", True, "", param.open.end)
+    value_start = source.index("x &amp;")
+    assert param.name_span == Span(value_start, value_start + len("x &amp; y"))
+    assert (returns.tag, returns.text, returns.end) == ("returns", None, None)

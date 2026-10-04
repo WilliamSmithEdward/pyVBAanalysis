@@ -58,8 +58,12 @@ def fuzz_parser(data):
     parse_module(source_of(data))
 
 
+def _raise_internal_error(error, where):
+    raise error
+
+
 def fuzz_rules(data):
-    _run_rules(source_of(data), OPTIONS)
+    _run_rules(source_of(data), OPTIONS, _raise_internal_error)
 
 
 TARGETS = {"lexer": fuzz_lexer, "parser": fuzz_parser, "rules": fuzz_rules}

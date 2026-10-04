@@ -215,3 +215,44 @@ def test_inactive_branch_statements_not_visited(monkeypatch: pytest.MonkeyPatch)
     src = "Sub S\n#If Win32 Then\n    a = 1\n#Else\n    b = 2\n#End If\nEnd Sub"
     analyze_module(src)
     assert count["n"] == 1  # only the active (#Else) branch statement is walked
+
+
+def test_block_headers_reach_only_the_rules_that_take_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    # registry.ts blockHeaders (XLIDE issue #233): a For's bounds line is a
+    # statement for a rule that asks for headers, and for no other.
+    seen: dict[str, list[str]] = {"with": [], "without": []}
+
+    def factory(key: str):  # type: ignore[no-untyped-def]
+        def make(ctx, push):  # type: ignore[no-untyped-def]
+            def visitor(proc):  # type: ignore[no-untyped-def]
+                def on_stmt(stmt):  # type: ignore[no-untyped-def]
+                    seen[key].append(ctx.source[stmt.span.start : stmt.span.end].strip())
+                return on_stmt
+            return visitor
+        return make
+
+    monkeypatch.setattr(
+        am_mod,
+        "DIAGNOSTIC_RULE_REGISTRY",
+        (
+            DiagnosticRuleEntry(name=_ERROR_RULE, procedure_statements=factory("with"), block_headers=True),
+            DiagnosticRuleEntry(name=_ERROR_RULE, procedure_statements=factory("without")),
+        ),
+    )
+    analyze_module("Sub S\n    For i = 1 To 2\n        x = i\n    Next\nEnd Sub")
+    assert seen["without"] == ["x = i"]
+    assert "x = i" in seen["with"] and any(text.startswith("For i") for text in seen["with"])
+
+
+def test_own_object_member_names() -> None:
+    from pyvbaanalysis.diagnostics.context import own_object_member_names
+
+    def names(**kwargs: object) -> set[str]:
+        return set(own_object_member_names(AnalyzeModuleOptions(**kwargs)))  # type: ignore[arg-type]
+
+    sheet = names(module_name="Sheet1", module_kind=ModuleSymbolKind.DOCUMENT)
+    assert {"usedrange", "shapes"} <= sheet
+    assert {"fullname", "saved"} <= names(module_name="ThisWorkbook", module_kind=ModuleSymbolKind.DOCUMENT)
+    assert {"controls", "tag", "repaint"} <= names(module_name="UserForm1", module_kind=ModuleSymbolKind.USERFORM)
+    assert names(module_name="Module1", module_kind=ModuleSymbolKind.STANDARD) == set()
+    assert names(module_kind=ModuleSymbolKind.USERFORM, designer_class="VB.Form") == set()

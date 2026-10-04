@@ -74,6 +74,16 @@ class VbaCreateProcedureStubData:
 
 
 @dataclass(frozen=True, slots=True)
+class VbaDeclareVariableData:
+    """A `Dim` the editor can insert for a name Option Explicit says is missing."""
+
+    variable_name: str
+    # The type the declaration will name, e.g. `Long` or `Variant`.
+    declared_type: str
+    edit: VbaEdit
+
+
+@dataclass(frozen=True, slots=True)
 class VbaAddLibraryReferenceData:
     """The library a project would need a reference to, lowercased (`word`)."""
 
@@ -115,6 +125,7 @@ class VbaDiagnosticData:
     remove_declaration: VbaRemoveDeclarationData | None = None
     remove_unreachable_code: VbaRemoveUnreachableCodeData | None = None
     doc_comment_fixes: tuple[VbaDocCommentFix, ...] | None = None
+    declare_variable: VbaDeclareVariableData | None = None
 
 
 @dataclass(frozen=True, slots=True)

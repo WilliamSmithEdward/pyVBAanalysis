@@ -86,10 +86,11 @@ def test_array_subscript_out_of_bounds() -> None:
     assert code not in _codes(f"Sub S\n    {single}    b(0) = 1\nEnd Sub")
     assert code in _codes(f"Sub S\n    {single}    b(6) = 1\nEnd Sub")
     assert code in _codes(f"Sub S\n    {single}    b(-1) = 1\nEnd Sub")
-    # Variable subscripts are not statically provable; ReDim'd and member-access
-    # arrays are excluded.
+    # Variable subscripts are not statically provable; member-access arrays are
+    # excluded. A ReDim gives the statements it reaches its bounds (XLIDE #238).
     assert code not in _codes(f"Sub S\n    {fixed}    a(i) = 1\nEnd Sub")
-    assert code not in _codes("Sub S\n    Dim d() As Long\n    ReDim d(1 To 3)\n    d(99) = 1\nEnd Sub")
+    assert code in _codes("Sub S\n    Dim d() As Long\n    ReDim d(1 To 3)\n    d(99) = 1\nEnd Sub")
+    assert code not in _codes("Sub S\n    Dim d() As Long\n    ReDim d(1 To 3)\n    d(3) = 1\nEnd Sub")
     assert code not in _codes(f"Sub S\n    {fixed}    obj.a(11) = 1\nEnd Sub")
 
 

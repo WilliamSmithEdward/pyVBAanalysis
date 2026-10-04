@@ -11,7 +11,9 @@ The completion-UX paths (``detectTypePosition`` / ``readPartialTypeName`` /
 ported, nor are the editor-only ``detail`` / ``documentation`` fields - no
 diagnostic rule reads them. The project subset reuses the existing
 ``VbaProjectTypeName`` (with its ``VbaProjectTypeKind``) as input rather than a
-parallel ``ProjectTypeName`` dataclass.
+parallel ``ProjectTypeName`` dataclass; ``ProjectTypeName`` names it. Upstream's
+``TypeCompletionContext`` is passed as its two fields, ``project_types`` and
+``model``.
 """
 
 from __future__ import annotations
@@ -20,9 +22,17 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from ..host.host_model import HostObjectModel, get_excel_object_model
+from ..host.host_model import (
+    HostObjectModel,
+    get_excel_object_model,
+    get_host_enums,
+    host_display_name,
+)
 from ..identity_cache import IdentityLru
 from ..symbols.symbol_model import VbaProjectTypeName
+
+# A project-defined type the caller knows about (class/document/UserForm, Type, or Enum).
+ProjectTypeName = VbaProjectTypeName
 
 # Where a candidate type name comes from. The project subset reuses the
 # VbaProjectTypeKind values (class/document/userform/enum/userType - identical
@@ -117,9 +127,21 @@ def project_type_candidates(
 
 
 def host_type_names(model: HostObjectModel) -> list[str]:
-    """Short host type names (e.g. 'Workbook') derived from the host model types."""
+    """Short host type names (e.g. 'Workbook') derived from the host model types,
+    the project's own host's first.
+
+    `Range` is in both Word and Excel, and the bare name belongs to whichever
+    library the project's host is, which is how VBA resolves it: by the reference
+    list with the host at the top. A merged model lists a referenced library's
+    keys first, so taking it as it comes handed the name to the wrong application.
+    """
+    host = f"{host_display_name(model)}.".lower()
+    keys = list(model["types"])
+    ordered = [k for k in keys if k.lower().startswith(host)] + [
+        k for k in keys if not k.lower().startswith(host)
+    ]
     out: list[str] = []
-    for qualified in model["types"]:
+    for qualified in ordered:
         short = qualified.split(".")[-1]
         if short:
             out.append(short)
@@ -151,9 +173,13 @@ def type_completion_candidates(
     # 3. OLE Automation interface types from the default stdole reference.
     for t in OLE_AUTOMATION_TYPES:
         add(t.name, t.kind, t.module_name)
-    # 4. Excel host object-model types.
+    # 4. Host object-model types, the project's own host's first.
     for name in host_type_names(resolved_model):
         add(name, "host")
+    # 5. Host enumerations: `Dim k As XlAxisType` is ordinary VBA. They come last
+    # so an object type of the same name wins.
+    for entry in get_host_enums(resolved_model):
+        add(entry["displayName"], "enum")
     return out
 
 
@@ -192,6 +218,33 @@ def external_type_candidates_in_module(module_name: str) -> tuple[TypeCompletion
     return OLE_AUTOMATION_TYPES
 
 
+# Host metadata is immutable for a model identity, as in the bare-name index:
+# group its keys by library once per model.
+_HOST_LIBRARY_INDEXES = IdentityLru()
+
+
+def _host_library_index(model: HostObjectModel) -> dict[str, dict[str, str]]:
+    """The libraries a model can answer for, by lowercased name, each mapping a
+    lowercased bare type name to the first spelling of it there. A merged model
+    carries one library per reference, which is what lets a Word document name
+    `Excel.Range`."""
+    cached = _HOST_LIBRARY_INDEXES.get(model)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    libraries: dict[str, dict[str, str]] = {}
+    for qualified in model["types"]:
+        dot = qualified.find(".")
+        if dot <= 0:
+            continue
+        by_lower = libraries.setdefault(qualified[:dot].lower(), {})
+        short = qualified[dot + 1 :]
+        lower = short.lower()
+        if not short or "." in short or lower in by_lower:
+            continue
+        by_lower[lower] = short
+    return _HOST_LIBRARY_INDEXES.put(libraries, model)  # type: ignore[no-any-return]
+
+
 def is_creatable_type_completion(candidate: TypeCompletion) -> bool:
     """True when the resolved type can be instantiated with ``New``: only project class and userform types qualify."""
     return candidate.kind == "class" or candidate.kind == "userform"
@@ -205,23 +258,40 @@ def resolve_type_name(
     """Resolve a bare or qualified type name to its single candidate, the ambiguous
     marker, or None when nothing matches (the no-false-positive gate).
 
-    A qualified ``Mod.Type`` name searches the module's project + external
-    candidates; a bare name searches the full de-duplicated candidate set and
-    returns the single match (or the ``'ambiguous'`` marker for a project-type
-    collision). With no project types the candidate list never collapses to
-    ambiguous, so the marker is reachable only via a real cross-Enum collision.
+    A qualified ``Mod.Type`` name searches the module's project types, then the
+    external ones, then the host library of that name (``Excel.Range``); a bare
+    name searches the full de-duplicated candidate set and returns the single
+    match (or the ``'ambiguous'`` marker for a project-type collision). With no
+    project types the candidate list never collapses to ambiguous, so the marker
+    is reachable only via a real cross-Enum collision.
     """
     qualified = qualified_type_name(name)
     if qualified is not None:
         member_lower = qualified.member.lower()
-        candidates = [
-            *project_type_candidates_in_module(qualified.qualifier, project_types),
-            *external_type_candidates_in_module(qualified.qualifier),
-        ]
-        return next(
-            (c for c in candidates if c.name.lower() == member_lower),
+        project = next(
+            (
+                c
+                for c in project_type_candidates_in_module(qualified.qualifier, project_types)
+                if c.name.lower() == member_lower
+            ),
             None,
         )
+        if project is not None:
+            return project
+        external = next(
+            (
+                c
+                for c in external_type_candidates_in_module(qualified.qualifier)
+                if c.name.lower() == member_lower
+            ),
+            None,
+        )
+        if external is not None:
+            return external
+        resolved_model = model if model is not None else get_excel_object_model()
+        library = _host_library_index(resolved_model).get(qualified.qualifier.lower())
+        short = library.get(member_lower) if library is not None else None
+        return TypeCompletion(name=short, kind="host") if short is not None else None
     return _bare_type_candidate_index(project_types, model).get(name.lower())
 
 

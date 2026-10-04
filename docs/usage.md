@@ -7,8 +7,9 @@ A task-oriented guide to pyVBAanalysis. Every example uses the real API; see
 ## Analyze one module from a source string
 
 `analyze_module` is the engine entry point. It takes one module's source text and
-returns that module's diagnostics. It never raises; on an internal failure it
-returns an empty list.
+returns that module's diagnostics. It never raises; a failing rule preserves
+the other rules' findings. Set `AnalyzeModuleOptions.on_internal_error` to receive
+the exception and its `AnalysisFailure` context when a check could not complete.
 
 ```python
 from pyvbaanalysis import analyze_module

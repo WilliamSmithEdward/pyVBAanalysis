@@ -35,8 +35,8 @@ from .walker import active_module_members, for_each_variable_group
 def collect_module_literal_integer_constants(
     mod: ModuleNode,
     activity: ConditionalActivityTracker | None,
-    base: Mapping[str, int | None] | None = None,
-) -> dict[str, int | None]:
+    base: Mapping[str, float | None] | None = None,
+) -> dict[str, float | None]:
     """Resolve module-level Const and Enum integer constants to their values.
 
     Only active Const groups and Enum members participate. Each value is an
@@ -51,8 +51,8 @@ def collect_module_literal_integer_constants(
             _add_raw_integer_constants(member, raw_constants, seen)
         elif isinstance(member, EnumNode):
             _add_raw_enum_integer_constants(member, raw_constants, seen)
-    base_map: Mapping[str, int | None] = {} if base is None else base
-    resolved: dict[str, int | None] = dict(base_map)
+    base_map: Mapping[str, float | None] = {} if base is None else base
+    resolved: dict[str, float | None] = dict(base_map)
     for name, value in resolve_raw_integer_constants(raw_constants, base_map).items():
         resolved[name] = value
     return resolved
@@ -60,7 +60,7 @@ def collect_module_literal_integer_constants(
 
 def collect_body_literal_integer_constants(
     body: Sequence[BodyNode],
-    constants: dict[str, int | None],
+    constants: dict[str, float | None],
     activity: ConditionalActivityTracker | None,
 ) -> None:
     """Fold a procedure body's local Const integer constants into ``constants``."""
@@ -76,7 +76,7 @@ def collect_body_literal_integer_constants(
         constants[name] = value
 
 
-def resolve_fixed_length_string_size(raw: str, constants: IntegerConstantLookup) -> int | None:
+def resolve_fixed_length_string_size(raw: str, constants: IntegerConstantLookup) -> float | None:
     """Resolve a fixed-length String size expression to an integer, or None."""
     return evaluate_integer_constant_expression(raw, constants)
 
@@ -88,7 +88,7 @@ def fold_integer_expression_tokens(
     start: int,
     end_exclusive: int,
     constants: IntegerConstantLookup,
-) -> int | None:
+) -> float | None:
     """Evaluate the integer value of a token sub-range, or None if not constant."""
     if start >= end_exclusive:
         return None

@@ -10,16 +10,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from ..conditional import ConditionalActivityTracker, inactive_node_skip
-from ..lexer.token_helpers import (
-    cached_statement_tokens,
-    token_word,
-    tokens_without_leading_line_number,
-)
-from ..parser.nodes import BodyNode, ProcedureNode, Span, is_leaf_statement, iter_body_nodes
-from .procedure_labels import (
-    collect_procedure_label_declarations,
-    collect_procedure_label_references,
-)
+from ..parser.nodes import BodyNode, ProcedureNode, is_leaf_statement, iter_body_nodes
+from .procedure_labels import statement_has_unstructured_flow
 
 
 def procedure_has_unstructured_flow(
@@ -32,31 +24,16 @@ def procedure_has_unstructured_flow(
     Any label, any GoTo / GoSub / On..GoTo / On..GoSub / Resume target, or any
     `On Error` / `Resume` statement (whose exception edges can bypass an
     assignment the merge would assume ran) forces the conservative straight-line
-    dataflow, preserving the no-false-positive contract.
+    dataflow, preserving the no-false-positive contract. Upstream memoizes the
+    result per procedure node; the port recomputes it.
     """
-    if collect_procedure_label_references(source, procedure, activity):
-        return True
-    if collect_procedure_label_declarations(source, procedure, activity):
-        return True
-    # On Error Resume Next / On Error GoTo 0 / bare Resume carry no label, so the
-    # collectors above miss them; scan for them directly.
-    return _has_on_error_or_resume_statement(procedure.body, source, activity)
+    return _has_unstructured_statement(procedure.body, source, activity)
 
 
-def _has_on_error_or_resume_statement(
+def _has_unstructured_statement(
     body: Sequence[BodyNode], source: str, activity: ConditionalActivityTracker | None
 ) -> bool:
     return any(
-        is_leaf_statement(node) and _is_on_error_or_resume(source, node.span)
+        is_leaf_statement(node) and statement_has_unstructured_flow(source, node.span)
         for node in iter_body_nodes(body, inactive_node_skip(activity))
     )
-
-
-def _is_on_error_or_resume(source: str, span: Span) -> bool:
-    toks = tokens_without_leading_line_number(cached_statement_tokens(source, span.start, span.end))
-    if not toks:
-        return False
-    first = token_word(toks[0])
-    if first == "resume":
-        return True
-    return first == "on" and len(toks) > 1 and token_word(toks[1]) == "error"

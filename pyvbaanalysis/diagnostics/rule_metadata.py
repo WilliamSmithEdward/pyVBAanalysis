@@ -1,4 +1,4 @@
-"""The diagnostic rule catalogue (115 rules), loaded from vendored data.
+"""The diagnostic rule catalogue (219 rules at XLIDE 2f49b93), loaded from vendored data.
 
 Ported from the data in xlide_vscode/src/analyzer/diagnostics/ruleMetadata.ts.
 The 1500-line TypeScript object literal is vendored verbatim as
@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, TypeGuard
+from typing import Any, Literal, TypeGuard
 
 from ..evidence import DATA_DIR
 from .model import (
@@ -25,6 +25,13 @@ from .model import (
     DiagnosticSeverity,
     DiagnosticSuppressionScope,
 )
+
+# A user-configurable severity override value for an analysis rule.
+DiagnosticSeverityOverride = Literal["error", "warning", "information", "off"]
+
+# A stable rule-name key of DIAGNOSTIC_RULES (upstream's `keyof typeof
+# DIAGNOSTIC_RULES`); the catalogue is data here, so the type is a plain string.
+DiagnosticRuleName = str
 
 DEFAULT_DIAGNOSTIC_SUPPRESSION_SCOPES: tuple[DiagnosticSuppressionScope, ...] = (
     DiagnosticSuppressionScope.BLOCK,
@@ -190,12 +197,12 @@ def diagnostic_metadata_for_code(code: str | None) -> DiagnosticRuleMetadata | N
     return _METADATA_BY_CODE.get(normalized)
 
 
-def is_diagnostic_severity_override(value: object) -> TypeGuard[str]:
+def is_diagnostic_severity_override(value: object) -> TypeGuard[DiagnosticSeverityOverride]:
     """True when a raw value is part of the severity-override vocabulary."""
     return value in _SEVERITY_OVERRIDE_VALUES
 
 
-def allowed_diagnostic_severity_overrides_for_code(code: str | None) -> list[str]:
+def allowed_diagnostic_severity_overrides_for_code(code: str | None) -> list[DiagnosticSeverityOverride]:
     """Severity-override choices allowed for one diagnostic code."""
     meta = diagnostic_metadata_for_code(code)
     if meta is None:
@@ -205,7 +212,7 @@ def allowed_diagnostic_severity_overrides_for_code(code: str | None) -> list[str
     return ["off"]
 
 
-def normalize_diagnostic_severity_override(code: str | None, value: object) -> str | None:
+def normalize_diagnostic_severity_override(code: str | None, value: object) -> DiagnosticSeverityOverride | None:
     """Normalize one guarded override; invalid or disallowed values become None."""
     if not is_diagnostic_severity_override(value):
         return None
@@ -248,17 +255,74 @@ def diagnostic_suppression_scopes_for_code(
     return meta.suppression_scopes
 
 
+def all_diagnostic_rule_metadata() -> list[DiagnosticRuleMetadata]:
+    """Metadata for every active diagnostic rule, structural ones included, sorted by
+    stable diagnostic code. (Codes are lowercase ASCII words and hyphens, where
+    upstream's localeCompare and code-point order agree.)"""
+    return sorted(_METADATA_BY_CODE.values(), key=lambda meta: meta.code)
+
+
+def normalize_diagnostic_severity_overrides(value: object) -> dict[str, DiagnosticSeverityOverride]:
+    """Normalize a user-provided map keyed by stable diagnostic code: codes are
+    trimmed and lowercased, invalid or disallowed values dropped, and the result is
+    sorted by code."""
+    if not isinstance(value, Mapping):
+        return {}
+    normalized: dict[str, DiagnosticSeverityOverride] = {}
+    for raw_code, raw_severity in value.items():
+        code = normalize_diagnostic_rule_code(raw_code)
+        severity = normalize_diagnostic_severity_override(code, raw_severity)
+        if code and severity:
+            normalized[code] = severity
+    return dict(sorted(normalized.items()))
+
+
+def normalize_diagnostic_rule_code(code: object) -> str | None:
+    """A code trimmed and lowercased, or None for an empty or non-string one."""
+    return _normalize_code(code)
+
+
+def diagnostic_source_for_code(code: str | None) -> str:
+    """The Problems-panel source label for a diagnostic code."""
+    meta = diagnostic_metadata_for_code(code)
+    if meta is None:
+        return XLIDE_DIAGNOSTIC_SOURCE
+    if meta.vbe_compile_equivalent:
+        return f"{XLIDE_DIAGNOSTIC_SOURCE}/VBE"
+    if meta.diagnostic_kind is DiagnosticEvidenceKind.DETERMINISTIC_RUNTIME_ERROR:
+        return f"{XLIDE_DIAGNOSTIC_SOURCE}/runtime"
+    if meta.diagnostic_kind is DiagnosticEvidenceKind.RUNTIME_RISK:
+        return f"{XLIDE_DIAGNOSTIC_SOURCE}/risk"
+    if meta.diagnostic_kind is DiagnosticEvidenceKind.STYLE_POLICY:
+        return f"{XLIDE_DIAGNOSTIC_SOURCE}/style"
+    return XLIDE_DIAGNOSTIC_SOURCE
+
+
+def is_xlide_diagnostic_source(source: str | None) -> bool:
+    """True for the canonical and the metadata-expanded diagnostic source labels."""
+    return source is not None and (
+        source == XLIDE_DIAGNOSTIC_SOURCE or source.startswith(f"{XLIDE_DIAGNOSTIC_SOURCE}/")
+    )
+
+
 __all__ = [
     "DiagnosticRuleMetadata",
+    "DiagnosticRuleName",
+    "DiagnosticSeverityOverride",
     "DIAGNOSTIC_RULES",
     "STRUCTURAL_DIAGNOSTIC_RULES",
     "DEFAULT_DIAGNOSTIC_SUPPRESSION_SCOPES",
     "XLIDE_DIAGNOSTIC_SOURCE",
     "load_rule_metadata",
     "rule_metadata_by_code",
+    "all_diagnostic_rule_metadata",
     "diagnostic_metadata_for_code",
+    "diagnostic_source_for_code",
     "is_diagnostic_severity_override",
+    "is_xlide_diagnostic_source",
     "allowed_diagnostic_severity_overrides_for_code",
+    "normalize_diagnostic_rule_code",
     "normalize_diagnostic_severity_override",
+    "normalize_diagnostic_severity_overrides",
     "diagnostic_suppression_scopes_for_code",
 ]

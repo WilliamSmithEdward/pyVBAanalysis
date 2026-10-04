@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from ..lexer.token_helpers import is_ident_like, relational_operator_at, token_name, token_word
 from ..lexer.token_kinds import TokenKind, VbaToken
+from .expression_limits import MAX_EXPRESSION_DEPTH
 from .nodes import (
     AddressOfExpr,
     Argument,
@@ -137,7 +138,6 @@ def parse_parenless_arguments(
 # a long unary chain) cannot overflow the interpreter stack and break the
 # documented "never throws" contract. Mirrors integer_constant_expression's
 # _MAX_RECURSION_DEPTH.
-_MAX_EXPRESSION_DEPTH = 256
 
 
 class _ExpressionParser:
@@ -164,10 +164,10 @@ class _ExpressionParser:
 
     def _enter_expression_depth(self) -> bool:
         """Increments the recursion-depth counter; returns False (and emits a
-        diagnostic, halting the parse) once _MAX_EXPRESSION_DEPTH is reached, so
+        diagnostic, halting the parse) once MAX_EXPRESSION_DEPTH is reached, so
         the recursive descent below cannot overflow the stack on adversarial
         input."""
-        if self._depth >= _MAX_EXPRESSION_DEPTH:
+        if self._depth >= MAX_EXPRESSION_DEPTH:
             self._diag(self._peek(), "Expression nesting is too deep.")
             self.index = self._to
             return False
@@ -461,6 +461,18 @@ class _ExpressionParser:
         back to a raw statement; an empty trailing slot after a comma (Foo a,) is
         treated as malformed rather than an omission.
         """
+        try:
+            return self._parse_parenless_argument_list_inner()
+        except RecursionError:
+            # Upstream stops at MAX_EXPRESSION_DEPTH and every enclosing level
+            # gives up; the Python stack can run out first, a few frames per
+            # level, so that ends the same way: no argument list, a raw
+            # statement (the "never throws" contract).
+            self._diag(self._peek(), "Expression nesting is too deep.")
+            self.index = self._to
+            return None
+
+    def _parse_parenless_argument_list_inner(self) -> list[Argument] | None:
         args: list[Argument] = []
         while True:
             arg = self._parse_argument(None)

@@ -7,17 +7,22 @@ need. The editor's hover rendering of a parsed doc is out of scope for this port
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
+from collections.abc import Iterator
 from dataclasses import dataclass
 
+from ..js_compat import JS_WHITESPACE, js_trim
 from ..parser.nodes import Span
 
 _XLIDE_DIRECTIVE_RE = re.compile(r"^'+\s*@xlide-\S", re.IGNORECASE)
-_HAS_TAG_RE = re.compile(r"<(summary|param|returns|remarks|example|signature)\b", re.IGNORECASE)
-_OPENING_TAG_RE = re.compile(
-    r"<(summary|param|returns|remarks|example|signature)\b([^>]*?)(/?)>", re.IGNORECASE
+# ASCII: JavaScript's `\b` and case-insensitive matching are ASCII-only.
+_HAS_TAG_RE = re.compile(
+    r"<(summary|param|returns|remarks|example|signature)\b", re.IGNORECASE | re.ASCII
 )
-_ATTRIBUTE_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*"([^"]*)"')
-_WHITESPACE_RUN_RE = re.compile(r"\s+")
+_JS_S = "[" + JS_WHITESPACE + "]"
+_ATTRIBUTE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+_ATTRIBUTE_VALUE_OPENING_RE = re.compile(_JS_S + "*=" + _JS_S + '*"')
+_WHITESPACE_RUN_RE = re.compile(_JS_S + "+")
 _LEADING_WHITESPACE_RE = re.compile(r"^[ \t]*")
 
 
@@ -43,7 +48,40 @@ def _decode_entities(text: str) -> str:
 
 def _collapse(text: str) -> str:
     """Trims and collapses internal whitespace runs (including newlines) to a space."""
-    return _WHITESPACE_RUN_RE.sub(" ", _decode_entities(text)).strip()
+    return js_trim(_WHITESPACE_RUN_RE.sub(" ", _decode_entities(text)))
+
+
+@dataclass(frozen=True, slots=True)
+class _DocAttribute:
+    # Lowercased.
+    name: str
+    # Entity-decoded and trimmed.
+    value: str
+    # Raw value coordinates relative to the attribute string.
+    start: int
+    length: int
+
+
+def _doc_attributes(raw: str) -> Iterator[_DocAttribute]:
+    """The `name="value"` attributes of a tag's attribute text, advancing over
+    attribute names without retrying every suffix of an unknown word."""
+    at = 0
+    while True:
+        name = _ATTRIBUTE_NAME_RE.search(raw, at)
+        if name is None:
+            return
+        at = name.end()
+        opening = _ATTRIBUTE_VALUE_OPENING_RE.match(raw, at)
+        if opening is None:
+            continue
+        start = opening.end()
+        end = raw.find('"', start)
+        if end < 0:
+            return
+        at = end + 1
+        yield _DocAttribute(
+            name.group(0).lower(), js_trim(_decode_entities(raw[start:end])), start, end - start
+        )
 
 
 def _strip_doc_prefix(trimmed: str) -> str:
@@ -191,41 +229,57 @@ def scan_doc_tags(lines: list[DocBlockLine]) -> list[DocTagOccurrence] | None:
         at += len(line.text) + 1
 
     def to_source(offset: int) -> int:
-        i = len(body_starts) - 1
-        while i > 0 and body_starts[i] > offset:
-            i -= 1
+        # Tags and their closing/name spans need not arrive in offset order: the
+        # last line starting at or before this offset, by binary search.
+        i = max(0, bisect_right(body_starts, offset) - 1)
         return lines[i].text_start + (offset - body_starts[i])
 
     lower = body.lower()
+    closing_offsets: dict[str, int] = {}
     tags: list[DocTagOccurrence] = []
-    for match in _OPENING_TAG_RE.finditer(body):
+    at = 0
+    while True:
+        match = _HAS_TAG_RE.search(body, at)
+        if match is None:
+            break
         tag = match.group(1).lower()
-        open_end = match.end()
+        angle = body.find(">", match.end())
+        if angle < 0:
+            break
+        open_end = angle + 1
+        self_closing = body[angle - 1] == "/"
+        at = open_end
         occurrence = DocTagOccurrence(
             tag=tag, open=Span(to_source(match.start()), to_source(open_end))
         )
         # Read the attributes as the parser does: the last of a repeated name wins.
-        attrs: dict[str, tuple[str, int, int]] = {}
+        attrs: dict[str, _DocAttribute] = {}
         attrs_start = match.start() + 1 + len(tag)
-        for attr in _ATTRIBUTE_RE.finditer(match.group(2)):
-            attrs[attr.group(1).lower()] = (
-                _decode_entities(attr.group(2)).strip(),
-                attrs_start + attr.start() + attr.group(0).index('"') + 1,
-                len(attr.group(2)),
-            )
+        raw_attrs = body[attrs_start : angle - 1 if self_closing else angle]
+        for attr in _doc_attributes(raw_attrs):
+            attrs[attr.name] = attr
         name = attrs.get("name")
-        if name is not None and name[0]:
-            occurrence.name = name[0]
-            occurrence.name_span = Span(to_source(name[1]), to_source(name[1] + name[2]))
-        occurrence.has_hints = any(attrs.get(key, ("",))[0] for key in ("type", "unit", "value"))
-        if match.group(3) == "/":
+        if name is not None and name.value:
+            occurrence.name = name.value
+            name_start = attrs_start + name.start
+            occurrence.name_span = Span(to_source(name_start), to_source(name_start + name.length))
+        occurrence.has_hints = any(
+            (hint := attrs.get(key)) is not None and hint.value for key in ("type", "unit", "value")
+        )
+        if self_closing:
             occurrence.text = ""
             occurrence.end = occurrence.open.end
         else:
-            close = lower.find(f"</{tag}>", open_end)
-            reopen = re.compile(rf"<{tag}\b").search(lower, open_end)
-            if close >= 0 and (reopen is None or close < reopen.start()):
-                occurrence.text = _collapse(body[open_end:close])
-                occurrence.end = to_source(close + len(tag) + 3)
+            # Opening tags are visited in order. A cached following close stays
+            # valid until we pass it; a missing close never needs another scan.
+            close = closing_offsets.get(tag)
+            if close is None or 0 <= close < open_end:
+                close = lower.find(f"</{tag}>", open_end)
+                closing_offsets[tag] = close
+            if close >= 0:
+                reopen = re.compile(rf"<{tag}\b", re.ASCII).search(lower, open_end)
+                if reopen is None or close < reopen.start():
+                    occurrence.text = _collapse(body[open_end:close])
+                    occurrence.end = to_source(close + len(tag) + 3)
         tags.append(occurrence)
     return tags

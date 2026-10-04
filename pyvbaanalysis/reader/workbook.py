@@ -27,7 +27,9 @@ from ..host.host_registry import host_token_for_file_name
 from ..diagnostics import VbaDiagnostic
 from ..project import analyze_project
 from ..symbols import ImplicitMember, ModuleSymbolKind
+from ..symbols.sheet_changes import WorkbookSheetInfo
 from .vbe_module import LoadedModule, loaded_module_from_text
+from .workbook_sheets import workbook_sheets
 
 # The Excel container extensions read_workbook_modules / analyze_workbook accept.
 EXCEL_EXTENSIONS = frozenset({".xlsm", ".xlsb", ".xlam", ".xls"})
@@ -187,7 +189,7 @@ def _project_constants(dir_raw: bytes | None) -> dict[str, ConditionalValue]:
 
 
 def _read_access_project(
-    pyopenvba: Any, file_path: Path
+    pyopenvba: Any, file_path: Path, metadata: _OfficeMetadata | None = None
 ) -> tuple[list[LoadedModule], list[str] | None, dict[str, ConditionalValue]]:
     """Every VBA module in an Access database, and its references' libids. Read-only
     by construction: modules come through pyOpenVBA's AccessReader, and form and
@@ -244,6 +246,8 @@ def _read_access_project(
         for module in modules
     ]
     libids = _reference_libids(info.references) if info is not None else None
+    if metadata is not None and info is not None:
+        metadata.referenced_libraries = _reference_library_names(info.references)
     return modules, libids, _project_constants(dir_raw)
 
 
@@ -362,8 +366,25 @@ def _reference_libids(references: Iterable[Any]) -> list[str]:
     return [ref.libid for ref in references if isinstance(getattr(ref, "libid", None), str)]
 
 
+def _reference_library_names(references: Iterable[Any]) -> list[str] | None:
+    names = []
+    for reference in references:
+        name = getattr(reference, "name_unicode", "") or getattr(reference, "name", "")
+        if not isinstance(name, str) or not name:
+            return None
+        names.append(name)
+    return names
+
+
+@dataclass
+class _OfficeMetadata:
+    referenced_libraries: list[str] | None = None
+    workbook_sheets: list[WorkbookSheetInfo] | None = None
+
+
 def _read_office_project(
     path: str | Path,
+    *, metadata: _OfficeMetadata | None = None,
 ) -> tuple[list[LoadedModule], list[str] | None, dict[str, ConditionalValue]]:
     """Every VBA module in an Office macro container, the libid of every library
     its project references, and its Conditional Compilation Arguments, from one
@@ -379,7 +400,7 @@ def _read_office_project(
         )
     try:
         if suffix in ACCESS_EXTENSIONS:
-            return _read_access_project(pyopenvba, file_path)
+            return _read_access_project(pyopenvba, file_path, metadata)
         if suffix in WORD_EXTENSIONS:
             opener = pyopenvba.WordFile
         elif suffix in POWERPOINT_EXTENSIONS:
@@ -399,6 +420,10 @@ def _read_office_project(
                     )
                 )
             libids = _reference_libids(project.references)
+            if metadata is not None:
+                metadata.referenced_libraries = _reference_library_names(project.references)
+                if suffix in EXCEL_EXTENSIONS:
+                    metadata.workbook_sheets = workbook_sheets(container, suffix)
             constants = _project_constants(getattr(project, "dir_raw", None))
             controls = _form_controls(container)
         modules = [
@@ -426,6 +451,10 @@ class OfficeProject:
     is different from an empty list: a project whose references were not seen has
     not been shown to lack any library.
 
+    ``referenced_libraries`` contains the names of all referenced libraries;
+    ``workbook_sheets`` contains saved Excel sheet names and kinds in tab order.
+    Each is None when that metadata could not be read.
+
     ``project_constants`` are the project's Conditional Compilation Arguments
     (Tools > Project Properties in the VBE), which every module's ``#If`` sees.
     """
@@ -434,6 +463,8 @@ class OfficeProject:
     host: str | None
     referenced_hosts: list[str] | None
     project_constants: Mapping[str, ConditionalValue] = field(default_factory=dict)
+    referenced_libraries: list[str] | None = None
+    workbook_sheets: list[WorkbookSheetInfo] | None = None
 
     def conditional_compilation(
         self, caller: ConditionalCompilationEnvironment | None = None
@@ -459,13 +490,16 @@ def read_office_project(path: str | Path) -> OfficeProject:
     """Every VBA module in an Office macro container, with its host, the other
     Office libraries its project references and its Conditional Compilation
     Arguments, from one open of the container."""
-    modules, libids, constants = _read_office_project(path)
+    metadata = _OfficeMetadata()
+    modules, libids, constants = _read_office_project(path, metadata=metadata)
     host = host_token_for_file_name(Path(path).name)
     return OfficeProject(
         modules=modules,
         host=host,
         referenced_hosts=referenced_host_tokens(host, libids) if libids is not None else None,
         project_constants=constants,
+        referenced_libraries=metadata.referenced_libraries,
+        workbook_sheets=metadata.workbook_sheets,
     )
 
 
@@ -513,4 +547,6 @@ def analyze_office_file(
         # project does not reference is provably absent here, and a Word document
         # that references Excel is analyzed against both.
         referenced_hosts=project.referenced_hosts,
+        referenced_libraries=project.referenced_libraries,
+        workbook_sheets=project.workbook_sheets,
     )

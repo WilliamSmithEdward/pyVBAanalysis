@@ -131,7 +131,7 @@ def test_application_hidden_members_stay_in_bare_scope_only_without_a_global() -
             "memberSignatures": {},
         }
         if global_type:
-            types[global_type] = {"displayName": "Global", "members": []}
+            types[global_type] = {"displayName": "Global", "members": members}
             built["globalType"] = global_type
         return built
 

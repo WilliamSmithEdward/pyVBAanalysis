@@ -9,14 +9,20 @@ in Excel 16.0 (build 20326, 2026-09-26):
   `#If VBA7 Then: Debug.Print 1` -> "An # ElseIf, # Else, or # EndIf must be
   preceded by an # If clause" (the colon ends the directive, and what follows is no
   longer part of it).
+- null-directive-condition: `#If Null Then`, `#If Null = 1 Then`, or `#If N` after
+  `#Const N = Null` -> "Invalid use of Null" (issue #208).
 """
 
 from __future__ import annotations
 
 import re
-from bisect import bisect_left
 
-from ...lexer.token_kinds import TokenKind, VbaToken
+from ...conditional.conditional_compilation import (
+    ConditionalCompilationEnvironment,
+    null_condition_directives,
+)
+from ...lexer.token_helpers import first_token_at_or_after
+from ...lexer.token_kinds import TokenKind
 from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import (
     ConditionalDirectiveKind,
@@ -33,7 +39,12 @@ from ..context import PushFn
 _LINE_TERMINATOR_RE = re.compile(r"[\r\n]")
 
 
-def check_directive_forms(source: str, mod: ModuleNode, push: PushFn) -> None:
+def check_directive_forms(
+    source: str,
+    mod: ModuleNode,
+    conditional_compilation: ConditionalCompilationEnvironment | None,
+    push: PushFn,
+) -> None:
     directives: list[ConditionalDirectiveNode] = []
     for member in mod.members:
         if isinstance(member, ConditionalDirectiveNode):
@@ -65,12 +76,9 @@ def check_directive_forms(source: str, mod: ModuleNode, push: PushFn) -> None:
     # the directive's own physical line.
     tokens = tokenize_cached(source)
     for directive in directives:
-        line_end = _line_end_after(source, directive.span.end)
+        line_end = _line_end_at_or_after(source, directive.span.end)
         colon = -1
-        # Upstream walks the module's tokens from the first one, skipping those that
-        # start before the directive ends; the tokens are in source order, so a
-        # binary search finds the same first token without the walk.
-        for i in range(bisect_left(tokens, directive.span.end, key=_token_start), len(tokens)):
+        for i in range(first_token_at_or_after(tokens, directive.span.end), len(tokens)):
             tok = tokens[i]
             if tok.start >= line_end:
                 break
@@ -93,13 +101,20 @@ def check_directive_forms(source: str, mod: ModuleNode, push: PushFn) -> None:
                 'must be preceded by an # If clause").',
                 Span(following.start, line_end),
             )
+    for null_directive in null_condition_directives(mod, conditional_compilation):
+        push(
+            "nullDirectiveCondition",
+            f"This #{null_directive.directive_kind.value} condition is Null, which is neither "
+            "True nor False. This is a VBE compile error: Invalid use of Null.",
+            null_directive.span,
+        )
 
 
-def _line_end_after(source: str, start: int) -> int:
-    """Offset of the first line terminator at or after `start`."""
+def _line_end_at_or_after(source: str, start: int) -> int:
+    """Offset of the first line terminator at or after `start`.
+
+    Private copy of upstream's vbaSourceScan.ts lineEndAtOrAfter (outside the
+    analyzer tree the port mirrors).
+    """
     found = _LINE_TERMINATOR_RE.search(source, start)
     return found.start() if found is not None else len(source)
-
-
-def _token_start(tok: VbaToken) -> int:
-    return tok.start

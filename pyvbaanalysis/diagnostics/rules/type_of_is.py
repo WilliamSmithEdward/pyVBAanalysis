@@ -22,6 +22,7 @@ resolveKnownObjectAssignmentType + objectAssignmentIncompatibilityReason
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections.abc import Callable
 
@@ -32,31 +33,46 @@ from ...completion.member_access import (
     simple_type_name_for_assignment,
 )
 from ...conditional import ConditionalActivityTracker
-from ...host.host_model import get_host_members, get_host_type, resolve_host_alias
+from ...host.host_default_members import HOST_DEFAULT_MEMBERS
+from ...host.host_model import HostMember, get_host_members, get_host_type, resolve_host_alias
 from ...host.type_extensibility import host_type_resolves_when_compiling
-from ...lexer.token_kinds import TokenKind
+from ...js_compat import js_trim
+from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import (
     BinaryExpr,
+    DoBlockNode,
     ExprNode,
     IdentifierExpr,
     LiteralExpr,
     LiteralKind,
+    ModuleNode,
     ProcedureNode,
     Span,
+    StatementNode,
     TypeOfIsExpr,
+    WhileBlockNode,
+    iter_body_nodes,
 )
+from ...parser.parse_expression import parse_expression
 from ...symbols.symbol_model import ModuleSymbols
-from ...types.type_inference import type_environment_for
+from ...types.type_inference import SCALAR_OBJECT_ASSIGNMENT_REASON, type_environment_for
 from ...types.type_names import is_known_scalar_type, normalize_type
 from ..call_extraction import InferredArgumentType
-from ..context import PushFn
-from ..exprwalk import ProcedureExpressionVisitor
+from ..context import PushFn, statement_tokens
+from ..exprwalk import ProcedureExpressionVisitor, for_each_sub_expression
+from ..walker import (
+    active_module_members,
+    block_footer_line_span,
+    block_header_line_span,
+    is_inactive_node,
+    token_text,
+)
 
 _TRAILING_ARRAY_RE = re.compile(r"\s*\(\s*\)\s*$")
 
 
-def check_typeof_missing_operand(
+def check_type_of_missing_operand(
     source: str, activity: ConditionalActivityTracker | None, push: PushFn
 ) -> None:
     """`TypeOf` requires an object expression before `Is`; `TypeOf Is Y` is a syntax error."""
@@ -131,6 +147,78 @@ def check_is_operator_operands(symbols: ModuleSymbols, push: PushFn) -> Procedur
     return factory
 
 
+def check_is_operands_in_conditions(
+    source: str,
+    mod: ModuleNode,
+    symbols: ModuleSymbols,
+    activity: ConditionalActivityTracker | None,
+    push: PushFn,
+) -> None:
+    """The same check on the conditions the expression walk does not parse: a
+    single-line If's, and a Do or While loop's (XLIDE issue #325, measured in Excel
+    16.0: each is a compile error, Type mismatch)."""
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode):
+            continue
+        env = type_environment_for(symbols, member)
+
+        def check(span: Span, from_: int, to: Callable[[list[VbaToken]], int], env: dict[str, str] = env) -> None:
+            # Absolute offsets, so the parsed nodes carry the source's spans.
+            toks = [
+                dataclasses.replace(tok, start=span.start + tok.start, end=span.start + tok.end)
+                for tok in statement_tokens(source, span)
+                if tok.kind is not TokenKind.COMMENT
+            ]
+            end = to(toks)
+            if end <= from_:
+                return
+            parsed = parse_expression(toks, from_, end).expr
+            if parsed is None:
+                return
+
+            def visit_expr(expr: ExprNode) -> None:
+                if not isinstance(expr, BinaryExpr) or expr.operator != "Is":
+                    return
+                offender = _non_object_operand(expr.left, env) or _non_object_operand(expr.right, env)
+                if offender is not None:
+                    offender_span, detail = offender
+                    push(
+                        "isOperatorNonObject",
+                        f"The 'Is' operator requires object operands, but {detail}, "
+                        "which is not an object.",
+                        offender_span,
+                    )
+
+            for_each_sub_expression(parsed, visit_expr)
+
+        def if_condition_end(toks: list[VbaToken]) -> int:
+            if token_text(toks[0] if toks else None) != "if":
+                return -1
+            return next((i for i, tok in enumerate(toks) if token_text(tok) == "then"), -1)
+
+        def whole(toks: list[VbaToken]) -> int:
+            return len(toks)
+
+        for node in iter_body_nodes(member.body, lambda node: is_inactive_node(activity, node)):
+            if isinstance(node, StatementNode) and node.single_line_if_branches:
+                check(node.span, 1, if_condition_end)
+            elif isinstance(node, (DoBlockNode, WhileBlockNode)):
+                header = block_header_line_span(source, node.span)
+                head_toks = statement_tokens(source, header)
+                head0 = token_text(head_toks[0] if head_toks else None)
+                head1 = token_text(head_toks[1] if len(head_toks) > 1 else None)
+                from_ = 2 if head0 == "do" and head1 in ("while", "until") else 1 if head0 == "while" else -1
+                if from_ > 0:
+                    check(header, from_, whole)
+                if isinstance(node, DoBlockNode):
+                    footer = block_footer_line_span(source, node.span)
+                    foot_toks = statement_tokens(source, footer)
+                    if token_text(foot_toks[0] if foot_toks else None) == "loop" and token_text(
+                        foot_toks[1] if len(foot_toks) > 1 else None
+                    ) in ("while", "until"):
+                        check(footer, 2, whole)
+
+
 # -- checkTypeOfIsCompatibility (always-False) ------------------------------
 
 
@@ -153,32 +241,74 @@ def _implements_object_type(
     return False
 
 
+_SCRIPTING_TYPE_RE = re.compile(r"^scripting\.(\w+)\Z", re.ASCII)
+_WORKSHEET_OR_CHART_KEY_RE = re.compile(r"(^|\.)(worksheet|chart)$")
+
+ObjectTypeResolver = Callable[[str | None, MemberCompletionContext], KnownObjectAssignmentType | None]
+
+
 def object_assignment_incompatibility_reason(
     expected_raw: str | None,
     actual: InferredArgumentType | None,
     member_ctx: MemberCompletionContext,
+    resolve_type: ObjectTypeResolver = resolve_known_object_assignment_type,
+    share_interfaces: Callable[[str, str], bool] | None = None,
 ) -> str | None:
     """Port of objectAssignmentIncompatibilityReason: why an object-position target
     typed `expected_raw` cannot accept `actual`, or None when it can (the no-FP gate).
 
     Reused by the member-assignment Set branch. Returns the human reason string XLIDE
     emits; None whenever the operands are not both provably-incompatible object types
-    (Variant/Nothing/generic/implements all stay quiet)."""
-    expected = resolve_known_object_assignment_type(expected_raw, member_ctx)
+    (Variant/Nothing/Object/implements all stay quiet)."""
+    expected = resolve_type(expected_raw, member_ctx)
     if expected is None or actual is None:
         return None
     actual_type = normalize_type(actual.type_)
     if not actual_type or actual_type in ("variant", "nothing"):
         return None
     if is_known_scalar_type(actual_type):
-        return "An object assignment requires an object value."
-    if expected.kind == "generic":
+        return SCALAR_OBJECT_ASSIGNMENT_REASON
+    # Object takes any object and could be any. VBA's Collection is a class
+    # like any other here: `Set c = New Square` into a Collection, or
+    # `Set q = New Collection` into a Square, raises 13 (XLIDE issue #202).
+    if expected.kind == "generic" and expected.key == "object":
         return None
-    actual_object = resolve_known_object_assignment_type(actual.type_, member_ctx)
-    if actual_object is None or actual_object.kind == "generic":
+    actual_object = resolve_type(actual.type_, member_ctx)
+    if actual_object is None:
+        # A Scripting object CreateObject made is no Collection, sheet or class
+        # of the project: 13 (XLIDE issue #685, measured in Excel 16.0).
+        scripting = _SCRIPTING_TYPE_RE.match(actual_type)
+        if scripting is not None:
+            return (
+                f"This object type is not compatible with {expected.display}."
+                if expected.key != actual_type and expected.key != scripting.group(1)
+                else None
+            )
+        # ActiveSheet, a Worksheet or a Chart: anything else refuses it (issue #685).
+        return (
+            f"This object type is not compatible with {expected.display}."
+            if actual_type == "worksheet or chart"
+            and _WORKSHEET_OR_CHART_KEY_RE.search(expected.key) is None
+            else None
+        )
+    if actual_object.kind == "generic" and actual_object.key == "object":
+        return None
+    # DAO's types are known only by their default members, not by what each
+    # one implements: a Recordset2 is a Recordset.
+    if expected.key.startswith("dao.") or actual_object.key.startswith("dao."):
         return None
     if expected.key == actual_object.key:
         return None
+    if expected.kind == "generic" or actual_object.kind == "generic":
+        # A project class that implements Collection can stand in for one.
+        project = (
+            actual_object
+            if actual_object.kind == "project"
+            else expected if expected.kind == "project" else None
+        )
+        if project is not None and any(name.lower() == "collection" for name in project.implements):
+            return None
+        return f"This object type is not compatible with {expected.display}."
     if actual_object.kind == "host" and _HOST_VALUES_ALSO_OF_TYPE.get(actual_object.key) == expected.key:
         return None
     if actual_object.kind == "project" and _implements_object_type(actual_object, expected):
@@ -191,7 +321,7 @@ def object_assignment_incompatibility_reason(
     if (
         expected.kind == "project"
         and actual_object.kind == "project"
-        and _project_types_can_share_instance(expected, actual_object, member_ctx)
+        and _project_types_can_share_instance(expected, actual_object, member_ctx, share_interfaces)
     ):
         return None
     return f"This object type is not compatible with {expected.display}."
@@ -239,35 +369,87 @@ def object_let_assignment_verdict(expected_raw: str | None, member_ctx: MemberCo
             default_member.signature or ""
         ) is not None
         return "argument" if takes_argument else "lets"
-    members = get_host_members(expected_raw or "", member_ctx.model)
-    host_default = next((member for member in members if member["name"] == "_Default"), None)
+    alias = resolve_host_alias(expected_raw or "", member_ctx.model)
+    library = _library_object_type(expected_raw)
+    resolved = alias if alias is not None else library if library is not None else expected_raw or ""
+    library_default = _library_default_verdict(resolved)
+    if library_default is not None:
+        return library_default
+    host_default = _host_default_member(resolved, member_ctx)
     if host_default is not None:
-        takes_argument = (
+        if (
             host_default.get("kind") == "method"
             or _HAS_PARAMETERS_RE.search(host_default.get("signature") or "") is not None
-        )
-        return "argument" if takes_argument else "lets"
-    return "noDefault" if _host_type_is_closed(expected_raw or "", member_ctx) else "unknown"
+        ):
+            return "argument"
+        # The model keeps no parameters for a default property. One typed as
+        # an element of the collection is its Item and takes the index:
+        # Hyperlinks, Areas, Borders, Windows, Workbooks. One typed as a value
+        # (Range, Style, Application) gives it. One typed Object is not
+        # judged: Worksheets read as a value raises 13, Sheets 450 (XLIDE issue
+        # #221, measured in Excel 16.0).
+        if normalize_type(host_default.get("declaredType")) == "object":
+            return "unknown"
+        return "argument" if host_default.get("returns") else "lets"
+    return "noDefault" if _host_type_has_no_default(resolved, member_ctx) else "unknown"
 
 
-def _host_type_is_closed(type_name: str, member_ctx: MemberCompletionContext) -> bool:
-    """Whether the host model's member list for the type proves a member absent:
-    the list is complete AND the type library resolves members while compiling
-    (the same two facts member-not-found needs)."""
-    alias = resolve_host_alias(type_name, member_ctx.model)
-    resolved = alias if alias is not None else type_name
-    host_type = get_host_type(resolved, member_ctx.model)
-    return (
-        host_type is not None
-        and host_type.get("exhaustive") is True
-        and host_type_resolves_when_compiling(resolved)
+def _library_default_verdict(qualified: str, depth: int = 0) -> str | None:
+    """What a library type's default member (DISPID 0) does to a Let: "argument"
+    when it must be given one, else "lets", following a default property that
+    returns another library type with a default of its own."""
+    found = HOST_DEFAULT_MEMBERS.get(qualified)
+    if found is None:
+        return None
+    if found.kind == "method" or found.required > 0:
+        return "argument"
+    if depth < 4 and found.returns in HOST_DEFAULT_MEMBERS:
+        return _library_default_verdict(found.returns, depth + 1)
+    return "lets"
+
+
+_library_types_by_lower: dict[str, str] | None = None
+_DAO_PREFIX_RE = re.compile(r"^dao\.", re.IGNORECASE)
+
+
+def _library_object_type(type_name: str | None) -> str | None:
+    """A DAO type as the default-member table spells it: `dao.recordset` is
+    `DAO.Recordset`."""
+    global _library_types_by_lower
+    if not type_name or _DAO_PREFIX_RE.match(js_trim(type_name)) is None:
+        return None
+    if _library_types_by_lower is None:
+        _library_types_by_lower = {
+            key.lower(): key for key in HOST_DEFAULT_MEMBERS if key.startswith("DAO.")
+        }
+    return _library_types_by_lower.get(js_trim(type_name).lower())
+
+
+def _host_default_member(qualified: str, member_ctx: MemberCompletionContext) -> HostMember | None:
+    return next(
+        (member for member in get_host_members(qualified, member_ctx.model) if member["name"] == "_Default"),
+        None,
     )
+
+
+def _host_type_has_no_default(resolved: str, member_ctx: MemberCompletionContext) -> bool:
+    """Whether the host model's member list for the type proves it has no default
+    member: the list is complete, and the type library resolves members while
+    compiling or the type is Excel's."""
+    host_type = get_host_type(resolved, member_ctx.model)
+    if host_type is None or host_type.get("exhaustive") is not True:
+        return False
+    return host_type_resolves_when_compiling(resolved) or _EXCEL_PREFIX_RE.match(resolved) is not None
+
+
+_EXCEL_PREFIX_RE = re.compile(r"^excel\.", re.IGNORECASE)
 
 
 def _project_types_can_share_instance(
     expected: KnownObjectAssignmentType,
     actual: KnownObjectAssignmentType,
     member_ctx: MemberCompletionContext,
+    share_interfaces: Callable[[str, str], bool] | None = None,
 ) -> bool:
     """Whether one project class can carry a value declared as the other: the
     expected class implements the actual type (a cast from an interface back to
@@ -275,6 +457,8 @@ def _project_types_can_share_instance(
     interfaces of one object)."""
     if _implements_object_type(expected, actual):
         return True
+    if share_interfaces is not None:
+        return share_interfaces(expected.key, actual.key)
     wanted = {expected.key, actual.key}
     for project_type in member_ctx.project_class_members or []:
         implemented = {name.lower() for name in project_type.implements or []}
@@ -352,7 +536,7 @@ def _check_typeof_is(
     )
 
 
-def check_typeof_is_compatibility(
+def check_type_of_is_compatibility(
     symbols: ModuleSymbols, member_ctx: MemberCompletionContext, push: PushFn
 ) -> ProcedureExpressionVisitor:
     def factory(member: ProcedureNode) -> Callable[[ExprNode], None]:
@@ -365,3 +549,7 @@ def check_typeof_is_compatibility(
         return visitor
 
     return factory
+
+
+# The names the registry used before the 2f49b93 sync; the registry (F7) moves to
+# the names above, and these go with it.
