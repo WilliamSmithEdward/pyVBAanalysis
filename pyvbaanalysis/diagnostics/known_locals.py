@@ -1592,6 +1592,6 @@ def _plain_literal_as_written(
 def _as_js_number(value: float) -> int | float:
     """An integral float as an int, the way a JavaScript number prints: no `.0`, and
     equal as a literal to the same value written without a fraction."""
-    if value.is_integer() and abs(value) < _EXACT_INTEGER_LIMIT:
+    if (isinstance(value, int) or value.is_integer()) and abs(value) < _EXACT_INTEGER_LIMIT:
         return int(value)
     return value
