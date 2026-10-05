@@ -14,3 +14,10 @@ pyopenvba==6.5.0
 defusedxml==0.7.1
 hatchling==1.32.4
 editables==0.6
+# Keep cross-matrix dependencies explicit and unconditional: Dependabot's
+# pip-compile resolves on modern Linux and otherwise drops the Python 3.10
+# and Windows-only dependencies from this shared hash lock. Installing these
+# small compatibility packages on every test runner keeps future updates safe.
+colorama==0.4.6
+exceptiongroup==1.3.1
+tomli==2.4.1
