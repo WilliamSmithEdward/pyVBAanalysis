@@ -176,7 +176,7 @@ def check_class_instance_values(
                     else first + 2
                 )
                 if _raw(_at(toks, close + 1)) == "=":
-                    assigned.add(f"{lower_name}.{token_text(toks[first + 2])}")
+                    assigned.add(f"{lower_name}.{_lower_name(toks[first + 2])}")
         for stmt in statements:
             _check_statement(stmt.span, stmt.toks, instances, assigned, push)
 
@@ -184,8 +184,8 @@ def check_class_instance_values(
 def _kept_to_itself(toks: list[VbaToken], i: int, lower: str, sets: Sequence[_Statement]) -> bool:
     tok = toks[i]
     if (
-        tok.kind is not TokenKind.IDENTIFIER
-        or tok.raw_text.lower() != lower
+        tok.kind not in (TokenKind.IDENTIFIER, TokenKind.BRACKETED_IDENTIFIER)
+        or _lower_name(tok) != lower
         or _raw(_at(toks, i - 1)) == "."
     ):
         return True
@@ -216,7 +216,7 @@ def _check_statement(
         ):
             i += 1
             continue
-        name = token_text(toks[i + 2])
+        name = _lower_name(toks[i + 2])
         member = next(
             (candidate for candidate in instance.type.members if candidate.name.lower() == name),
             None,

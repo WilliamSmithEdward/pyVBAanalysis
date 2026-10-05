@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from typing import Literal
 
 from ..js_compat import JS_WHITESPACE, js_trim
-from ..lexer.token_helpers import first_token_at_or_after
+from ..lexer.token_helpers import first_token_at_or_after, token_name
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..lexer.tokenize import tokenize_cached
 from .symbol_model import VbaSymbol, VbaSymbolKind
@@ -63,6 +63,10 @@ def _word(tok: VbaToken | None) -> str:
     return tok.raw_text.lower() if tok is not None else ""
 
 
+def _name(tok: VbaToken | None) -> str:
+    return (token_name(tok) or "").lower()
+
+
 def _at(toks: Sequence[VbaToken], i: int) -> VbaToken | None:
     return toks[i] if 0 <= i < len(toks) else None
 
@@ -75,9 +79,9 @@ def class_member_values(source: str, children: Sequence[VbaSymbol]) -> dict[str,
     # occurs outside its declaration. Build that index once, not per field.
     mentions_by_name: dict[str, list[int]] = {}
     for tok in toks:
-        if tok.kind is not TokenKind.IDENTIFIER:
+        if tok.kind not in (TokenKind.IDENTIFIER, TokenKind.BRACKETED_IDENTIFIER):
             continue
-        lower = _word(tok)
+        lower = _name(tok)
         found = mentions_by_name.get(lower)
         if found is not None:
             found[1] = tok.start
@@ -126,8 +130,8 @@ def class_member_values(source: str, children: Sequence[VbaSymbol]) -> dict[str,
             stmt
             for stmt in inner
             if any(
-                tok.kind is TokenKind.IDENTIFIER
-                and _word(tok) == lower
+                tok.kind in (TokenKind.IDENTIFIER, TokenKind.BRACKETED_IDENTIFIER)
+                and _name(tok) == lower
                 and (i == 0 or stmt[i - 1].raw_text != ".")
                 for i, tok in enumerate(stmt)
             )
@@ -137,7 +141,7 @@ def class_member_values(source: str, children: Sequence[VbaSymbol]) -> dict[str,
             if all(
                 len(stmt) == 4
                 and _word(stmt[0]) == "set"
-                and _word(stmt[1]) == lower
+                and _name(stmt[1]) == lower
                 and stmt[2].raw_text == "="
                 and _word(stmt[3]) == "nothing"
                 for stmt in mentions
@@ -162,7 +166,7 @@ def class_member_values(source: str, children: Sequence[VbaSymbol]) -> dict[str,
             )
             second = _at(stmt, 1)
             if (
-                _word(stmt[0]) == lower
+                _name(stmt[0]) == lower
                 and second is not None
                 and second.raw_text == "="
                 and literal is not None

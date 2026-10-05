@@ -59,8 +59,8 @@ def test_false_and_zero_conversions_divide_by_zero() -> None:
         assert _found(src, "division-by-zero") != [], expression
     # `CDbl(0.4)` is no zero: `10 / CDbl(0.4)` runs.
     assert _found(_module(["Main = 10 / CDbl(0.4)"]), "division-by-zero") == []
-    # Pinned XLIDE also misses this form (xlide_vscode #898); keep parity.
-    assert _found(_module(["Main = 10 / VBA.CDbl(0)"]), "division-by-zero") == []
+    # XLIDE 11.0.0 reports qualified conversions too (issue #898).
+    assert _found(_module(["Main = 10 / VBA.CDbl(0)"]), "division-by-zero") != []
 
 
 def test_not_binds_below_the_comparisons() -> None:

@@ -28,7 +28,7 @@ _LEADING_WHITESPACE_RE = re.compile(r"^[ \t]*")
 
 def detect_eol(source: str) -> str:
     """The module's line ending, so an inserted line matches its neighbours."""
-    return "\r\n" if "\r\n" in source else "\n"
+    return "\r\n" if "\r\n" in source else "\n" if "\n" in source or "\r" not in source else "\r"
 
 
 def leading_whitespace(text: str) -> str:
@@ -94,13 +94,29 @@ def line_start_at(source: str, offset: int) -> int:
 
     A search from index 0 would find a leading LF and answer 1 for offset 0.
     """
-    return 0 if offset <= 0 else source.rfind("\n", 0, offset) + 1
+    for i in range(min(len(source), offset) - 1, -1, -1):
+        if source[i] in "\r\n":
+            return i + 1
+    return 0
 
 
 def whole_line_span(source: str, start: int, end: int) -> tuple[int, int]:
     """The span of every physical line [start, end) touches, its newline included."""
-    newline = source.find("\n", end)
-    return line_start_at(source, start), (len(source) if newline == -1 else newline + 1)
+    match = re.compile(r"\r\n|\r|\n").search(source, end)
+    first = line_start_at(source, start)
+    if 0 < first < len(source) and source[first] == "\n" and source[first - 1] == "\r":
+        first = line_start_at(source, first - 1)
+    return first, (len(source) if match is None else match.end())
+
+
+def _preceding_lines(source: str, offset: int) -> Iterator[tuple[int, str]]:
+    start = line_start_at(source, offset)
+    while start > 0:
+        end = start - 1
+        if source[end] == "\n" and end > 0 and source[end - 1] == "\r":
+            end -= 1
+        start = line_start_at(source, end)
+        yield start, source[start:end]
 
 
 def _is_ordinary_comment(trimmed: str) -> bool:
@@ -124,12 +140,8 @@ def attached_comments_start(source: str, decl_start: int) -> int:
     they would belong to whatever declaration came next.
     """
     start = line_start_at(source, decl_start)
-    while start > 0:
-        previous = line_start_at(source, start - 1)
-        trimmed = source[previous : start - 1]
-        if trimmed.endswith("\r"):
-            trimmed = trimmed[:-1]
-        trimmed = trimmed.lstrip()
+    for previous, line in _preceding_lines(source, decl_start):
+        trimmed = line.lstrip()
         if not trimmed.startswith("'''") and not is_xlide_directive_comment(trimmed):
             break
         start = previous
@@ -160,21 +172,14 @@ def leading_doc_lines(source: str, decl_start: int) -> list[DocBlockLine]:
     per declaration, so slicing and splitting the whole module prefix here would make
     the pass quadratic in module size.
     """
-    line_start = line_start_at(source, decl_start)
     lines: list[DocBlockLine] = []
-    while line_start > 0:
-        previous_end = line_start - 1  # the '\n' terminating the previous line
-        previous_start = line_start_at(source, previous_end)
-        line = source[previous_start:previous_end]
-        if line.endswith("\r"):
-            line = line[:-1]
+    for previous_start, line in _preceding_lines(source, decl_start):
         trimmed = line.lstrip()
         if is_xlide_directive_comment(trimmed):
             # Suppression and test directives are the product's own grammar; the
             # block attaches through them in any stacking order.
             if lines:
                 lines[-1].directives_start = previous_start
-            line_start = previous_start
             continue
         if not trimmed.startswith("'''"):
             break
@@ -187,7 +192,6 @@ def leading_doc_lines(source: str, decl_start: int) -> list[DocBlockLine]:
                 text=text,
             )
         )
-        line_start = previous_start
     lines.reverse()
     return lines
 

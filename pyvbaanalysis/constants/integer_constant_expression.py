@@ -190,18 +190,26 @@ class _IntegerConstantExpressionParser:
         self._in_arguments = 0
 
     def parse(self) -> float | None:
-        if not self._tokens:
-            return None
         try:
-            value = run_expression(self._expression())
+            return run_expression(self._parse())
         except RecursionError:
             # Caller-provided constant lookups may still recurse.
             return None
+
+    def _parse(self) -> Generator[Any, Any, float | None]:
+        if not self._tokens:
+            return None
+        value = cast("float | None", (yield self._expression()))
         if value is None or self._current() is not None:
             return None
         # Val can return a fraction. Preserve it for a later rounding call or
         # another constant, as upstream's JavaScript number map does.
         return _whole(value)
+
+    def _lookup(self, name: str) -> Generator[Any, Any, float | None]:
+        if isinstance(self._constants, _GeneratorLookup):
+            return cast("float | None", (yield self._constants.resolve(name)))
+        return self._constants.get(name)
 
     def _expression(self) -> Generator[Any, Any, float | None]:
         # Depth guard: untrusted Const text can nest arbitrarily deep; bail to
@@ -219,10 +227,13 @@ class _IntegerConstantExpressionParser:
         the Long range: ``Const K0 = 15 And 255`` is 15 (XLIDE issue #496,
         measured in Excel 16.0)."""
         if level == len(_LOGICAL_LEVELS):
-            if self._accept_word("not"):
-                operand = (cast("float | None", (yield self._logical(level))))
-                return None if operand is None or not _is_long(operand) else ~int(operand)
-            return (cast("float | None", (yield self._expression_inner())))
+            count = 0
+            while self._accept_word("not"):
+                count += 1
+            operand = cast("float | None", (yield self._expression_inner()))
+            for _ in range(count):
+                operand = None if operand is None or not _is_long(operand) else ~int(operand)
+            return operand
         word = _LOGICAL_LEVELS[level]
         value = (cast("float | None", (yield self._logical(level + 1))))
         while value is not None and self._accept_word(word):
@@ -317,7 +328,7 @@ class _IntegerConstantExpressionParser:
             return -1 if word == "true" else 0
         qualified = self._qualified_name()
         if qualified:
-            return self._constants.get(qualified.lower())
+            return cast("float | None", (yield self._lookup(qualified.lower())))
         rounded = (cast("float | None | _NotACall", (yield self._rounding_call())))
         if not isinstance(rounded, _NotACall):
             return rounded
@@ -330,7 +341,7 @@ class _IntegerConstantExpressionParser:
                 after = self._peek(1)
                 if after is not None and after.raw_text == ")":
                     self._index += 2
-                    return self._constants.get(f"{name.lower()}()")
+                    return cast("float | None", (yield self._lookup(f"{name.lower()}()")))
                 # `F(-1)`: a call with whole-number arguments is `f(-1)` to a
                 # lookup (XLIDE issue #562).
                 before = self._peek(-2)
@@ -344,8 +355,8 @@ class _IntegerConstantExpressionParser:
                     if not self._accept(")") or any(arg is None for arg in args):
                         return None
                     key = ",".join(js_number_to_string(arg) for arg in args if arg is not None)
-                    return self._constants.get(f"{name.lower()}({key})")
-            return self._constants.get(name.lower())
+                    return cast("float | None", (yield self._lookup(f"{name.lower()}({key})")))
+            return cast("float | None", (yield self._lookup(name.lower())))
         return None
 
     def _rounding_call(self) -> Generator[Any, Any, float | None | _NotACall]:
@@ -457,15 +468,18 @@ class _IntegerConstantExpressionParser:
         return True
 
 
-class _CallableLookup:
-    """Adapts a resolve callback to the IntegerConstantLookup get-by-name protocol."""
+class _GeneratorLookup:
+    """Resume dependency lookups on the same explicit expression stack."""
 
     __slots__ = ("_fn",)
 
-    def __init__(self, fn: Callable[[str], float | None]) -> None:
+    def __init__(self, fn: Callable[[str], Generator[Any, Any, float | None]]) -> None:
         self._fn = fn
 
     def get(self, name: str) -> float | None:
+        return run_expression(self.resolve(name))
+
+    def resolve(self, name: str) -> Generator[Any, Any, float | None]:
         return self._fn(name)
 
 
@@ -484,7 +498,7 @@ def resolve_raw_integer_constants(
     resolved: dict[str, float | None] = {}
     resolving: set[str] = set()
 
-    def resolve(name: str) -> float | None:
+    def resolve(name: str) -> Generator[Any, Any, float | None]:
         key = name.lower()
         if key in resolved:
             return resolved[key]
@@ -498,11 +512,12 @@ def resolve_raw_integer_constants(
             resolved[key] = None
             return None
         resolving.add(key)
-        value = evaluate_integer_constant_expression(raw, _CallableLookup(resolve))
+        parser = _IntegerConstantExpressionParser(raw, _GeneratorLookup(resolve))
+        value = cast("float | None", (yield parser._parse()))
         resolving.discard(key)
         resolved[key] = value
         return value
 
     for key in raw_constants:
-        resolve(key)
+        run_expression(resolve(key))
     return resolved

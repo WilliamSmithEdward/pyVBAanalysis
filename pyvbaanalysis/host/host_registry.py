@@ -127,9 +127,10 @@ def host_object_model_for_tokens(tokens: list[str]) -> HostObjectModel | None:
     given, so every existing caller keeps the model it had, including the bare
     `excel` that rides as the downstream Excel default.
     """
-    known = [token for token in tokens if token in _MODELS_BY_TOKEN]
+    normalized = [token.strip().lower() for token in tokens]
+    known = [token for token in normalized if token in _MODELS_BY_TOKEN]
     if len(known) <= 1:
-        return host_object_model_for_token(known[0] if known else (tokens[0] if tokens else None))
+        return host_object_model_for_token(known[0] if known else (normalized[0] if normalized else None))
     key = "+".join(known)
     cached = _MERGED_BY_KEY.get(key)
     if cached is not None:

@@ -5,7 +5,22 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
-## Unreleased
+## 3.0.0 - 2026-10-04
+
+Sync to XLIDE 11.0.0 (commit 751fdb2). This major release includes the
+previously unreleased analyzer sync and release security improvements below.
+
+### Fixed
+
+* Recognize VBA-qualified zero conversion divisors, such as
+  `1 / VBA.CDbl(0)`, and bracketed class fields, Function results and
+  Property Get results. Bracketed assignments and escaped instances no
+  longer produce false uninitialized-object findings.
+* Read documentation comments and their edits across LF, CRLF and CR lines.
+* Evaluate deeply nested Null expressions and forward constant dependency
+  chains with explicit stacks. Conditional expressions beyond 256 nested
+  parentheses remain unknown, matching upstream's limit.
+* Normalize host and referenced-library tokens before merging host models.
 
 ### Added
 
@@ -24,7 +39,7 @@ per milestone.
 
 ### Changed
 
-* Sync the analyzer and evidence data to XLIDE commit `2f49b93`, including
+* Sync the analyzer and evidence data to XLIDE 11.0.0, including
   reference-library and saved-workbook-sheet context from Office readers.
 * Expression folders use explicit stacks to match upstream's nesting limits,
   preserve fractional `Val` constants, and cache dataflow subtree touches
