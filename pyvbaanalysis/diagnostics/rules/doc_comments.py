@@ -36,7 +36,7 @@ from ...docs.doc_comment import (
     detect_eol,
     leading_doc_lines,
     leading_whitespace,
-    line_start_at,
+    whole_line_span,
     scan_doc_tags,
 )
 from ...lexer.token_helpers import first_token_at_or_after
@@ -348,7 +348,7 @@ class _DocBlock:
             return VbaEdit(Span(tag.open.start, end), "")
         start = first.start
         if first.directives_start < first.start:
-            above = line_start_at(self._source, first.start - 1)
+            above = whole_line_span(self._source, first.start - 1, first.start - 1)[0]
             if _NEXT_LINE_DIRECTIVE_RE.match(self._source[above : first.start]):
                 start = above
         return VbaEdit(Span(start, self._next_line_start(last)), "")
@@ -368,5 +368,4 @@ class _DocBlock:
         return line.text_start + len(line.text)
 
     def _next_line_start(self, line: DocBlockLine) -> int:
-        newline = self._source.find("\n", self._line_end(line))
-        return len(self._source) if newline < 0 else newline + 1
+        return whole_line_span(self._source, line.start, self._line_end(line))[1]

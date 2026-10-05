@@ -719,7 +719,7 @@ class _ConditionalExpressionParser:
     is its serial, so `#12:00:00 AM#` is False. `Nothing Is Nothing` is True.
     """
 
-    __slots__ = ("_tokens", "_constants", "_undefined_is_zero", "_index")
+    __slots__ = ("_tokens", "_constants", "_undefined_is_zero", "_index", "_parenthesis_depth")
 
     def __init__(self, tokens: list[VbaToken], constants: _ConstantGetter, undefined_is_zero: bool) -> None:
         self._tokens = tokens
@@ -733,6 +733,7 @@ class _ConditionalExpressionParser:
         # reads them.
         self._undefined_is_zero = undefined_is_zero
         self._index = 0
+        self._parenthesis_depth = 0
 
     def parse(self) -> ConditionalValue | None:
         try:
@@ -755,15 +756,19 @@ class _ConditionalExpressionParser:
 
     def _parse_not(self) -> Generator[Any, Any, ConditionalValue | None]:
         """`Not` binds looser than a comparison: `Not 1 = 2` is `Not (1 = 2)`."""
-        if self._match_word("not"):
-            value = (cast("ConditionalValue | None", (yield self._parse_not())))
+        count = 0
+        while self._match_word("not"):
+            count += 1
+        value = (cast("ConditionalValue | None", (yield self._parse_comparison())))
+        for _ in range(count):
             if isinstance(value, bool):
-                return not value
-            if value is not None and _is_null(value):
-                return _NULL
-            number = None if value is None else _whole_number(value)
-            return None if number is None else ~_to_int32(number)
-        return (cast("ConditionalValue | None", (yield self._parse_comparison())))
+                value = not value
+            elif value is not None and _is_null(value):
+                value = _NULL
+            else:
+                number = None if value is None else _whole_number(value)
+                value = None if number is None else ~_to_int32(number)
+        return value
 
     def _parse_comparison(self) -> Generator[Any, Any, ConditionalValue | None]:
         left = (cast("ConditionalValue | None", (yield self._parse_concat())))
@@ -829,11 +834,14 @@ class _ConditionalExpressionParser:
 
     def _parse_negation(self) -> Generator[Any, Any, ConditionalValue | None]:
         """Unary minus binds looser than ^: `-2 ^ 2` is -4."""
-        op = self._peek_raw()
-        if op in ("-", "+"):
+        start = self._index
+        while self._peek_raw() in ("-", "+"):
             self._index += 1
-            return _signed(op, (cast("ConditionalValue | None", (yield self._parse_negation()))))
-        return (cast("ConditionalValue | None", (yield self._parse_power())))
+        end = self._index
+        value = (cast("ConditionalValue | None", (yield self._parse_power())))
+        for i in range(end - 1, start - 1, -1):
+            value = _signed(self._tokens[i].raw_text, value)
+        return value
 
     def _parse_power(self) -> Generator[Any, Any, ConditionalValue | None]:
         left = (cast("ConditionalValue | None", (yield self._parse_primary())))
@@ -856,8 +864,13 @@ class _ConditionalExpressionParser:
         if token is None:
             return None
         if token.raw_text == "(":
+            if self._parenthesis_depth >= 256:
+                self._index = len(self._tokens)
+                return None
             self._index += 1
+            self._parenthesis_depth += 1
             value = (cast("ConditionalValue | None", (yield self._parse_logical(0))))
+            self._parenthesis_depth -= 1
             if self._peek_raw() != ")":
                 return None
             self._index += 1

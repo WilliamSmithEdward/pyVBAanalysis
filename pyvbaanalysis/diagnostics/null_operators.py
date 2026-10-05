@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Literal
 
 from ..js_compat import js_number
-from ..lexer.token_helpers import match_paren_from
 from ..lexer.token_helpers import token_word as token_text
 from ..lexer.token_kinds import TokenKind, VbaToken
 from .call_extraction import unwrap_outer_parens
@@ -50,72 +50,114 @@ def _literal_number(operand: Sequence[VbaToken]) -> float | None:
 def operator_yields_null(toks: Sequence[VbaToken], holds_null: Callable[[VbaToken], bool]) -> bool:
     """Whether the tokens give Null. `holds_null` says whether one token does: the
     literal Null, or a local known to hold it. A single token is asked whole."""
-    try:
-        return _operator_yields_null(toks, holds_null)
-    except RecursionError:
-        # Port-only: upstream recurses once per prefix operator and parenthesis
-        # on JavaScript's deeper stack. An expression nested past Python's
-        # limit is not known to give Null.
-        return False
+    return _operator_yields_null(toks, holds_null)
+
+
+@dataclass
+class _NullFrame:
+    ranges: list[tuple[int, int]]
+    mode: str
+    next: int = 1
+    left: float | Literal["null"] | None = None
 
 
 def _operator_yields_null(toks: Sequence[VbaToken], holds_null: Callable[[VbaToken], bool]) -> bool:
-    part = unwrap_outer_parens(list(toks))
-    if len(part) == 1:
-        return holds_null(part[0])
-    head = token_text(part[0]) if part else ""
-    if head == "-" or head == "not":
-        return _operator_yields_null(part[1:], holds_null)
-    if (
-        head == "abs"
-        and len(part) > 1
-        and part[1].raw_text == "("
-        and match_paren_from(part, 1) == len(part) - 1
-    ):
-        return _operator_yields_null(part[2:-1], holds_null)
-    operands: list[list[VbaToken]] = [[]]
-    operators: list[str] = []
-    depth = 0
-    for tok in part:
-        depth += 1 if tok.raw_text == "(" else -1 if tok.raw_text == ")" else 0
-        word = tok.raw_text if tok.kind is TokenKind.OPERATOR else token_text(tok)
-        current = operands[-1]
-        if (
-            depth == 0
-            and len(current) > 0
-            and word in _NULL_PROPAGATING
-            and tok.kind is not TokenKind.STRING_LITERAL
-        ):
-            operators.append(word)
-            operands.append([])
-        else:
-            current.append(tok)
-    if len(operators) == 0 or "&" in operators or any(len(operand) == 0 for operand in operands):
-        return False
-    # And, Or and Imp give a value when the other side decides it (issue
-    # #556): Null And 0 is 0, but Null And 1 is Null; 40000 Or Null is 40000,
-    # but 0 Or Null is Null; Null Imp 12 is 12 and False Imp Null is True, but
-    # Null Imp False is Null. Judged with one operator only.
-    logical = next((op for op in operators if op == "and" or op == "or" or op == "imp"), None)
-    if logical is not None:
-        if len(operators) != 1:
-            return all(_operator_yields_null(operand, holds_null) for operand in operands)
-        sides: list[float | Literal["null"] | None] = [
-            "null" if _operator_yields_null(operand, holds_null) else _literal_number(operand)
-            for operand in operands
-        ]
-        left, right = sides
+    if len(toks) == 1:
+        return holds_null(toks[0])
+    if len(toks) == 2 and token_text(toks[0]) in ("not", "-"):
+        return holds_null(toks[1])
+    # Shared token windows and explicit continuations keep deep wrappers safe.
+    parens: dict[int, int] = {}
+    pending: list[int] = []
+    for i, tok in enumerate(toks):
+        if tok.raw_text == "(":
+            pending.append(i)
+        elif tok.raw_text == ")" and pending:
+            parens[pending.pop()] = i
+    frames: list[_NullFrame] = []
+    current = (0, len(toks))
+    result: bool | None = None
+    while True:
+        if result is None:
+            start, end = current
+            while True:
+                if end - start >= 2 and toks[start].raw_text == "(" and parens.get(start) == end - 1:
+                    start += 1
+                    end -= 1
+                if end - start == 1:
+                    result = holds_null(toks[start])
+                    break
+                if end <= start:
+                    result = False
+                    break
+                head = token_text(toks[start])
+                if head in ("-", "not"):
+                    start += 1
+                    continue
+                if head == "abs" and toks[start + 1].raw_text == "(" and parens.get(start + 1) == end - 1:
+                    start += 2
+                    end -= 1
+                    continue
+                break
+            if result is None:
+                ranges: list[tuple[int, int]] = []
+                operators: list[str] = []
+                segment = start
+                depth = 0
+                i = start
+                while i < end:
+                    tok = toks[i]
+                    close = parens.get(i)
+                    if depth == 0 and tok.raw_text == "(" and close is not None and close < end:
+                        i = close + 1
+                        continue
+                    depth += 1 if tok.raw_text == "(" else -1 if tok.raw_text == ")" else 0
+                    word = tok.raw_text if tok.kind is TokenKind.OPERATOR else token_text(tok)
+                    if depth == 0 and i > segment and word in _NULL_PROPAGATING and tok.kind is not TokenKind.STRING_LITERAL:
+                        ranges.append((segment, i))
+                        operators.append(word)
+                        segment = i + 1
+                    i += 1
+                ranges.append((segment, end))
+                if not operators or "&" in operators or any(a == b for a, b in ranges):
+                    result = False
+                else:
+                    logical = next((op for op in operators if op in ("and", "or", "imp")), None)
+                    mode = (logical if len(operators) == 1 else "every") if logical else "some"
+                    frames.append(_NullFrame(ranges, mode))
+                    current = ranges[0]
+                    continue
+        while True:
+            if not frames:
+                return result
+            frame = frames[-1]
+            if frame.mode in ("some", "every"):
+                if (result if frame.mode == "some" else not result) or frame.next == len(frame.ranges):
+                    frames.pop()
+                    continue
+                current = frame.ranges[frame.next]
+                frame.next += 1
+                result = None
+                break
+            a, b = frame.ranges[frame.next - 1]
+            value: float | Literal["null"] | None = "null" if result else _literal_number(toks[a:b])
+            if frame.next == 1:
+                frame.left = value
+                frame.next = 2
+                current = frame.ranges[1]
+                result = None
+                break
 
-        def decided(other: float | Literal["null"] | None, other_on_left: bool) -> bool:
-            if other == "null":
-                return True
-            if other is None:
-                return False
-            if logical == "and":
-                return other != 0
-            if logical == "or":
-                return other == 0
-            return other != 0 if other_on_left else other == 0
+            def decided(other: float | Literal["null"] | None, on_left: bool) -> bool:
+                if other == "null":
+                    return True
+                if other is None:
+                    return False
+                if frame.mode == "and":
+                    return other != 0
+                if frame.mode == "or":
+                    return other == 0
+                return other != 0 if on_left else other == 0
 
-        return (left == "null" and decided(right, False)) or (right == "null" and decided(left, True))
-    return any(_operator_yields_null(operand, holds_null) for operand in operands)
+            result = (frame.left == "null" and decided(value, False)) or (value == "null" and decided(frame.left, True))
+            frames.pop()

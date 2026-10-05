@@ -1532,6 +1532,11 @@ def _zero_divisor_atom_token_group(
         return None
     first = toks[start]
     first_name = token_name(first)
+    # Qualified conversions must precede the member-access branch, which
+    # rejects a following parenthesis (XLIDE issue #898).
+    close = _zero_conversion_call_end(toks, start, constants)
+    if close is not None and _is_divisor_atom_boundary(_at(toks, close + 1)):
+        return toks[start : close + 1]
     member = toks[start + 2] if start + 2 < len(toks) else None
     member_name = token_name(member) if member is not None else None
     if (
@@ -1567,9 +1572,6 @@ def _zero_divisor_atom_token_group(
         and constants.get(f"{first_name}()") == 0
     ):
         return toks[start : start + 3]
-    close = _zero_conversion_call_end(toks, start, constants)
-    if close is not None and _is_divisor_atom_boundary(_at(toks, close + 1)):
-        return toks[start : close + 1]
     # `Int(0.9)`, `Fix(-0.9)`, `Round(0.5)`: a number made whole, 0 (XLIDE issue
     # #286). `Sign1(-1)`: a Function of the module that returns 0 for these
     # arguments (XLIDE issue #562).
