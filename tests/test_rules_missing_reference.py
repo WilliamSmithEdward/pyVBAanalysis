@@ -10,7 +10,7 @@ proof that a library is missing.
 from __future__ import annotations
 
 import pytest
-from oracle_support import assert_oracle_behavior
+from oracle_support import assert_oracle_behavior, CASES, case_codes
 
 from pyvbaanalysis import analyze_module, analyze_project
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions
@@ -46,7 +46,7 @@ def _missing(
             id="New",
         ),
         pytest.param(
-            "Public Sub S()\n    Dim v As Long\n    v = Word.wdMainTextStory\nEnd Sub\n",
+            "Option Explicit\nPublic Sub S()\n    Dim v As Long\n    v = Word.wdMainTextStory\nEnd Sub\n",
             "Word",
             id="qualified constant",
         ),
@@ -149,4 +149,13 @@ def test_a_referenced_library_is_checked_against_its_own_model() -> None:
 
 
 def test_oracle_asserted_cases() -> None:
-    assert assert_oracle_behavior(_CODE) > 0
+    # This runtime-error case compiles with Word as an implicit Variant. The
+    # upstream audit still lists it under the missing-reference compile rule,
+    # but XLIDE 11.1 deliberately leaves it silent (record/replay verified).
+    implicit = "implicit_library_receiver_unassigned_audit"
+    assert _CODE not in case_codes(CASES[implicit])
+    assert assert_oracle_behavior(_CODE, frozenset({implicit})) > 0
+
+
+def test_unknown_value_receiver_without_option_explicit_is_not_a_missing_library() -> None:
+    assert _missing("Sub Main()\nDebug.Print Word.wdFormatPDF\nEnd Sub", referenced=[]) == []

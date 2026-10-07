@@ -13,6 +13,8 @@ from collections.abc import Mapping
 
 
 _NAMES: Mapping[str, str] = {
+    "scripting": "__midl___midl_itf_scrrun_0000_0000_0001 __midl___midl_itf_scrrun_0001_0001_0001 __midl___midl_itf_scrrun_0001_0001_0002 __midl___midl_itf_scrrun_0001_0001_0003 comparemethod dictionary drive drives drivetypeconst encoder file fileattribute files filesystemobject folder folders idictionary idrive idrivecollection ifile ifilecollection ifilesystem ifilesystem3 ifolder ifoldercollection iomode iscriptencoder itextstream specialfolderconst standardstreamtypes textstream tristate",
+    "vbscript_regexp_55": "imatch imatch2 imatchcollection imatchcollection2 iregexp iregexp2 isubmatches match matchcollection regexp submatches",
     # VBA 6.0, 29 types.
     "vba": (
         "_collection _errobject _hiddeninterface _hiddenmodule collection constants conversion "

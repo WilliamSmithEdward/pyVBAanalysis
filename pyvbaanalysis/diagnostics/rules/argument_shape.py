@@ -56,6 +56,8 @@ from ..call_extraction import (
     named_argument_slot,
 )
 from ..callable_signatures import (
+    member_expression_calls,
+    member_statement_calls,
     callable_signature_for_call,
     callable_type_signatures_for,
     expression_calls,
@@ -64,7 +66,8 @@ from ..callable_signatures import (
 from ..context import PushFn
 from ..model import VbaDiagnosticData
 from ..type_fields import ModuleTypes, field_chain, module_types, type_key, variable_root, variable_symbol_in
-from ..walker import ProcedureStatementVisitor, strip_header_brackets, token_name
+from ..walker import ProcedureStatementVisitor, strip_header_brackets, token_name, statement_and_branch_spans
+from ..setter_assignment import source_setter_assignment, invalid_setter_assignment_arity
 
 _ShapeResolver = Callable[[str], SourceDeclaredShape]
 _TypeResolver = Callable[[str], SourceDeclaredType]
@@ -91,7 +94,7 @@ def check_argument_shape(
     symbols: ModuleSymbols,
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None,
     project_visible_symbols: Sequence[VbaSymbol] | None,
-    _member_ctx: MemberCompletionContext,
+    member_ctx: MemberCompletionContext,
     push: PushFn,
     mod: ModuleNode | None = None,
     activity: ConditionalActivityTracker | None = None,
@@ -148,10 +151,20 @@ def check_argument_shape(
                     reported.add(key)
                     push(rule, message, span, data)
 
+            setters = [setter for span in statement_and_branch_spans(stmt) if (setter := source_setter_assignment(source, span, symbols, proc_sym, project_visible_symbols, member_ctx)) is not None]
+            setter_names = {setter.name_span.start for setter in setters}
+            for setter in setters:
+                if not invalid_setter_assignment_arity(setter, source, lambda *_: None):
+                    _validate_argument_shapes(CallableTypeSignature(setter.name, setter.index_params), setter, udt_names, env, resolve_type, resolve_qualified_type, resolve_shape, push_once, member_type)
+            checked_targets: set[int] = set()
+
             def check_call(call: CallArguments) -> None:
+                if call.name_span.start in setter_names:
+                    return
                 sig = callable_signature_for_call(call, module_signatures, source_names)
                 if sig is None or not sig.params:
                     return
+                checked_targets.add(call.name_span.start)
                 _validate_argument_shapes(
                     sig, call, udt_names, env, resolve_type, resolve_qualified_type, resolve_shape,
                     push_once, member_type,
@@ -164,6 +177,9 @@ def check_argument_shape(
             )
             if statement_call is not None:
                 check_call(statement_call)
+            for bound in (*member_expression_calls(source, stmt.span, member_ctx), *member_statement_calls(source, stmt.span, member_ctx)):
+                if bound.source_parameters and bound.call.name_span.start not in setter_names and bound.call.name_span.start not in checked_targets:
+                    _validate_argument_shapes(bound.signature, bound.call, udt_names, env, resolve_type, resolve_qualified_type, resolve_shape, push_once, member_type)
 
         return visitor
 

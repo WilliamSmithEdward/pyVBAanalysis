@@ -26,11 +26,12 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from bisect import bisect_right
 
 from ...conditional import ConditionalActivityTracker
 from ...flow.procedure_labels import statement_label_declaration
 from ...lexer.token_helpers import match_paren_from
-from ...lexer.token_kinds import VbaToken
+from ...lexer.token_kinds import VbaToken, TokenKind
 from ...parser.nodes import BodyNode, ModuleNode, ProcedureNode, Span, is_leaf_statement
 from ...symbols.symbol_model import ModuleSymbols, SymbolVisibility, VbaSymbolKind
 from ...types.type_inference import procedure_symbol_for
@@ -49,19 +50,20 @@ from ..walker import (
 class _Ending:
     verb: str
     error: str
+    cancellable: bool = False
 
 
 # What deletes or closes each type, and what a member of it then raises.
 _ENDINGS: dict[str, _Ending] = {
-    "worksheet": _Ending("delete", "'-2147221080': Method 'MEMBER' of object '_Worksheet' failed"),
-    "workbook": _Ending("close", "'-2147221080': Method 'MEMBER' of object '_Workbook' failed"),
+    "worksheet": _Ending("delete", "'-2147221080': Method 'MEMBER' of object '_Worksheet' failed", True),
+    "workbook": _Ending("close", "'-2147221080': Method 'MEMBER' of object '_Workbook' failed", True),
     "shape": _Ending("delete", "'424': Object required"),
     "name": _Ending("delete", "'424': Object required"),
     "listobject": _Ending("unlist", "'1004': Application-defined or object-defined error"),
     # Word and PowerPoint (issue #683, measured in Word and PowerPoint 16.0).
-    "document": _Ending("close", "'5825': Object has been deleted"),
+    "document": _Ending("close", "'5825': Object has been deleted", True),
     "presentation": _Ending(
-        "close", "'-2147188720': Presentation (unknown member) : Object does not exist"
+        "close", "'-2147188720': Presentation (unknown member) : Object does not exist", True
     ),
     "slide": _Ending("delete", "'-2147188720': Slide (unknown member) : Object does not exist"),
 }
@@ -145,6 +147,8 @@ def check_deleted_objects(
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
+        if re.search(r"\bon\s+error\b", source[member.span.start:member.span.end], re.IGNORECASE):
+            continue
         proc_sym = procedure_symbol_for(symbols, member)
         locals_ = [
             child
@@ -175,6 +179,7 @@ def _check_procedure(
     # Upstream runs each block's body as a nested run, recursively; the runs
     # are kept on an explicit stack, in the same order.
     stack: list[_Run] = [_Run(iter(body))]
+    line_starts: list[int] | None = None
     while stack:
         run = stack[-1]
         node = next(run.nodes, None)
@@ -203,7 +208,6 @@ def _check_procedure(
             ended.clear()
             ranges_of.clear()
         toks = statement_tokens_after_leading_label(source, node.span)
-        line = source.count("\n", 0, node.span.start) + 1
         head = token_text(_at(toks, 0))
         # `Set x = ...` gives x a new object.
         if head == "set" and token_name(_at(toks, 1)) and _raw(_at(toks, 2)) == "=":
@@ -228,6 +232,7 @@ def _check_procedure(
         if (
             subject
             and ending is not None
+            and not ending.cancellable
             and _raw(_at(toks, 1)) == "."
             and token_text(_at(toks, 2)) == ending.verb
             and (len(toks) == 3 or ending.verb == "close")
@@ -239,12 +244,22 @@ def _check_procedure(
                 if ending.verb == "unlist"
                 else "deleted"
             )
-            how = f"{verbed} on line {line}"
+            if line_starts is None:
+                line_starts = [0, *(match.end() for match in re.finditer(r"\r\n|\r|\n", source))]
+            how = f"{verbed} on line {bisect_right(line_starts, node.span.start)}"
             ended[subject] = _Ended(how, ending.error)
             # What was taken from it, and from that in turn: a sheet of a
             # closed workbook and a range of that sheet.
             _end_from(subject, toks[0].raw_text, how, ended, ranges_of)
             continue
+        for i, tok in enumerate(toks):
+            passed_lower = _lower_name(tok)
+            first_arg = i == 1 or (i == 2 and head == "call")
+            before_token = _at(toks, i - 1)
+            after = _at(toks, i + 1)
+            if passed_lower and (before_token is not None and (before_token.raw_text in ("(", ",") or (first_arg and before_token.kind is TokenKind.IDENTIFIER))) and (after is None or after.raw_text in (")", ",")):
+                ended.pop(passed_lower, None)
+                ranges_of.pop(passed_lower, None)
         _report(toks, node.span.start, ended, push)
         # What the statement assigns or passes whole is no longer known.
         assigned = _lower_name(_at(toks, 1 if head == "let" else 0))

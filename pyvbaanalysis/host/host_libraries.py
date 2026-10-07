@@ -30,6 +30,8 @@ _HOST_BY_LIBRARY_GUID: MappingProxyType[str, str] = MappingProxyType(
         "{00020905-0000-0000-C000-000000000046}": "word",
         "{91493440-5A91-11CF-8700-00AA0060263B}": "powerpoint",
         "{4AFFC9A0-5F99-101B-AF4E-00AA003F0F07}": "access",
+        "{420B2830-E718-11CF-893D-00A0C9054228}": "scripting",
+        "{3F4DACA7-160D-11D2-A8E9-00104B365C9F}": "regexp",
     }
 )
 
@@ -44,6 +46,8 @@ HOST_LIBRARY_NAMES: MappingProxyType[str, str] = MappingProxyType(
         "visio": "Visio",
         "project": "MSProject",
         "vb6": "VB",
+        "scripting": "Scripting",
+        "regexp": "VBScript_RegExp_55",
         "other": "",
     }
 )

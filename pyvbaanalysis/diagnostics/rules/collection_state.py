@@ -194,7 +194,10 @@ def _check_procedure(
     callee_calls: CalleeMemberCalls,
     option_base: int,
 ) -> None:
-    auto_instanced = _collection_locals(member, activity)
+    if re.search(r"\bon\s+error\b", source[member.span.start:member.span.end], re.IGNORECASE):
+        return
+    static_procedure = re.search(r"\bstatic\s+(?:sub|function|property)\b", source[member.span.start:member.body[0].span.start if member.body else member.span.end], re.IGNORECASE) is not None
+    auto_instanced = _collection_locals(member, activity, static_procedure)
     states: dict[str, _CollectionContents] = {}
     for name in auto_instanced.new_locals:
         states[name] = _empty_contents()
@@ -1025,13 +1028,13 @@ class _CollectionLocals:
 _TYPE_SUFFIX_NAME = re.compile(r"[%&^!#@$]\Z")
 
 
-def _collection_locals(proc: ProcedureNode, activity: ConditionalActivityTracker | None) -> _CollectionLocals:
+def _collection_locals(proc: ProcedureNode, activity: ConditionalActivityTracker | None, static_procedure: bool = False) -> _CollectionLocals:
     new_locals: set[str] = set()
     plain_locals: set[str] = set()
     variant_locals: set[str] = set()
 
     def visit(group: VariableGroupNode) -> None:
-        if group.is_const or group.modifier.lower() == "static":
+        if group.is_const or group.modifier.lower() == "static" or static_procedure:
             return
         for decl in group.declarations:
             type_ = normalize_type(decl.as_type)

@@ -30,6 +30,8 @@ from .host_model import (
     get_powerpoint_object_model,
     get_vb6_object_model,
     get_word_object_model,
+    get_scripting_object_model,
+    get_regexp_object_model,
 )
 
 # The host tokens xlide_vbide normalizes from the process image, so an embedder
@@ -37,7 +39,7 @@ from .host_model import (
 # at all, but its code-behind needs the VB runtime's surface rather than Excel's,
 # and the analyzer selects a model by this token.
 VBA_HOST_TOKENS = frozenset(
-    {"excel", "word", "powerpoint", "access", "outlook", "visio", "project", "vb6", "other"}
+    {"excel", "word", "powerpoint", "access", "outlook", "visio", "project", "vb6", "other", "scripting", "regexp"}
 )
 
 # A model that knows nothing: every lookup misses, so nothing is asserted. The
@@ -58,6 +60,8 @@ _MODELS_BY_TOKEN = {
     "powerpoint": get_powerpoint_object_model,
     "access": get_access_object_model,
     "vb6": get_vb6_object_model,
+    "scripting": get_scripting_object_model,
+    "regexp": get_regexp_object_model,
 }
 
 # Container extension (without the dot) -> host token. XLIDE's own file
@@ -152,7 +156,7 @@ def host_object_model_for_tokens(tokens: list[str]) -> HostObjectModel | None:
     enums: dict[str, Mapping[str, object]] = {}
     for one in layered:
         for name, entry in (one.get("enums") or {}).items():
-            enums[name] = entry if one is models[0] else {**entry, "library": one.get("hostName")}
+            enums[name] = entry if one is models[0] else {**entry, "library": entry.get("library", one.get("hostName"))}
 
     result: HostObjectModel = {
         "source": " + ".join(one["source"] for one in models),

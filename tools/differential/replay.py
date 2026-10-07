@@ -50,6 +50,7 @@ _PLAIN_KEYS = frozenset(
         "workbookSheets",
         "severityOverrides",
         "designerClass",
+        "errorsOnly",
     }
 )
 
@@ -150,6 +151,7 @@ def _plain_options(opts: Mapping[str, Any], **project: Any) -> AnalyzeModuleOpti
         workbook_sheets=_workbook_sheets(opts.get("workbookSheets")),
         severity_overrides=opts.get("severityOverrides"),
         designer_class=opts.get("designerClass"),
+        errors_only=opts.get("errorsOnly", False),
         # The recorded calls are upstream's analyzeModule: the rules' own list.
         raw_rule_output=True,
         **project,
@@ -220,6 +222,7 @@ def replay(calls: Path, show: int = 10, only_code: str | None = None) -> int:
     by_code: Counter[str] = Counter()
     ignored: Counter[str] = Counter()
     failures: list[str] = []
+    failed_rows: list[dict[str, Any]] = []
     examples: list[str] = []
     seen: set[str] = set()
     for row in rows:
@@ -236,6 +239,7 @@ def replay(calls: Path, show: int = 10, only_code: str | None = None) -> int:
             opts = _plain_options(row["opts"]) if kind == "standalone" else _project_options(row)
         except Exception as error:
             failures.append(f"{type(error).__name__}: {error}")
+            failed_rows.append(row)
             continue
         counts[kind] += 1
         expected = Counter(_shown(d["code"], d["start"], d["end"], d["message"]) for d in row["result"])
@@ -247,6 +251,7 @@ def replay(calls: Path, show: int = 10, only_code: str | None = None) -> int:
         if only_code and only_code not in {item.split(" ", 1)[0] for item in [*only_upstream, *only_port]}:
             continue
         differing[kind] += 1
+        failed_rows.append(row)
         by_code.update(f"upstream only {item.split(' ', 1)[0]}" for item in only_upstream.elements())
         by_code.update(f"port only     {item.split(' ', 1)[0]}" for item in only_port.elements())
         if len(examples) < show:
@@ -259,6 +264,9 @@ def replay(calls: Path, show: int = 10, only_code: str | None = None) -> int:
             lines += [f"   port only:     {item}" for item in sorted(only_port.elements())]
             examples.append("\n".join(lines))
 
+    differences_path = calls.with_name("replay_differences.jsonl")
+    differences_path.write_text("".join(json.dumps(row) + "\n" for row in failed_rows), encoding="utf-8")
+    print(f"differing inputs saved to {differences_path}")
     print(
         f"replayed {counts['standalone']} unique standalone calls ({differing['standalone']} differ) "
         f"and {counts['project']} with project context ({differing['project']} differ)"

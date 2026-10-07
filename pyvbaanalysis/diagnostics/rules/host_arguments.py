@@ -366,8 +366,6 @@ def _procedure_visitor(
     # issue #345, measured in Excel 16.0). Each per-procedure view is built on
     # first use, as upstream's `??=` builds it.
     values_at: list[Callable[[LeafStatementNode], Mapping[str, KnownLocalValue]]] = []
-    documents_at: list[dict[int, dict[str, _NewDocument]]] = []
-    sheets_at: list[dict[int, _ActiveSheetState]] = []
     facts_at: list[dict[int, _SheetFacts]] = []
     # A sheet the code just protected (XLIDE issue #471).
     if host == "Excel" and _PROTECT_IN_SOURCE.search(source[proc.span.start : proc.span.end]) is not None:
@@ -402,23 +400,9 @@ def _procedure_visitor(
             literal = _integer_literal_value(arg)
             return literal if literal is not None else known_number(arg)
 
-        # A document the procedure just added (XLIDE issue #497).
-        if host == "Word":
-            if not documents_at:
-                documents_at.append(_new_documents_at(source, proc, activity))
-            documents = documents_at[0].get(id(stmt))
-            if documents:
-                _check_new_document_uses(stmt.span, statement_tokens(source, stmt.span), documents, literal_or_known, push)
-        # A sheet the code knows is not active (XLIDE issue #470).
-        if host == "Excel":
-            if not sheets_at:
-                sheets_at.append(_active_sheets_at(source, proc, activity))
-            sheet_state = sheets_at[0].get(id(stmt))
-            if sheet_state is not None:
-                _check_unqualified_corners(stmt.span, statement_tokens(source, stmt.span), sheet_state, push)
         # Intersect and Union of literal ranges, and a sheet the code just added
         # (XLIDE issue #472).
-        if host == "Excel":
+        if host == "Excel" and not any(name in source_names for name in ("intersect", "union", "range", "worksheets", "sheets", "thisworkbook", "activeworkbook", "application")):
             if not facts_at:
                 facts_at.append(_sheet_facts_at(source, proc, activity))
             _check_sheet_facts(stmt.span, statement_tokens(source, stmt.span), facts_at[0].get(id(stmt)), push)
@@ -426,8 +410,6 @@ def _procedure_visitor(
             _check_span(
                 source, stmt.span, host, model, member_ctx, env, arrays, source_names, literal_or_known, push, string_of
             )
-            if workbook is not None:
-                _check_workbook_sheet_access(source, stmt.span, workbook, source_names, literal_or_known, push)
             return
 
         def each_pass(values: Mapping[str, Number], report: PushFn) -> None:
@@ -444,8 +426,6 @@ def _procedure_visitor(
             _check_span(
                 source, stmt.span, host, model, member_ctx, env, arrays, source_names, value_of, report, string_of
             )
-            if workbook is not None:
-                _check_workbook_sheet_access(source, stmt.span, workbook, source_names, value_of, report)
 
         check_each_counter_pass(source, stmt.span, stmt_counters, lambda atom, counter: None, each_pass, push)
 
@@ -616,17 +596,12 @@ def _pair(a: str, b: str) -> str:
     return "|".join(sorted((a, b)))
 
 
-def _sheet_facts_at(
-    source: str, proc: ProcedureNode, activity: ConditionalActivityTracker | None
-) -> dict[int, _SheetFacts]:
-    """What each statement knows of the sheets the code just added (XLIDE issue
-    #472, measured in Excel 16.0): `Set w2 = Worksheets.Add` gives an empty
-    sheet, different from every sheet the code held before. A statement that may
-    write to it, a call, a label, or a block ends what is known. Keyed by the
-    statement node's id()."""
+def _sheet_facts_at(source: str, proc: ProcedureNode, activity: ConditionalActivityTracker | None) -> dict[int, _SheetFacts]:
+    """Track distinct new sheets, never their mutable contents."""
     out: dict[int, _SheetFacts] = {}
+    if re.search(r"\bon\s+error\b", source[proc.span.start:proc.span.end], re.IGNORECASE):
+        return out
     held: set[str] = set()
-    empty: set[str] = set()
     distinct: set[str] = set()
     stack: list[Iterator[BodyNode]] = [iter(proc.body)]
     while stack:
@@ -634,48 +609,34 @@ def _sheet_facts_at(
             if _is_inactive(activity, node):
                 continue
             if not is_leaf_statement(node):
+                distinct.clear()
+                held.clear()
                 body = _block_body(node)
                 if body is not None:
-                    empty, distinct = set(empty), set(distinct)
                     stack.append(iter(body))
                     break
-                empty, distinct = set(), set()
                 continue
             if jump_target_label_declaration(source, node.span):
-                empty, distinct = set(), set()
-            if len(empty) > 0 or len(distinct) > 0:
-                out[id(node)] = _SheetFacts(frozenset(empty), frozenset(distinct))
+                distinct.clear()
+            if distinct:
+                out[id(node)] = _SheetFacts(frozenset(), frozenset(distinct))
             toks = statement_tokens_after_leading_label(source, node.span)
             words = [tok.raw_text.lower() for tok in toks]
             if _word(words, 0) == "set" and _word(words, 2) == "=":
-                target = words[1]
-                value = "".join(words[3:])
-                empty.discard(target)
-                for pair in list(distinct):
-                    if target in pair.split("|"):
-                        distinct.discard(pair)
-                if _SHEETS_ADD_VALUE.search(value) is not None:
-                    for sheet in held:
-                        if sheet != target:
-                            distinct.add(_pair(sheet, target))
-                    empty.add(target)
-                if value == "activesheet" or _SHEETS_VALUE.search(value) is not None:
+                target, value = words[1], "".join(words[3:])
+                distinct = {pair for pair in distinct if target not in pair.split("|")}
+                if re.fullmatch(r"(?:(?:thisworkbook|activeworkbook|application)\.)?(?:worksheets|sheets)\.add(?:\(\))?", value):
+                    distinct.update(_pair(sheet, target) for sheet in held if sheet != target)
+                else:
+                    distinct.clear()
+                if value == "activesheet" or _SHEETS_VALUE.search(value):
                     held.add(target)
                 continue
-            # A read through the sheet into a variable keeps it; anything else may write.
-            bare = bare_assignment_target(source, node.span)
-            edits = any(
-                _raw_at(toks, i - 1) == "." and token_text(tok) in _SHEET_EDITS for i, tok in enumerate(toks)
-            )
-            reads_only = bare is not None and bare[0].lower() not in empty and not edits
-            if not reads_only:
-                for sheet in list(empty):
-                    if sheet in words:
-                        empty.discard(sheet)
+            distinct.clear()
+            held.clear()
         else:
             stack.pop()
-            if stack:
-                empty, distinct = set(), set()
+            distinct.clear()
     return out
 
 
@@ -730,78 +691,6 @@ def _check_sheet_facts(span: Span, toks: Sequence[VbaToken], facts: _SheetFacts 
                     at(i, close),
                 )
             continue
-        sheet = _lower_name(toks[i])
-        if (
-            not sheet
-            or facts is None
-            or sheet not in facts.empty
-            or _raw_at(toks, i - 1) == "."
-            or toks[i + 1].raw_text != "."
-        ):
-            continue
-        # The chain from the sheet: `w2.Cells.SpecialCells(...)`, `w2.ShowAllData`.
-        k = i + 2
-        while k < len(toks):
-            member = token_text(toks[k])
-            open_index = k + 1 if _raw_at(toks, k + 1) == "(" else -1
-            close = match_paren_from(toks, open_index) if open_index > 0 else k
-            # `w2.Range("A1:B5").AutoFilter Field:=1`: a call statement's arguments.
-            bare_call = (
-                open_index < 0
-                and i == 0
-                and k + 1 < len(toks)
-                and toks[k + 1].raw_text != "."
-                and toks[k + 1].raw_text != "="
-            )
-            if open_index > 0 and close > open_index + 1:
-                args = split_top_level_token_groups(toks, open_index + 1, ",", close)
-            elif bare_call:
-                args = split_top_level_token_groups(toks, k + 1, ",", len(toks))
-            else:
-                args = []
-            first = "".join(tok.raw_text.lower() for tok in _significant(args[0])) if len(args) > 0 else None
-            problem: str | None = None
-            shown = toks[i].raw_text
-            if member == "showalldata":
-                problem = (
-                    f"'{shown}' is a sheet the code just added, with no filter to show. This will raise "
-                    "Run-time error '1004': Method 'ShowAllData' of object '_Worksheet' failed"
-                )
-            elif member == "specialcells" and first is not None and first in _EMPTY_SPECIAL_CELLS:
-                problem = (
-                    f"'{shown}' is a sheet the code just added, which has no such cells. This will raise "
-                    "Run-time error '1004': No cells were found."
-                )
-            elif (member == "autofilter" or member == "texttocolumns") and len(args) > 0:
-                why = (
-                    "This can't be applied to the selected range"
-                    if member == "autofilter"
-                    else "No data was selected to parse"
-                )
-                problem = (
-                    f"'{shown}' is a sheet the code just added, and {toks[k].raw_text} has no data to act on. "
-                    f"This will raise Run-time error '1004': {why}"
-                )
-            elif (
-                member == "find"
-                and _raw_at(toks, close + 1) == "."
-                and len(args) > 0
-                and len(args[0]) == 1
-                and args[0][0].kind is TokenKind.STRING_LITERAL
-                and args[0][0].raw_text != '""'
-            ):
-                after = _raw_at(toks, close + 2) or ""
-                problem = (
-                    f"'{shown}' is a sheet the code just added, so Find finds nothing and returns Nothing, "
-                    f"which has no '.{after}'. This will raise Run-time error '91': Object variable or With "
-                    "block variable not set"
-                )
-            if problem:
-                push("hostArgumentOutOfRange", f"{problem}.", at(k, close))
-                break
-            if _raw_at(toks, close + 1) != ".":
-                break
-            k = close + 2
 
 
 def range_method_owner(toks: Sequence[VbaToken], i: int) -> str | None:
@@ -996,13 +885,14 @@ def _check_protected_sheets(
     in Excel 16.0): `wb.Protect "pw"`, Structure True unless given False. Adding
     a sheet to it raises 1004, and so does renaming, deleting, hiding or copying
     a sheet the code took from it, until Unprotect."""
+    if re.search(r"\bon\s+error\b", source[proc.span.start:proc.span.end], re.IGNORECASE):
+        return
     protected_sheets: dict[str, _ProtectedSheet] = {}
     protected_books: dict[str, str] = {}
     # The workbooks by name, and which one each sheet variable was taken from.
     books: set[str] = {"activeworkbook", "thisworkbook"}
     sheet_books: dict[str, str] = {}
     # Sheets the code unlocked a cell on: which cells stay writable is not followed.
-    unlocked: set[str] = set()
 
     stack: list[Iterator[BodyNode]] = [iter(proc.body)]
     while stack:
@@ -1010,6 +900,7 @@ def _check_protected_sheets(
             if _is_inactive(activity, node):
                 continue
             if not is_leaf_statement(node):
+                protected_sheets, protected_books, sheet_books = {}, {}, {}
                 body = _block_body(node)
                 if body is not None:
                     protected_sheets = dict(protected_sheets)
@@ -1028,8 +919,13 @@ def _check_protected_sheets(
             def at(first: int, last: int, node: BodyNode = node, toks: Sequence[VbaToken] = toks) -> Span:
                 return Span(node.span.start + toks[first].start, node.span.start + toks[last].end)
 
-            if "locked" in words and sheet is not None:
-                unlocked.add(sheet)
+            eq = next((i for i, tok in enumerate(toks) if tok.raw_text == "="), -1)
+            if words and words[0] != "set" and eq >= 0 and any(tok.kind is TokenKind.IDENTIFIER and token_text(tok) not in ("xlsheethidden", "xlsheetveryhidden", "xlsheetvisible") for tok in toks[eq + 1:]):
+                protected_sheets, protected_books, sheet_books = {}, {}, {}
+                continue
+            if any(token_name(tok) and _raw_at(toks, i + 1) == "(" and token_text(tok) not in ("sheets", "worksheets") for i, tok in enumerate(toks)):
+                protected_sheets, protected_books, sheet_books = {}, {}, {}
+                continue
             # Another workbook made active: what ActiveWorkbook was is not known.
             if "activate" in words or "workbooks" in words:
                 protected_books.pop("activeworkbook", None)
@@ -1060,9 +956,8 @@ def _check_protected_sheets(
             if _word(words, 0) == "set" and _word(words, 2) == "=":
                 target = words[1]
                 value = words[3:]
-                protected_sheets.pop(target, None)
-                protected_books.pop(target, None)
-                sheet_books.pop(target, None)
+                protected_sheets, protected_books, sheet_books = {}, {}, {}
+                books.discard(target)
                 if _word(value, 0) == "workbooks" or (
                     _word(value, 0) in ("activeworkbook", "thisworkbook") and len(value) == 1
                 ):
@@ -1105,6 +1000,7 @@ def _check_protected_sheets(
                         protected_books.pop(sheet, None)
                 else:
                     held_password = protected_books.get(sheet)
+                    protected_sheets, protected_books, sheet_books = {}, {}, {}
                     if (
                         held_password is not None
                         and held_password != ""
@@ -1150,7 +1046,6 @@ def _check_protected_sheets(
                     ui_only = parsed.named("userinterfaceonly")
                     if (
                         parsed.password is None
-                        or sheet in unlocked
                         or (ui_only is not None and token_text(_at(ui_only, 0)) != "false")
                     ):
                         protected_sheets.pop(sheet, None)
@@ -1164,6 +1059,7 @@ def _check_protected_sheets(
                 else:
                     protection_held = protected_sheets.get(sheet)
                     held_password = protection_held.password if protection_held is not None else None
+                    protected_sheets, protected_books, sheet_books = {}, {}, {}
                     # A sheet protected with no password takes any (XLIDE issue #684).
                     if (
                         held_password is not None
@@ -1182,38 +1078,7 @@ def _check_protected_sheets(
                         continue
                     protected_sheets.pop(sheet, None)
                 continue
-            protection = protected_sheets.get(sheet) if sheet is not None else None
-            if protection is not None and _word(words, 1) == "." and _word(words, 2) in _CELL_PATHS:
-                assert sheet is not None
-                eq = next((i for i, tok in enumerate(toks) if tok.raw_text == "=" and i > 2), -1)
-                edit = next(
-                    (
-                        i
-                        for i, tok in enumerate(toks)
-                        if i > 2 and toks[i - 1].raw_text == "." and token_text(tok) in _CELL_EDITS
-                    ),
-                    -1,
-                )
-                if "locked" in words:
-                    protected_sheets.pop(sheet, None)
-                    continue
-                if (eq > 0 or edit > 0) and not _allowed_edit(words, eq, edit, protection.allows):
-                    push(
-                        "hostArgumentOutOfRange",
-                        f"'{toks[0].raw_text}' is protected here, so its cells cannot be changed. This will raise "
-                        "Run-time error '1004': The cell or chart you're trying to change is on a protected sheet.",
-                        at(0, (eq if eq > 0 else edit + 1) - 1),
-                    )
-                continue
-            # A read keeps what is known, and so does setting a property of
-            # Application, `Application.DisplayAlerts = False`; a call or another
-            # use of a sheet may unprotect it.
-            bare: object = bare_assignment_target(source, node.span)
-            if bare is None and _word(words, 0) == "application" and _word(words, 1) == "." and _word(words, 3) == "=":
-                bare = _word(words, 2)
-            if not bare or any(token_text(tok) == "unprotect" for tok in toks):
-                protected_sheets = {}
-                protected_books = {}
+            protected_sheets, protected_books, sheet_books = {}, {}, {}
         else:
             stack.pop()
             if stack:
@@ -1467,7 +1332,12 @@ def _check_span(
                 continue
             address = toks[i + 2].raw_text[1:-1]
             areas_index = js_number(_INTEGER_SUFFIX.sub("", toks[i + 7].raw_text))
-            if _AREAS_ADDRESS.search(address) is not None and areas_index > 1:
+            callee = _host_callee_at(source, span, toks, i, model, member_ctx, source_names)
+            excel_range = callee is not None and callee.receiver in (
+                "global", "Excel.Worksheet", "Excel.Application", "Excel.Range",
+            )
+            area = _parse_a1_address(address)
+            if excel_range and area is not None and area.valid and _AREAS_ADDRESS.search(address) is not None and areas_index > 1:
                 push(
                     "hostArgumentOutOfRange",
                     f"Range(\"{address}\") is one area, so Areas({_n(areas_index)}) names none. This will raise "

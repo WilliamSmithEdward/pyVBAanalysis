@@ -365,9 +365,15 @@ def object_let_assignment_verdict(expected_raw: str | None, member_ctx: MemberCo
         default_member = next((member for member in project_type.members if member.default_member), None)
         if default_member is None:
             return "noDefault"
-        takes_argument = bool(default_member.signature) and _HAS_PARAMETERS_RE.search(
-            default_member.signature or ""
-        ) is not None
+        from ..callable_signatures import parse_runtime_display_signature
+        source_params = default_member.procedure_params or {}
+        setter = source_params.get("propertyLet")
+        params = setter[:-1] if setter is not None else source_params.get("propertyGet", source_params.get("function"))
+        if params is not None:
+            takes_argument = any(not param.optional and not param.param_array for param in params)
+        else:
+            parsed = parse_runtime_display_signature(default_member.name, default_member.signature or "")
+            takes_argument = any(not param.optional and not param.param_array for param in parsed.params)
         return "argument" if takes_argument else "lets"
     alias = resolve_host_alias(expected_raw or "", member_ctx.model)
     library = _library_object_type(expected_raw)

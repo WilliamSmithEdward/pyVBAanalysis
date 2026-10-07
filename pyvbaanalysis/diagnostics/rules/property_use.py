@@ -281,9 +281,12 @@ def _member_misuse(member: MemberCompletionEntry, use: _MemberUse) -> tuple[str,
                 "error: Expected Function or variable.",
             )
         return None
-    total, required = _parameter_counts(member.signature)
+    from ..member_parameter_counts import member_parameter_counts
+    total, required = member_parameter_counts(member.signature)
     type_ = normalize_type(member.returns if member.returns is not None else member.declared_type)
     scalar = type_ is not None and type_ != "variant" and is_known_scalar_type(type_)
+    if member.signature is not None and member.known_value in ("scalar", "empty") and type_ in (None, "variant") and use.after == "." and (use.indexed or required == 0):
+        return "variantValueMisuse", "returns a Variant that holds no object to take a member of. This will raise Run-time error '424': Object required."
     # `c.M = 9` with M a Function returning Long (XLIDE issue #423).
     if member.kind == "method" and scalar and type_ is not None and use.target and not use.indexed:
         return (
@@ -318,7 +321,7 @@ def _member_misuse(member: MemberCompletionEntry, use: _MemberUse) -> tuple[str,
         and (member.let_accessor or member.set_accessor)
     ):
         # `c.M(1) = 2` with M a Property Set and no Let (XLIDE issue #414).
-        if use.target and use.indexed and member.set_accessor and not member.let_accessor:
+        if writes and not use.set_target and use.indexed and member.set_accessor and not member.let_accessor:
             return (
                 "invalidPropertyUse",
                 "has a Property Set and no Property Let, so a value cannot be assigned to it. "

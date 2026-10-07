@@ -311,7 +311,11 @@ def check_module_member_forms(
                 and _property_only(in_module)
             ):
                 where = at(span, first_tok, first_tok)
-                if assign_at == first + 1 and first == 0 and _get_only(in_module):
+                from .assignments import _getter_may_return_object
+                from ...types.type_inference import def_type_of
+                getter = next((sym for sym in in_module if sym.kind is VbaSymbolKind.PROPERTY_GET), None)
+                getter_type = getter.as_type or (def_type_of(symbols, getter.name) if getter.module_name.lower() == symbols.module_name.lower() else None) if getter else None
+                if assign_at == first + 1 and first == 0 and _get_only(in_module) and not _getter_may_return_object(getter_type, member_ctx):
                     push(
                         "readonlyMemberAssignment",
                         f"'{bare}' has a Property Get and no Property Let, so it cannot be "

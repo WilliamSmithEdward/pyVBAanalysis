@@ -11,6 +11,9 @@ context binds (`ws.Range("A1")`, `p.Save "x"`).
 
 from __future__ import annotations
 
+from ..setter_assignment import source_setter_assignment, invalid_setter_assignment_arity
+from ..call_extraction import CallableTypeSignature
+
 import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -212,7 +215,14 @@ def check_argument_types(
                     reported.add(key)
                     push(rule, message, span, data)
 
+            setters = [setter for span in statement_and_branch_spans(stmt) if (setter := source_setter_assignment(source, span, symbols, proc_sym, project_visible_symbols, member_ctx)) is not None]
+            setter_names = {setter.name_span.start for setter in setters}
+            for setter in setters:
+                if not invalid_setter_assignment_arity(setter, source, lambda *_: None):
+                    validate_argument_types_for_signature(sig=CallableTypeSignature(setter.name, setter.index_params), call=setter, env=env, module_signatures=module_signatures, source_names=source_names, source=source, member_ctx=member_ctx, push=push_once, resolve_expression_type=resolve_expression_type, resolve_qualified_expression_type=resolve_qualified_expression_type, held_class_of=held_class_of, held_null=held_null, held_number=held_number)
             for call in expression_calls(source, stmt.span, module_signatures, source_names):
+                if call.name_span.start in setter_names:
+                    continue
                 validate_argument_types(
                     call=call,
                     env=env,
@@ -231,6 +241,8 @@ def check_argument_types(
                 *member_expression_calls(source, stmt.span, member_ctx),
                 *member_statement_calls(source, stmt.span, member_ctx),
             ):
+                if member_call.call.name_span.start in setter_names:
+                    continue
                 validate_argument_types_for_signature(
                     sig=member_call.signature,
                     call=member_call.call,

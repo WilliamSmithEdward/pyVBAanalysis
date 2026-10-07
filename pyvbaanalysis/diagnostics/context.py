@@ -93,6 +93,7 @@ class AnalyzeModuleOptions:
     # runtime-error finding under On Error Resume Next, and merging findings with
     # one code and span. The differential harness sets it to compare the rules.
     raw_rule_output: bool = False
+    errors_only: bool = False
     document_type: Any = None  # EventHandlerDocumentType (from the completion package)
     # Per-rule severity overrides keyed by stable diagnostic code; "off" disables.
     severity_overrides: Mapping[str, str] | None = None

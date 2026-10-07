@@ -140,7 +140,18 @@ def check_access_data(
                 _check_sql_literals(span, statement_tokens(source, span), is_database, push)
 
         for_each_statement(member.body, visit, activity)
-        _check_recordsets(source, member.body, is_database, is_recordset, activity, push)
+        if re.search(r"\bon\s+error\b", source[member.span.start:member.span.end], re.IGNORECASE):
+            continue
+        from ..walker import for_each_variable_group
+        from ...parser.nodes import VariableGroupNode
+        locals_: set[str] = set()
+
+        def collect(group: VariableGroupNode) -> None:
+            if not group.is_const and group.modifier.lower() != "static":
+                locals_.update(decl.name.lower() for decl in group.declarations)
+
+        for_each_variable_group(member.body, collect, activity)
+        _check_recordsets(source, member.body, is_database, lambda lower: lower in locals_ and is_recordset(lower), activity, push)
 
 
 def _database_at(toks: Sequence[VbaToken], end: int, is_database: Callable[[str], bool]) -> bool:
@@ -237,7 +248,6 @@ def _sql_problem(kind: str, sql: str) -> str | None:
     """Why Access refuses this SQL text, with the error it raises, or None."""
     first_match = _FIRST_WORD.search(sql)
     first = first_match.group(1).lower() if first_match is not None else None
-    reads_as_sql = _READS_AS_SQL.search(sql) is not None
     quotes = _open_quote(sql)
     if kind == "runsql":
         if first == "select":
@@ -262,12 +272,6 @@ def _sql_problem(kind: str, sql: str) -> str | None:
         return (
             "Execute has no SQL to run, and no query is named \"\". This will raise Run-time error '3078': "
             "The Microsoft Access database engine cannot find the input table or query"
-        )
-    if first and first not in _SQL_VERBS and reads_as_sql:
-        return (
-            f"\"{first}\" starts no SQL statement, so the text is taken for the name of a table or query, and "
-            "none has that name. This will raise Run-time error '3078': The Microsoft Access database engine "
-            "cannot find the input table or query"
         )
     # The SQL is parsed before Execute asks what kind it is: a SELECT with a
     # parenthesis left open raises 3075, not 3065 (XLIDE issue #611).
@@ -395,8 +399,10 @@ def _check_recordsets(
     with_subjects: list[str | None] = []
 
     def forget(names: Iterable[str]) -> None:
-        for lower in names:
-            state.pop(lower, None)
+        escaped = [state[lower] for lower in names if lower in state]
+        for lower, held in list(state.items()):
+            if any(held is value for value in escaped):
+                state.pop(lower, None)
 
     def visit(node: BodyNode) -> None:
         if not is_leaf_statement(node):
@@ -467,6 +473,12 @@ def _check_recordsets(
             return
         first_name = token_name(_at(toks, 0))
         lower_name = first_name.lower() if first_name is not None else None
+        member = token_text(_at(toks, 2)) if _raw(toks, 1) == "." else None
+        eq = next((k for k, tok in enumerate(toks) if tok.raw_text == "="), -1)
+        field_write = eq > 1 and (_raw(toks, 1) == "!" or _raw(toks, 1) == "(" or member == "fields")
+        if field_write and any(token_name(tok) for tok in toks[eq + 1:]):
+            state.clear()
+            return
         # A recordset read past the statement's head: `Main = rs!Nm`, `x = rs.EOF`.
         for name in _ordered_names(source, node.span):
             other = None if name == lower_name else state.get(name)
@@ -485,7 +497,7 @@ def _check_recordsets(
                 state.pop(name, None)
         held = state.get(lower_name) if lower_name else None
         if held is None or lower_name is None:
-            forget([name for name in names_in(source, node.span) if name not in state])
+            state.clear()
             return
         shown = toks[0].raw_text
         # Any use after Close.

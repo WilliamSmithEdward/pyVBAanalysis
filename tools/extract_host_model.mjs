@@ -17,6 +17,8 @@ const HOSTS = [
   // (App, Screen, Printer, the intrinsic controls), and the analyzer selects it by
   // the `vb6` token like any other.
   ['vb6', 'vb6ObjectModel.ts', 'getVb6ObjectModel', 'pyvbaanalysis/data/vb6_host_model.json'],
+  ['scripting', 'scriptingObjectModel.ts', 'getScriptingObjectModel', 'pyvbaanalysis/data/scripting_host_model.json'],
+  ['regexp', 'scriptingObjectModel.ts', 'getRegExpObjectModel', 'pyvbaanalysis/data/regexp_host_model.json'],
 ];
 
 // Which host interfaces are NONEXTENSIBLE, measured upstream from each type

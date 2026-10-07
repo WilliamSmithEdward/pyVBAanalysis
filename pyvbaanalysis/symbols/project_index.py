@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
 from ..conditional import ConditionalCompilationEnvironment
@@ -42,6 +42,7 @@ from .symbol_model import (
     ModuleSymbols,
     SymbolVisibility,
     VbaProcedureSignature,
+    VbaProcedureParam,
     VbaProjectClassMember,
     VbaProjectClassMemberDefinition,
     VbaProjectClassMembers,
@@ -300,12 +301,17 @@ def _last_parameter(symbol: VbaSymbol) -> VbaSymbol | None:
     return params[-1] if params else None
 
 
-def _project_object_member_write_type(symbol: VbaSymbol) -> str | None:
+def _project_object_member_parameters(symbol: VbaSymbol, mod: ModuleSymbols) -> list[VbaProcedureParam]:
+    return [replace(param, type_=param.type_ or (mod.def_types or {}).get(param.name[:1].lower()))
+            for param in procedure_params_from_symbol(symbol, include_passing=True)]
+
+
+def _project_object_member_write_type(symbol: VbaSymbol, mod: ModuleSymbols) -> str | None:
     if symbol.kind in (VbaSymbolKind.PROPERTY_LET, VbaSymbolKind.PROPERTY_SET):
         last = _last_parameter(symbol)
-        return last.as_type if last is not None else None
+        return (last.as_type or (mod.def_types or {}).get(last.name[:1].lower())) if last is not None else None
     if symbol.kind is VbaSymbolKind.MODULE_VARIABLE:
-        return symbol.as_type
+        return symbol.as_type or (mod.def_types or {}).get(symbol.name[:1].lower())
     return None
 
 
@@ -336,10 +342,12 @@ def _is_visible_standard_module_member(symbol: VbaSymbol, mod: ModuleSymbols, sa
     return _is_exported(symbol, mod.module_kind)
 
 
-def _project_object_member_return_type(symbol: VbaSymbol) -> str | None:
+def _project_object_member_return_type(symbol: VbaSymbol, mod: ModuleSymbols) -> str | None:
     if symbol.kind is VbaSymbolKind.ENUM_MEMBER:
         return symbol.container_name
-    return symbol.as_type
+    return symbol.as_type or ((mod.def_types or {}).get(symbol.name[:1].lower()) if symbol.kind in (
+        VbaSymbolKind.FUNCTION, VbaSymbolKind.PROPERTY_GET, VbaSymbolKind.MODULE_VARIABLE,
+    ) else None)
 
 
 def _project_object_member_definition(symbol: VbaSymbol) -> VbaProjectClassMemberDefinition:
@@ -1079,11 +1087,24 @@ class ProjectIndex:
                     kind="standardModule",
                     module_name=mod.module_name,
                     exhaustive=True,
-                    members=self._visible_standard_module_members(mod, same_module),
+                    members=self._standard_module_members_with_values(mod, same_module),
                 )
 
             out.append(self._contribution("standardModuleMembers", mod, same_module, compute))
         return out
+
+    def _standard_module_members_with_values(self, mod: ModuleSymbols, same_module: bool) -> list[VbaProjectClassMember]:
+        members = self._visible_standard_module_members(mod, same_module)
+        values = None
+        result = []
+        for member in members:
+            if (member.procedure_params or {}).get("propertyGet") is not None and (member.returns or "Variant").lower() == "variant":
+                if values is None:
+                    values = self._contribution("classMemberValues", mod, False, lambda: class_member_values(
+                        self._module_sources.get(mod.module_name.lower(), ""), mod.root.children or []))
+                member = replace(member, known_value=values.get(member.name.lower()))
+            result.append(member)
+        return result
 
     def project_member_surfaces(self, module_name: str) -> list[VbaProjectClassMembers]:
         current_lower = module_name.lower()
@@ -1371,7 +1392,7 @@ class ProjectIndex:
             key = symbol.name.lower()
             existing = by_name.get(key)
             if existing is not None:
-                returns = _project_object_member_return_type(symbol)
+                returns = _project_object_member_return_type(symbol, mod)
                 if not existing.returns and returns:
                     existing.returns = returns
                 writable = _project_object_member_writable(symbol)
@@ -1380,7 +1401,9 @@ class ProjectIndex:
                 elif existing.writable is None and writable is False:
                     existing.writable = False
                 if not existing.write_type:
-                    existing.write_type = _project_object_member_write_type(symbol)
+                    existing.write_type = _project_object_member_write_type(symbol, mod)
+                if symbol.kind in (VbaSymbolKind.PROPERTY_LET, VbaSymbolKind.PROPERTY_SET) and (last := _last_parameter(symbol)) is not None and last.is_array:
+                    existing.write_is_array = True
                 if not existing.signature:
                     existing.signature = _project_object_member_signature(symbol)
                 if _is_default_project_object_member(symbol):
@@ -1393,7 +1416,7 @@ class ProjectIndex:
                 if procedure_kind is not None:
                     existing.procedure_params = {
                         **(existing.procedure_params or {}),
-                        procedure_kind: procedure_params_from_symbol(symbol, include_passing=True),
+                        procedure_kind: _project_object_member_parameters(symbol, mod),
                     }
                 existing.attributes = _merge_member_attributes(existing.attributes, symbol.attributes)
                 existing.definitions = [
@@ -1404,10 +1427,12 @@ class ProjectIndex:
             by_name[key] = VbaProjectClassMember(
                 name=symbol.name,
                 kind=kind,
-                returns=_project_object_member_return_type(symbol),
+                returns=_project_object_member_return_type(symbol, mod),
                 signature=_project_object_member_signature(symbol),
                 writable=_project_object_member_writable(symbol),
-                write_type=_project_object_member_write_type(symbol),
+                write_type=_project_object_member_write_type(symbol, mod),
+                is_array=True if symbol.kind is VbaSymbolKind.MODULE_VARIABLE and symbol.is_array else None,
+                write_is_array=True if symbol.kind in (VbaSymbolKind.PROPERTY_LET, VbaSymbolKind.PROPERTY_SET) and (last := _last_parameter(symbol)) is not None and last.is_array else None,
                 module_name=mod.module_name,
                 visibility=symbol.visibility,
                 definitions=[_project_object_member_definition(symbol)],
@@ -1416,7 +1441,7 @@ class ProjectIndex:
                 set_accessor=True if symbol.kind is VbaSymbolKind.PROPERTY_SET else None,
                 sub=True if symbol.kind is VbaSymbolKind.SUB else None,
                 procedure_params=(
-                    {new_kind: procedure_params_from_symbol(symbol, include_passing=True)}
+                    {new_kind: _project_object_member_parameters(symbol, mod)}
                     if (new_kind := _member_procedure_kind(symbol)) is not None
                     else None
                 ),

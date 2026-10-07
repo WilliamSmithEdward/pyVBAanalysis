@@ -5,6 +5,21 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 3.0.1 - 2026-10-06
+
+Sync the analyzer and evidence data to XLIDE 11.1.0 (commit 8f64c2c).
+
+* Correct module-owned DefType defaults, indexed Property Let/Set contracts,
+  array setter values, enum storage types and bracketed source member names.
+* Check read-only Excel Range values and scalar host setter assignments.
+* Stop inferring runtime bounds from saved sheets, UserForm designer contents,
+  new Word documents or PowerPoint slide counts. Forget mutable state after
+  calls, aliases and error handlers that make a failure uncertain.
+* Add the upstream Scripting and VBScript RegExp reference models and preserve
+  the library that owns an Office or DAO enum.
+* Add the upstream `errors_only` analysis option and save differing replay
+  inputs so a failed differential can be rerun directly.
+
 ## 3.0.0 - 2026-10-04
 
 Sync to XLIDE 11.0.0 (commit 751fdb2). This major release includes the

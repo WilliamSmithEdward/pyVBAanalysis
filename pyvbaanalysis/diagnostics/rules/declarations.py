@@ -59,7 +59,7 @@ from ...parser.nodes import (
 )
 from ...parser.type_declaration_suffix import is_type_declaration_suffix
 from ...runtime import resolve_runtime_function
-from ...symbols.symbol_model import ModuleSymbolKind
+from ...symbols.symbol_model import ModuleSymbolKind, VbaProjectTypeKind
 from ...types.type_names import is_known_scalar_type, normalize_type
 from ..const_expr import (
     collect_body_literal_integer_constants,
@@ -858,10 +858,18 @@ def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: Conditio
     known_non_type_names = opts.known_non_type_names or frozenset()
     variables: set[str] | None = None
     own_types: set[str] | None = None
+    qualified_enum_types: set[str] | None = None
     for ref in _collect_type_name_references(source, mod):
         if activity is not None and activity.is_inactive(ref.span):
             continue
         lookup_name = _type_reference_lookup_name(ref)
+        if ref.kind == "declaration" and ref.qualifier:
+            if qualified_enum_types is None:
+                qualified_enum_types = {f"{type_.module_name}.{type_.name}".lower() for type_ in opts.project_types or () if type_.kind is VbaProjectTypeKind.ENUM and type_.module_name}
+                qualified_enum_types.update(f"{opts.module_name or 'Module'}.{member.name}".lower() for member in active_module_members(mod, activity) if isinstance(member, EnumNode))
+            if lookup_name.lower() in qualified_enum_types and resolve_type_name(lookup_name, None, opts.host_model) is None:
+                push("invalidAsTypeName", f"'{lookup_name}' qualifies a source Enum with its module name. Use '{ref.name}' as the type name. This is a VBE compile error: User-defined type not defined.", ref.span)
+                continue
         resolved = resolve_type_name(lookup_name, opts.project_types, opts.host_model)
         if resolved is not None and resolved.kind == "ambiguous":
             push(
@@ -940,7 +948,7 @@ def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: Conditio
         libraries = (
             [
                 cast("AbstractSet[str] | None", library_type_names(library))
-                for library in opts.referenced_libraries
+                for library in (dict.fromkeys(["VBA", (opts.host_model or {}).get("hostName", opts.host or "Excel"), *opts.referenced_libraries]) if opts.referenced_libraries else opts.referenced_libraries)
             ]
             if opts.referenced_libraries is not None
             else None

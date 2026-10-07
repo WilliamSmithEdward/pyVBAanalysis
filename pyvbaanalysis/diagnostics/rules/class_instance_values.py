@@ -225,6 +225,8 @@ def _check_statement(
             i += 1
             continue
         indexed = _raw(_at(toks, i + 3)) == "("
+        from ...completion.member_access import signature_declares_parameters
+        indexes_result = indexed and not signature_declares_parameters(member.signature)
         close = match_paren_from(list(toks), i + 3) if indexed else i + 2
         if close < 0:
             i += 1
@@ -255,7 +257,7 @@ def _check_statement(
             )
             if (
                 member_of
-                or indexed
+                or indexes_result
                 or (operand and _is_object_type(member, "object"))
                 or (plain_read and member.kind == "method")
             ):
@@ -272,7 +274,7 @@ def _check_statement(
                 )
                 i += 1
                 continue
-        if member.known_value == "empty" and not field_assigned and member_of:
+        if member.known_value == "empty" and member.signature is None and not field_assigned and member_of:
             push(
                 "variantValueMisuse",
                 f"{shown} is Empty here: nothing in {instance.type.name} assigns {member.name}, so it has no "
@@ -282,7 +284,7 @@ def _check_statement(
             i += 1
             continue
         if member.known_value == "scalar":
-            if indexed and (target or not member_of):
+            if indexes_result and (target or not member_of):
                 push(
                     "variantValueMisuse",
                     f"{member.name} gives a single value, so {shown} has no element to "
@@ -291,7 +293,7 @@ def _check_statement(
                 )
                 i += 1
                 continue
-            if set_read and not indexed:
+            if set_read and not indexes_result:
                 push(
                     "variantValueMisuse",
                     f"{member.name} gives a single value, not an object, so Set has nothing to assign. This "

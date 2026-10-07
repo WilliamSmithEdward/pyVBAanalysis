@@ -116,7 +116,7 @@ def check_refused_declarations(
                 push(
                     "optionalPropertyValue",
                     f"The value parameter '{value.name}' of a Property {which} cannot be "
-                    "Optional. This is a VBE compile error: Syntax error.",
+                    "Optional. This is a VBE compile error.",
                     value.name_span if value.name_span is not None else value.span,
                 )
             for_each_variable_group(member.body, const_groups, activity)

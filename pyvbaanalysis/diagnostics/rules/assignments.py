@@ -54,6 +54,7 @@ from ...symbols.symbol_model import (
     VbaProjectClassMembers,
     VbaSymbol,
     VbaSymbolKind,
+    procedure_params_from_symbol,
 )
 from ...types.type_inference import (
     SCALAR_OBJECT_ASSIGNMENT_REASON,
@@ -83,12 +84,18 @@ from ..argument_inference import (
     infer_argument_type,
     nonnumeric_string_arithmetic_operand,
 )
+from ..assignment_coercion_type import create_assignment_coercion_type, array_element_identity, array_by_ref_identity
+from ..setter_assignment import assignment_target_from_tokens, assignment_target_name, source_setter_assignment, invalid_setter_assignment_arity, project_setter_member
+from ...symbols.class_member_facts import class_member_values
 from ..call_extraction import (
     CallableTypeSignature,
     CallArguments,
     InferredArgumentType,
     extract_call,
     extract_qualified_call,
+    CallableParamType,
+    split_arg_slots,
+    validate_arity,
     named_argument_slot,
     string_literal_value,
     unwrap_outer_parens,
@@ -101,11 +108,13 @@ from ..callable_signatures import (
     is_member_statement_chain_through,
     runtime_callable_source_shadowed,
     source_name_scope_for,
+    member_callable_signature,
 )
 from ..context import PushFn
 from ..function_results import function_result_at, known_function_results
 from ..held_objects import HeldObjects, held_objects_at
 from ..known_locals import KnownLocalValue
+from ..member_parameter_counts import member_parameter_counts
 from ..null_operators import operator_yields_null
 from ..straight_line_values import straight_line_assignments
 from ..walker import (
@@ -311,6 +320,8 @@ class _MemberAssignmentTarget:
     uses_set: bool
     # True for `wb.Name() = x`: the member is given arguments.
     with_arguments: bool
+    has_arguments: bool
+    argument_tokens: list[VbaToken]
 
 
 def _member_assignment_target(source: str, span: Span) -> _MemberAssignmentTarget | None:
@@ -364,6 +375,8 @@ def _member_assignment_target(source: str, span: Span) -> _MemberAssignmentTarge
         value_tokens=list(toks[equals_index + 1 :]),
         uses_set=uses_set,
         with_arguments=with_arguments,
+        has_arguments=with_arguments and len(lhs) > member_index + 3,
+        argument_tokens=list(lhs[member_index + 2:-1]) if with_arguments else [],
     )
 
 
@@ -416,7 +429,7 @@ def check_assignment_types(
                 else None
             )
             read_only_default: str | None = None
-            if is_object and verdict == "lets" and not holding:
+            if is_object and not holding:
                 read_only_default = _read_only_project_default(type_name, member_ctx)
                 if read_only_default is None:
                     read_only_default = read_only_host_default(type_name, member_ctx)
@@ -461,10 +474,35 @@ def check_assignment_types(
     # Enum assignment compatibility is a name query, not a full symbol scan
     # per assignment. Keep this index within the current rule pass.
     enum_names = {
-        symbol.name.lower()
+        name
         for symbol in [*(symbols.root.children or ()), *(project_visible_symbols or ())]
         if symbol.kind is VbaSymbolKind.ENUM
+        for name in (symbol.name.lower(), f"{symbol.module_name}.{symbol.name}".lower())
     }
+    coercion_type = create_assignment_coercion_type(member_ctx, enum_names)
+    member_coercion_type = create_assignment_coercion_type(member_ctx)
+    def element_identity(type_: str | None) -> str:
+        return array_element_identity(type_, member_ctx, coercion_type)
+
+    def by_ref_identity(type_: str | None) -> str:
+        return array_by_ref_identity(type_, member_ctx, enum_names)
+    setter_names = {symbol.name.lower() for symbol in [*(symbols.root.children or ()), *(project_visible_symbols or ())] if symbol.kind is VbaSymbolKind.PROPERTY_LET}
+    getter_names = {symbol.name.lower() for symbol in [*(symbols.root.children or ()), *(project_visible_symbols or ())] if symbol.kind in (VbaSymbolKind.PROPERTY_GET, VbaSymbolKind.FUNCTION)}
+    own_getter_values: Mapping[str, str] | None = None
+
+    def check_returned_object_default(type_: str, label: str, span: Span) -> bool:
+        facts = object_facts_for(type_)
+        if facts.holding or facts.read_only_default:
+            name = facts.holding.name if facts.holding else facts.read_only_default
+            push("invalidPropertyUse", f"Assignment through '{label}' reaches the default member {name} of {type_}, which has no writable Let contract. This is a VBE compile error: Invalid use of property.", span)
+            return True
+        if facts.verdict == "argument":
+            push("argumentCount", f"Argument not optional: '{label}' returns {type_}, whose default member requires an index before a Let can reach it. This is a VBE compile error.", span)
+            return True
+        if facts.verdict == "noDefault":
+            push("runtimeMemberNotFound", f"'{label}' returns {type_}, which has no default member to receive this Let assignment. This will raise Run-time error '438': Object doesn't support this property or method, or error '91' if the returned object is Nothing.", span)
+            return True
+        return False
     variant_array_functions = _array_only_variant_functions(source, mod, activity)
 
     def check_procedure(procedure: ProcedureNode) -> None:
@@ -740,6 +778,10 @@ def check_assignment_types(
                 BareIdentifierContext.ASSIGNMENT_TARGET,
             )
             expected = declared.as_type if declared.resolved else None
+            facts = object_facts_for(expected) if expected else None
+            if facts and facts.read_only_default:
+                push("readonlyMemberAssignment", f"Assignment to '{element.label}' reaches the default member {facts.read_only_default} of {expected}, a Property Get with no Property Let. This is a VBE compile error: Invalid use of property.", element.span)
+                return
             if expected and object_facts_for(expected).verdict == "argument":
                 error = (
                     "Argument not optional"
@@ -766,7 +808,116 @@ def check_assignment_types(
                 BareIdentifierContext.EXPRESSION,
             )
 
+        def infer_value(tokens: Sequence[VbaToken], offset: int) -> InferredArgumentType | None:
+            return infer_argument_type(tokens, offset, env, module_signatures, source_names,
+                source=source, member_ctx=member_ctx, resolve_expression_type=resolve_expression_type,
+                resolve_qualified_expression_type=resolve_qualified_expression_type)
+
+        def check_bare_getter(span: Span) -> bool:
+            nonlocal own_getter_values
+            if not getter_names:
+                return False
+            tokens = statement_tokens_after_leading_label(source, span)
+            first = first_executable_token_index(tokens)
+            if token_text(_at(tokens, first)) == "let":
+                first += 1
+            root = token_name(_at(tokens, first))
+            if not root or root.lower() not in getter_names:
+                return False
+            equals = top_level_operator_index(tokens, "=")
+            target = assignment_target_from_tokens(tokens[:equals + 1]) if equals >= 0 else None
+            named = assignment_target_name(target) if target else None
+            if target is None or named is None or named[0] != 0:
+                return False
+            binding = source_identifier_binding(symbols, proc_sym, project_visible_symbols, root, BareIdentifierContext.ASSIGNMENT_TARGET)
+            if binding.scope is BareIdentifierResolutionScope.AMBIGUOUS or any(definition.kind in (VbaSymbolKind.PROPERTY_LET, VbaSymbolKind.PROPERTY_SET) for definition in binding.definitions):
+                return False
+            getter = next((definition for definition in binding.definitions if definition.kind in (VbaSymbolKind.PROPERTY_GET, VbaSymbolKind.FUNCTION)), None)
+            if getter is None or getter is proc_sym:
+                return False
+            declared = getter.as_type or (def_type_of(symbols, getter.name) if getter.module_name.lower() == symbols.module_name.lower() else "Variant")
+            if getter.kind is VbaSymbolKind.FUNCTION and not is_known_object_assignment_type_ctx(declared, member_ctx):
+                return False
+            parameters = [CallableParamType(name=param.name, type_=param.type_, optional=param.optional, param_array=param.param_array) for param in procedure_params_from_symbol(getter)]
+            name_span = Span(span.start + target[0].start, span.start + target[0].end)
+            if not named[1] and any(not param.optional and not param.param_array for param in parameters):
+                push("argumentCount", f"Argument not optional: '{root}' requires a getter argument.", name_span)
+                return True
+            result_indexed = named[1] and len(target) > 3 and not parameters
+            if not result_indexed and _invalid_getter_argument_count(source, root, name_span, parameters, target[2:-1] if named[1] else [], span.start):
+                return True
+            if declared and _getter_may_return_object(declared, member_ctx) and not result_indexed and check_returned_object_default(declared, root, name_span):
+                return True
+            if getter.kind is VbaSymbolKind.FUNCTION or normalize_type(declared) != "variant":
+                return False
+            if getter.module_name.lower() == symbols.module_name.lower():
+                if own_getter_values is None:
+                    own_getter_values = class_member_values(source, symbols.root.children or [])
+                value = own_getter_values.get(getter.name.lower())
+            else:
+                member = project_setter_member(member_ctx, getter.module_name, getter.name)
+                value = member.known_value if member else None
+            if value not in ("scalar", "empty"):
+                return False
+            push("variantValueMisuse", f"'{root}' has only a Property Get returning a Variant that holds no object. The Let writes through its returned value, which cannot receive a property assignment. This will raise Run-time error '424': Object required.", name_span)
+            return True
+
+        def check_bare_setter(span: Span, stmt: LeafStatementNode) -> bool:
+            if not setter_names:
+                return False
+            tokens = statement_tokens_after_leading_label(source, span)
+            first = first_executable_token_index(tokens)
+            if token_text(_at(tokens, first)) == "if":
+                return False
+            if token_text(_at(tokens, first)) == "let":
+                first += 1
+            root = token_name(_at(tokens, first))
+            if not root or root.lower() not in setter_names:
+                return False
+            equals = top_level_operator_index(tokens, "=")
+            target = assignment_target_from_tokens(tokens[:equals + 1]) if equals >= 0 else None
+            named = assignment_target_name(target) if target else None
+            if target is None or named is None or named[0] != 0:
+                return False
+            name = token_name(target[0])
+            if not name:
+                return False
+            binding = source_identifier_binding(symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.ASSIGNMENT_TARGET)
+            if binding.scope is BareIdentifierResolutionScope.AMBIGUOUS:
+                return False
+            setter = next((definition for definition in binding.definitions if definition.kind is VbaSymbolKind.PROPERTY_LET), None)
+            params = [child for child in setter.children or [] if child.kind is VbaSymbolKind.PARAMETER] if setter else []
+            parameter = params[-1] if params else None
+            declared = parameter.as_type or (def_type_of(symbols, parameter.name) if parameter.module_name.lower() == symbols.module_name.lower() else None) if parameter else None
+            if declared is None and setter:
+                member = project_setter_member(member_ctx, setter.module_name, setter.name)
+                source_params = (member.procedure_params or {}).get("propertyLet") if member and member.let_accessor else None
+                declared = (source_params[-1].type_ if source_params else None) or (member.write_type if member and member.let_accessor else None)
+            value = tokens[equals + 1:]
+            actual = infer_value(value, span.start)
+            if parameter and parameter.is_array:
+                _check_array_setter_value(name, declared, value, span.start, actual, coercion_type, resolve_expression_type, resolve_qualified_expression_type, push, source_names, project_declares_collection, lambda type_: object_let_assignment_verdict(type_, member_ctx), lambda name: array_value_at(stmt, name), by_ref_identity)
+                return True
+            if not declared:
+                return False
+            expected = coercion_type(declared)
+            if not is_known_scalar_type(normalize_type(expected) or ""):
+                return False
+            problem = _array_assignment_problem(name, actual.span if actual else span, value, span.start, DeclaredValueShape(expected, False, False), lambda name: resolve_source_shape(name).shape, lambda name: array_value_at(stmt, name), lambda _: actual, source_names, member_ctx=member_ctx, source=source)
+            if problem:
+                push(problem.code, problem.message, problem.span)
+                return True
+            reason = incompatibility_reason(expected, actual) if actual else None
+            if reason and actual:
+                push("assignmentTypeMismatch", f"Assignment to '{name}' expects {declared}, but got {actual.label}. {reason}", actual.span)
+            return True
+
         def check_assignment_span(span: Span, stmt: LeafStatementNode) -> None:
+            setter = source_setter_assignment(source, span, symbols, proc_sym, project_visible_symbols, member_ctx)
+            if setter and invalid_setter_assignment_arity(setter, source, push):
+                return
+            if check_bare_setter(span, stmt) or check_bare_getter(span):
+                return
             assignment = bare_assignment_target(source, span)
             if assignment is None:
                 check_element_let(span)
@@ -795,10 +946,7 @@ def check_assignment_types(
                 declared_expected = "Variant"
             # A variable As an Enum is a Long: `x = "abc"` raises 13 and
             # `x = 3000000000#` 6 (XLIDE issue #436, measured in Excel 16.0).
-            enum_name = (
-                declared_expected.split(".")[-1].lower() if declared_expected is not None else None
-            )
-            expected = "Long" if enum_name and enum_name in enum_names else declared_expected
+            expected = coercion_type(declared_expected) if declared_expected else None
             # `Sheet1 = 5` compiles as a Let through the document's default
             # member, and a Worksheet or Workbook has none (XLIDE issue #225).
             if not expected and not target_type.resolved and is_document_module(name):
@@ -823,8 +971,10 @@ def check_assignment_types(
                 return
             if not expected:
                 return
-            object_type = object_facts_for(expected)
-            if object_type.is_object:
+            resolved_target_shape = resolve_target_shape(name)
+            target_shape = resolved_target_shape.shape if resolved_target_shape.resolved else shapes.get(name.lower())
+            object_type = None if target_shape is not None and target_shape.is_array else object_facts_for(expected)
+            if object_type is not None and object_type.is_object:
                 # The VBE compiles a bare `=` to an object variable as a Let
                 # through the type's default member (XLIDE issue #107): `r = 5`
                 # writes the Range's Value. What is reported is what the
@@ -976,6 +1126,9 @@ def check_assignment_types(
                 scalar_type,
                 source_names,
                 returns_variant_array,
+                member_ctx=member_ctx,
+                source=source,
+                array_element_identity=element_identity,
             )
             if array_problem is not None:
                 push(array_problem.code, array_problem.message, array_problem.span)
@@ -1089,6 +1242,11 @@ def check_assignment_types(
             resolve_expression_type,
             resolve_qualified_expression_type,
             symbols,
+            coercion_type=member_coercion_type,
+            check_returned_object_default=check_returned_object_default,
+            array_value_at=array_value_at,
+            project_visible_symbols=project_visible_symbols,
+            array_by_ref_identity=by_ref_identity,
         )
 
     for member in active_module_members(mod, activity):
@@ -1101,6 +1259,74 @@ class _NullChoice:
     why: str
     first: VbaToken
     last: VbaToken
+
+
+def _getter_may_return_object(type_: str | None, ctx: MemberCompletionContext) -> bool:
+    if _ENDS_IN_PARENS_RE.search(type_ or ""):
+        return False
+    normalized = normalize_type(type_)
+    return normalized in (None, "variant", "object") or is_known_object_assignment_type_ctx(type_, ctx)
+
+
+def _invalid_getter_argument_count(source: str, name: str, span: Span, params: Sequence[CallableParamType], tokens: Sequence[VbaToken], base: int) -> bool:
+    split = split_arg_slots(tokens, base) if tokens else None
+    invalid = False
+
+    def report(rule: str, message: str, span: Span, data: Any = None) -> None:
+        nonlocal invalid
+        invalid = True
+
+    validate_arity(source, CallableTypeSignature(name, list(params)), CallArguments(name=name, name_span=span, slots=split.slots if split else [], slot_spans=split.spans if split else [], slice_start=base), report)
+    return invalid
+
+
+def _check_array_setter_value(label: str, expected: str | None, tokens: Sequence[VbaToken], base: int,
+    actual: InferredArgumentType | None, coercion: Callable[[str], str],
+    resolve_type: SourceDeclaredTypeResolver | None, resolve_qualified_type: SourceQualifiedDeclaredTypeResolver | None,
+    push: PushFn, source_names: SourceNameScope, project_collection: Callable[[], bool],
+    object_verdict: Callable[[str | None], str], variant_value: Callable[[str], _ArrayValue | None],
+    by_ref_identity: Callable[[str | None], str] = lambda value: _element_type(value),
+) -> None:
+    raw = [token for token in tokens if token.kind not in (TokenKind.COMMENT, TokenKind.NEWLINE)]
+    if not raw:
+        return
+    value = unwrap_outer_parens(raw)
+    expected_type = normalize_type(expected)
+    actual_type = normalize_type(actual.type_ if actual else None)
+    typed_array = actual is not None and _ENDS_IN_PARENS_RE.search(actual.type_) is not None
+    expected_array_type = by_ref_identity(expected)
+    actual_array_type = by_ref_identity(actual.type_ if actual else None)
+    same_storage = ("longlong" if actual_array_type == "longptr" else actual_array_type) == ("longlong" if expected_array_type == "longptr" else expected_array_type)
+    wrong_element = typed_array and expected_array_type != actual_array_type and not (is_known_scalar_type(expected_array_type) and is_known_scalar_type(actual_array_type) and same_storage)
+    indexed = len(value) > 1 and value[1].raw_text == "(" and match_paren_from(value, 1) == len(value) - 1
+    name = token_name(value[0]) if len(value) == 1 or indexed else None
+    qualified = len(value) == 3 and value[1].raw_text == "." and token_name(value[0]) and token_name(value[2])
+    declared = resolve_type(name) if name and resolve_type else resolve_qualified_type(value[0].raw_text, value[2].raw_text) if qualified and resolve_qualified_type else None
+    span = Span(base + raw[0].start, base + raw[-1].end)
+    kinds = (VbaSymbolKind.LOCAL_VARIABLE, VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.PARAMETER)
+    array_variable = declared is not None and declared.is_array and declared.kind in kinds
+    if array_variable and (not indexed or len(value) == 3):
+        push("arrayTargetAssignment", f"Assignment to '{label}' passes a whole array to a Property Let value parameter. This is a VBE compile error: Can't assign to array.", span)
+        return
+    string_element = array_variable and indexed and len(value) > 3 and declared is not None and normalize_type(declared.as_type) == "string"
+    if expected_type == "byte" and ((actual_type == "string" and not typed_array) or string_element):
+        return
+    if len(value) == 2 and token_text(value[0]) == "new" and normalize_type(value[1].raw_text) == "collection" and not project_collection():
+        push("argumentCount", f"Assignment to '{label}' reads the Collection's default member Item, which requires an index. This is a VBE compile error: Argument not optional.", span)
+        return
+    variant_variable = declared is not None and declared.resolved and not declared.is_array and declared.kind in kinds and (normalize_type(declared.as_type) or "variant") == "variant"
+    produced = _array_produced_by(value, source_names)
+    if expected_type == "byte" and (variant_variable or produced):
+        def shape(name: str) -> DeclaredValueShape | None:
+            binding = resolve_type(name) if resolve_type else None
+            return DeclaredValueShape(binding.as_type, bool(binding.is_array), False) if binding and binding.resolved else None
+
+        problem = _array_assignment_problem(label, span, value, base, DeclaredValueShape("Byte", True, False), shape, variant_value, lambda _: actual, source_names)
+        if problem:
+            push(problem.code, problem.message, problem.span)
+        return
+    if wrong_element or (array_variable and indexed and len(value) > 3) or variant_variable or (actual and not typed_array and is_known_scalar_type(normalize_type(coercion(actual.type_)) or "")) or produced or (actual and not typed_array and object_verdict(actual.type_) == "noDefault"):
+        push("argumentShapeMismatch", f"Assignment to '{label}' passes {actual.label if actual else 'an array element'}, but the Property Let value parameter requires an array. This is a VBE compile error: Type mismatch: array or user-defined type expected.", span)
 
 
 def _null_from_choice(
@@ -1197,6 +1423,10 @@ def _array_assignment_problem(
     scalar_type: Callable[[list[VbaToken]], InferredArgumentType | None],
     source_names: SourceNameScope,
     returns_variant_array: Callable[[str], bool] = lambda _name: False,
+    member_ctx: MemberCompletionContext | None = None,
+    source: str | None = None,
+    array_failure_phase: str = "compile",
+    array_element_identity: Callable[[str | None], str] | None = None,
 ) -> _ArrayProblem | None:
     """What an array target takes, and what an array value goes into (XLIDE
     issue #194, each measured in Excel 16.0):
@@ -1211,7 +1441,7 @@ def _array_assignment_problem(
        So does an Empty Variant, and so does an array into a scalar.
 
     `name`, `name_span` and `value_tokens` are upstream's `assignment` object."""
-    value = _non_comment(value_tokens)
+    value = unwrap_outer_parens(_non_comment(value_tokens))
     if not value:
         return None
     value_span = Span(base_offset + value[0].start, base_offset + value[-1].end)
@@ -1232,7 +1462,11 @@ def _array_assignment_problem(
         produced = called
     if produced is None and value_name and not (named is not None and named.is_array):
         produced = variant_value(value_name)
-    target_type = _element_type(target_shape.as_type if target_shape is not None else None)
+    identity = array_element_identity or _element_type
+    last = value[-1]
+    member_name = token_name(last)
+    member = resolve_exact_member_completion(source, member_name, base_offset + last.end, member_ctx) if source and member_ctx and member_name and len(value) >= 2 and value[-2].raw_text == "." else None
+    target_type = identity(target_shape.as_type if target_shape is not None else None)
     if target_shape is not None and target_shape.is_array:
         element_text = _TRAILING_PARENS_RE.sub(
             "", target_shape.as_type if target_shape.as_type is not None else "Variant", count=1
@@ -1252,7 +1486,7 @@ def _array_assignment_problem(
         if named is not None and named.is_array:
             return (
                 None
-                if _element_type(named.as_type) == target_type
+                if identity(named.as_type) == target_type
                 else cannot(
                     f"'{value_name}' is an array of "
                     f"{named.as_type if named.as_type is not None else 'Variant'}"
@@ -1261,13 +1495,16 @@ def _array_assignment_problem(
         # A Function declared to return a typed array is held to the same
         # rule as an array variable: `a = StrArr()` into Long() or Variant()
         # does not compile (XLIDE issue #222, measured in Excel 16.0).
-        returned = scalar_type(value) if produced is None and _is_whole_call(value) else None
+        if member is not None and member.is_array:
+            element = member.returns
+            return None if identity(element) == target_type else cannot(f"'{member.owner}.{member.name}' is an array of {element or 'Variant'}")
+        returned = scalar_type(value) if produced is None else None
         if returned is not None and _ENDS_IN_PARENS_RE.search(returned.type_):
             element = _TRAILING_PARENS_RE.sub("", returned.type_, count=1)
             return (
                 None
-                if _element_type(element) == target_type
-                else cannot(f"{value[0].raw_text}(...) returns an array of {element}")
+                if identity(element) == target_type
+                else cannot(f"{returned.label} returns an array of {element}")
             )
         if produced is not None:
             if produced.element == target_type:
@@ -1304,6 +1541,14 @@ def _array_assignment_problem(
         ):
             return cannot(f"{shown} is a {scalar.type_}, not an array")
         return None
+    if target_shape is not None and is_known_scalar_type(target_type):
+        typed_call = scalar_type(value) if value[-1].raw_text == ")" else None
+        array_type = named.as_type if named is not None and named.is_array else member.returns if member is not None and member.is_array else typed_call.type_ if typed_call else None
+        if target_type == "string" and _element_type(array_type) == "byte":
+            return None
+        if (named is not None and (named.is_array or _ENDS_IN_PARENS_RE.search(named.as_type or ""))) or (member is not None and (member.is_array or _ENDS_IN_PARENS_RE.search(member.returns or ""))) or (produced is None and typed_call and _ENDS_IN_PARENS_RE.search(typed_call.type_)):
+            phase = "This is a VBE compile error." if array_failure_phase == "compile" else "This will raise Run-time error '13': Type mismatch."
+            return _ArrayProblem("arrayAssignmentToScalar" if array_failure_phase == "compile" else "assignmentTypeMismatch", f"Type mismatch: assignment to '{name}' expects {target_shape.as_type}, but this value is a whole typed array. {phase}", value_span)
     if (
         produced is not None
         and produced.element != "empty"
@@ -1869,6 +2114,12 @@ def check_member_assignment_types(
     resolve_expression_type: SourceDeclaredTypeResolver | None = None,
     resolve_qualified_expression_type: SourceQualifiedDeclaredTypeResolver | None = None,
     symbols: ModuleSymbols | None = None,
+    *,
+    coercion_type: Callable[[str], str] | None = None,
+    check_returned_object_default: Callable[[str, str, Span], bool] | None = None,
+    array_value_at: Callable[[LeafStatementNode, str], _ArrayValue | None] = lambda _stmt, _name: None,
+    project_visible_symbols: Sequence[VbaSymbol] | None = None,
+    array_by_ref_identity: Callable[[str | None], str] = lambda value: _element_type(value),
 ) -> None:
     """Port of checkMemberAssignmentTypes: `obj.Member = value` type compatibility.
 
@@ -1876,6 +2127,8 @@ def check_member_assignment_types(
     writability; a host member is judged by its read-only contract and the
     values the host refuses."""
     project_classes = len(member_ctx.project_class_members or ()) > 0
+    coerce = coercion_type or create_assignment_coercion_type(member_ctx)
+    returned_default = check_returned_object_default or (lambda _type, _label, _span: False)
     values_at: Callable[[LeafStatementNode], Mapping[str, KnownLocalValue]] | None = None
     boolean_names: set[str] | None = None
 
@@ -1919,6 +2172,10 @@ def check_member_assignment_types(
             return None if boolean and held.value != 0 else held.value
 
         assignment = _member_assignment_target(source, span)
+        if symbols:
+            setter = source_setter_assignment(source, span, symbols, procedure_symbol_for(symbols, member), None, member_ctx)
+            if setter and invalid_setter_assignment_arity(setter, source, lambda *_: None):
+                return
         if assignment is None:
             return
         value = _non_comment(assignment.value_tokens)
@@ -1945,6 +2202,15 @@ def check_member_assignment_types(
         target = resolve_exact_member_completion(
             source, assignment.member, assignment.member_span.end, member_ctx
         )
+        if target and target.kind == "method" and not target.sub and not assignment.uses_set and not _late_bound_receiver(source, assignment.member_span.end, member_ctx) and _getter_may_return_object(target.returns or target.declared_type, member_ctx):
+            total, _ = member_parameter_counts(target.signature)
+            result_indexed = assignment.with_arguments and total == 0 and assignment.has_arguments
+            params = member_callable_signature(target).params if target.signature or target.procedure_params else None
+            if not result_indexed and params is not None and _invalid_getter_argument_count(source, target.name, assignment.member_span, params, assignment.argument_tokens, span.start):
+                return
+            returned = target.returns or target.declared_type
+            if not result_indexed and returned and returned_default(returned, assignment.label, assignment.member_span):
+                return
         if target is not None and target.access == "read-only" and target.writable is None:
             vbe_error = _host_read_only_assignment_error(target, assignment.uses_set, member_ctx)
             if vbe_error and not _late_bound_receiver(source, assignment.member_span.end, member_ctx):
@@ -1954,6 +2220,9 @@ def check_member_assignment_types(
                     f"compile error: {vbe_error}.",
                     assignment.member_span,
                 )
+            elif target.kind == "property" and target.owner.lower() == "excel.range" and target.name.lower() in {"height", "width", "left", "top", "text", "countlarge", "hasarray", "hasformula"} and not _late_bound_receiver(source, assignment.member_span.end, member_ctx):
+                alternative = " Use RowHeight to change it." if target.name.lower() == "height" else " Use ColumnWidth to change it." if target.name.lower() == "width" else ""
+                push("hostReadonlyValueAssignment", f"Cannot assign to read-only property '{assignment.label}': it returns a value and has no setter. This assignment fails when it runs.{alternative}", assignment.member_span)
             return
         # `Range("A1").Formula = "=SUM(B1"`: a formula Excel cannot parse (XLIDE
         # issue #276). A warning: a cell formatted as Text takes it.
@@ -1976,6 +2245,19 @@ def check_member_assignment_types(
             if problem and value_span is not None:
                 push("hostPropertyValueOutOfRange", problem, value_span)
                 return
+        # `ActiveSheet.Visible = "abc"`: a receiver of several host types, each
+        if target and target.kind == "property" and target.access == "read/write" and target.writable is None and not assignment.uses_set and not assignment.with_arguments and target.declared_type and (is_known_scalar_type(normalize_type(target.declared_type) or "") or resolve_host_enum(target.declared_type, member_ctx.model)) and not _late_bound_receiver(source, assignment.member_span.end, member_ctx):
+            actual = infer(assignment.value_tokens, span.start)
+            host_expected = "Long" if resolve_host_enum(target.declared_type, member_ctx.model) else target.declared_type
+            host_array_problem = _array_assignment_problem(assignment.label, assignment.member_span, assignment.value_tokens, span.start, DeclaredValueShape(host_expected, False, False), lambda name: declared_shape_for_source_binding(symbols, procedure_symbol_for(symbols, member), project_visible_symbols, name, BareIdentifierContext.EXPRESSION).shape if symbols else None, lambda name: array_value_at(stmt, name), lambda _: actual, source_names, member_ctx=member_ctx, source=source, array_failure_phase="runtime")
+            if host_array_problem:
+                push(host_array_problem.code, host_array_problem.message, host_array_problem.span)
+                return
+            reason = incompatibility_reason(target.declared_type, actual) if actual else None
+            if reason and actual:
+                push("assignmentTypeMismatch", f"Assignment to '{assignment.label}' expects {target.declared_type}, but got {actual.label}. {reason}", actual.span)
+                return
+
         # `ActiveSheet.Visible = "abc"`: a receiver of several host types, each
         # refusing the value alike (XLIDE issue #416).
         if (
@@ -2018,22 +2300,41 @@ def check_member_assignment_types(
         # The project-class checks read a bare property target only. A Type's
         # array field takes an array, or a String As Byte: typeMembers.ts
         # judges it (XLIDE issue #417).
+        indexed_accessor = target is not None and (target.set_accessor if assignment.uses_set else (target.let_accessor or (target.writable is False and target.signature is not None and (signature_declares_parameters(target.signature) or normalize_type(target.returns or target.declared_type) != "string"))))
         if (
             not project_classes
-            or assignment.with_arguments
+            or (assignment.with_arguments and not indexed_accessor)
             or target is None
             or target.writable is None
-            or target.is_array
+            or (target.is_array and not target.write_is_array)
         ):
             return
         if target.writable is False:
+            if not assignment.uses_set and _getter_may_return_object(target.returns or target.declared_type, member_ctx):
+                total, required = member_parameter_counts(target.signature)
+                if (assignment.with_arguments and total == 0 and assignment.has_arguments) or (not assignment.with_arguments and required > 0):
+                    return
+                returned = target.returns or target.declared_type
+                getter_params = (target.procedure_params or {}).get("propertyGet")
+                if getter_params is not None and _invalid_getter_argument_count(source, target.name, assignment.member_span, member_callable_signature(target).params, assignment.argument_tokens, span.start):
+                    return
+                if returned and returned_default(returned, assignment.label, assignment.member_span):
+                    return
+                if normalize_type(returned) in (None, "variant") and target.known_value in ("scalar", "empty"):
+                    push("variantValueMisuse", f"'{assignment.label}' has only a Property Get returning a Variant that holds no object. The Let writes through its returned value, which cannot receive a property assignment. This will raise Run-time error '424': Object required.", assignment.member_span)
+                return
             push(
                 "readonlyMemberAssignment",
                 f"Cannot assign to read-only property '{assignment.label}'.",
                 assignment.member_span,
             )
             return
-        expected = target.write_type if target.write_type is not None else target.returns
+        if not assignment.uses_set and target.write_is_array:
+            actual = infer(assignment.value_tokens, span.start)
+            _check_array_setter_value(assignment.label, target.write_type, assignment.value_tokens, span.start, actual, coerce, resolve_expression_type, resolve_qualified_expression_type, push, source_names, project_declares_collection, lambda type_: object_let_assignment_verdict(type_, member_ctx), lambda name: array_value_at(stmt, name), array_by_ref_identity)
+            return
+        declared_expected = target.write_type if target.write_type is not None else target.returns
+        expected = coerce(declared_expected) if declared_expected else None
         if assignment.uses_set:
             # A Property Set takes the Set whatever the Let and Get are typed:
             # `Set c.M = New Collection` runs beside a Long Let (XLIDE issue #414).
@@ -2088,6 +2389,11 @@ def check_member_assignment_types(
             return
         if not expected or not is_known_scalar_type(normalize_type(expected) or ""):
             return  # a Let of an object or unknown type: nothing provable about the value
+        actual = infer(assignment.value_tokens, span.start)
+        array_problem = _array_assignment_problem(assignment.label, assignment.member_span, assignment.value_tokens, span.start, DeclaredValueShape(expected, False, False), lambda name: declared_shape_for_source_binding(symbols, procedure_symbol_for(symbols, member), project_visible_symbols, name, BareIdentifierContext.EXPRESSION).shape if symbols else None, lambda name: array_value_at(stmt, name), lambda _: actual, source_names, member_ctx=member_ctx, source=source)
+        if array_problem:
+            push(array_problem.code, array_problem.message, array_problem.span)
+            return
         string_arithmetic = nonnumeric_string_arithmetic_operand(
             expected, assignment.value_tokens, span.start
         )
@@ -2108,7 +2414,7 @@ def check_member_assignment_types(
             return
         push(
             "assignmentTypeMismatch",
-            f"Assignment to '{assignment.label}' expects {expected}, but got {actual.label}. {reason}",
+            f"Assignment to '{assignment.label}' expects {declared_expected}, but got {actual.label}. {reason}",
             actual.span,
         )
 

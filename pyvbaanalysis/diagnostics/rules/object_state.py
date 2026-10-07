@@ -1961,6 +1961,7 @@ def _local_object_variables_for(
     result: str | None = return_assignment_type_for(proc)
     if (
         result
+        and not re.search(r"\(\s*\)\s*$", result)
         and is_known_object_assignment_type(result, member_ctx)
         and proc.name.lower() not in out
     ):

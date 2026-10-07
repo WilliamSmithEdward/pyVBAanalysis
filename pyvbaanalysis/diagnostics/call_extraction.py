@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 
 from ..call.call_context import bare_call_statement_target
 from ..js_compat import js_trim
-from ..lexer.token_helpers import match_paren_from
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..parser.nodes import Span
 from ..symbols.symbol_model import qualified_procedure_key
@@ -203,11 +202,23 @@ def named_argument_slot(slot: Sequence[VbaToken]) -> tuple[str, list[VbaToken]] 
 
 
 def unwrap_outer_parens(toks: Sequence[VbaToken]) -> list[VbaToken]:
-    """Strip one fully-enclosing pair of parentheses from a token list."""
+    """Remove complete enclosing groups in one scan and one slice."""
     if len(toks) < 2 or toks[0].raw_text != "(":
         return list(toks)
-    close = match_paren_from(toks, 0)
-    return list(toks[1:-1]) if close == len(toks) - 1 else list(toks)
+    wrappers = 0
+    while wrappers < len(toks) and toks[wrappers].raw_text == "(":
+        wrappers += 1
+    depth = 0
+    for i, tok in enumerate(toks):
+        if tok.raw_text == "(":
+            depth += 1
+        elif tok.raw_text == ")":
+            depth -= 1
+            if depth < 0:
+                return list(toks)
+            if depth < wrappers and i != len(toks) - 1 - depth:
+                wrappers = depth
+    return list(toks[wrappers:-wrappers]) if depth == 0 and wrappers > 0 else list(toks)
 
 
 def string_literal_value(raw: str) -> str:
