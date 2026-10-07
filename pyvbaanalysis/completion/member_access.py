@@ -62,6 +62,9 @@ from ..symbols.symbol_model import (
     VbaProjectClassMemberDefinition,
     VbaProjectClassMembers,
     VbaSymbolAttribute,
+    VbaProcedureParam,
+    VbaSymbol,
+    VbaSymbolKind,
     is_access_designer_class,
 )
 from ..types.type_names import is_known_scalar_type, normalize_type
@@ -92,6 +95,7 @@ class MemberCompletionContext:
     me_project_type: str | None = None
     # Source-declared workbook object members and visible UDT fields, keyed by type.
     project_class_members: Sequence[VbaProjectClassMembers] | None = None
+    project_symbols: Sequence[VbaSymbol] | None = None
     # True/default lets generic Object/Variant receivers narrow from preceding
     # simple Set assignments. Hard diagnostics disable this because VBA still
     # compile-binds those receivers late.
@@ -131,6 +135,8 @@ class MemberCompletionEntry:
     returns: str | None = None
     writable: bool | None = None
     write_type: str | None = None
+    write_is_array: bool | None = None
+    procedure_params: dict[str, list[VbaProcedureParam]] | None = None
     # The verified call signature, when the source or the host metadata has one.
     signature: str | None = None
     # The setters a project property declares (XLIDE issue #107); None for host
@@ -322,8 +328,8 @@ def _member_surface_at_dot(
         return None
     i = len(tokens) - 1
     typed_prefix = ""
-    if is_ident_like(tokens[i]) and i > 0 and tokens[i - 1].raw_text == ".":
-        typed_prefix = tokens[i].raw_text
+    if (is_ident_like(tokens[i]) or tokens[i].kind is TokenKind.BRACKETED_IDENTIFIER) and i > 0 and tokens[i - 1].raw_text == ".":
+        typed_prefix = tokens[i].raw_text[1:].removesuffix("]") if tokens[i].kind is TokenKind.BRACKETED_IDENTIFIER else tokens[i].raw_text
         i -= 1
     if i < 0 or tokens[i].raw_text != ".":
         return None
@@ -556,7 +562,7 @@ def resolve_receiver_type_at(
     if len(tokens) == 0:
         return None
     i = len(tokens) - 1
-    if is_ident_like(tokens[i]) and i > 0 and tokens[i - 1].raw_text == ".":
+    if (is_ident_like(tokens[i]) or tokens[i].kind is TokenKind.BRACKETED_IDENTIFIER) and i > 0 and tokens[i - 1].raw_text == ".":
         i -= 1
     if i < 0 or tokens[i].raw_text != ".":
         return None
@@ -1485,6 +1491,8 @@ def _project_member_entries(
             returns=m.returns,
             writable=m.writable,
             write_type=m.write_type,
+            write_is_array=m.write_is_array,
+            procedure_params=m.procedure_params,
             signature=m.signature,
             let_accessor=m.let_accessor,
             set_accessor=m.set_accessor,
@@ -1946,7 +1954,28 @@ def _find_declared_binding(
 
     bindings = _module_bindings(module)
     variable = bindings.variables.get(lower)
-    return variable if variable is not None else bindings.procedures.get(lower)
+    if variable is not None:
+        return variable
+    procedure = bindings.procedures.get(lower)
+    return procedure if procedure is not None else _exported_module_binding(ctx, lower)
+
+
+def _exported_module_binding(ctx: MemberCompletionContext, lower: str) -> _DeclaredBinding | None:
+    from ..symbols.name_resolution import _project_symbols_named
+    kinds = (VbaSymbolKind.FUNCTION, VbaSymbolKind.SUB, VbaSymbolKind.PROPERTY_GET, VbaSymbolKind.PROPERTY_LET, VbaSymbolKind.PROPERTY_SET, VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.CONSTANT, VbaSymbolKind.ENUM_MEMBER)
+    symbols = [symbol for symbol in _project_symbols_named(ctx.project_symbols or (), lower) if symbol.kind in kinds]
+    if not symbols:
+        return None
+    if len({symbol.module_name.lower() for symbol in symbols}) > 1:
+        return _DeclaredBinding(as_type=None)
+    readable = next((symbol for symbol in symbols if symbol.kind in (VbaSymbolKind.FUNCTION, VbaSymbolKind.PROPERTY_GET, VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.CONSTANT, VbaSymbolKind.ENUM_MEMBER)), None)
+    if readable is None:
+        return _DeclaredBinding(as_type=None)
+    if readable.as_type:
+        return _DeclaredBinding(as_type=readable.as_type)
+    surface = _project_class_members_by_name(ctx).get(readable.module_name.lower())
+    member = _project_member_by_name(surface, readable.name)
+    return _DeclaredBinding(as_type=member.returns if member else None)
 
 
 # Receiver lookups run once per dotted reference, and every member call a rule

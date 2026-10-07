@@ -273,7 +273,7 @@ def _run_rules(
             rule: str, message: str, span: Span, data: VbaDiagnosticData | None = None
         ) -> None:
             severity = _severity_of(rule, overrides, whole_project, host_known)
-            if severity is None:
+            if severity is None or (opts.errors_only and severity is not DiagnosticSeverity.ERROR):
                 return
             meta = DIAGNOSTIC_RULES[rule]
             sink.append(
@@ -357,6 +357,8 @@ def _run_rules(
         out = drop_handled_runtime_errors(out, source, mod, ctx.symbols, ctx.activity)
     if opts.inline_suppression:
         out = _apply_inline_suppression(source, out, overrides, whole_project, host_known)
+    if opts.errors_only:
+        out = [item for item in out if item.severity is DiagnosticSeverity.ERROR]
     return out if opts.raw_rule_output else deduplicate_diagnostics(out)
 
 
@@ -442,6 +444,7 @@ def diagnostic_member_completion_context(
     diagnostics pass has no code-name map).
     """
     ctx = MemberCompletionContext(
+        project_symbols=opts.project_visible_symbols,
         project_class_members=opts.project_class_members,
         allow_set_assignment_refinement=False,
         model=opts.host_model,

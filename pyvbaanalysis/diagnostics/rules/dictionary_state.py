@@ -40,6 +40,7 @@ from ...parser.nodes import (
     ProcedureNode,
     Span,
     StatementNode,
+    VariableGroupNode,
     WithBlockNode,
     is_leaf_statement,
 )
@@ -100,6 +101,16 @@ def _check_procedure(
     push: PushFn,
     callee_calls: CalleeMemberCalls,
 ) -> None:
+    if re.search(r"\bon\s+error\b", source[member.span.start:member.span.end], re.IGNORECASE):
+        return
+    from ..walker import for_each_variable_group
+    locals_: set[str] = set()
+
+    def collect(group: VariableGroupNode) -> None:
+        if not group.is_const and group.modifier.lower() != "static":
+            locals_.update(decl.name.lower() for decl in group.declarations)
+
+    for_each_variable_group(member.body, collect, activity)
     states: dict[str, _DictionaryKeys] = {}
     # The subject of each With block the walk is in, as for Collections.
     with_subjects: list[str | None] = []
@@ -139,7 +150,7 @@ def _check_procedure(
                     Span(node.span.start + value[0].start, node.span.start + value[-1].end),
                 )
             forget(names_in(source, node.span))
-            if _creates_dictionary(value):
+            if lower in locals_ and _creates_dictionary(value):
                 states[lower] = _DictionaryKeys()
             return
         # `AddK d` where AddK only adds to or removes from its parameter: d's keys
@@ -315,6 +326,12 @@ def _arguments_of(toks: Sequence[VbaToken], start: int, end: int | None = None) 
     return out
 
 
+def _literal_item_argument(value: Sequence[VbaToken]) -> bool:
+    if len(value) == 1:
+        return value[0].kind in (TokenKind.INTEGER_LITERAL, TokenKind.FLOAT_LITERAL, TokenKind.STRING_LITERAL, TokenKind.DATE_LITERAL) or token_text(value[0]) in ("true", "false", "nothing", "empty", "null")
+    return len(value) == 2 and value[0].raw_text in ("+", "-") and value[1].kind in (TokenKind.INTEGER_LITERAL, TokenKind.FLOAT_LITERAL)
+
+
 def _check_statement(base: Span, toks: Sequence[VbaToken], states: dict[str, _DictionaryKeys], push: PushFn) -> None:
     def at(first: VbaToken, last: VbaToken) -> Span:
         return Span(base.start + first.start, base.start + last.end)
@@ -325,6 +342,8 @@ def _check_statement(base: Span, toks: Sequence[VbaToken], states: dict[str, _Di
     # Under `CompareMode = 1` "k" and "K" are one key.
     def key_of(arg: Sequence[VbaToken], held: _DictionaryKeys) -> str | None:
         key = _literal_key(arg)
+        if key and held.text_compare and key.startswith("s:") and re.search(r"[^\x20-\x7e]|i", key[2:], re.IGNORECASE):
+            return None
         return f"s:{key[2:].lower()}" if key and held.text_compare and key.startswith("s:") else key
 
     eq = next((k for k, tok in enumerate(toks) if tok.raw_text == "="), -1)
@@ -347,7 +366,7 @@ def _check_statement(base: Span, toks: Sequence[VbaToken], states: dict[str, _Di
         if text or binary:
             state.text_compare = text
         else:
-            states.pop(head, None)
+            states.clear()
         return
     # `d.Key("a") = "b"` renames a key: 32811 with no "a", 457 with "b" in use.
     if (
@@ -361,7 +380,7 @@ def _check_statement(base: Span, toks: Sequence[VbaToken], states: dict[str, _Di
         source_key = key_of(toks[4 : eq - 1], state)
         target_key = key_of(toks[eq + 1 :], state)
         if not source_key or not target_key:
-            states.pop(head, None)
+            states.clear()
             return
         if source_key not in state.keys:
             push(
@@ -403,12 +422,16 @@ def _check_statement(base: Span, toks: Sequence[VbaToken], states: dict[str, _Di
             and _raw_text_at(args[0], 1) == "("
             and match_paren_from(args[0], 1) == len(args[0]) - 1
         ):
+            states.clear()
             push(
                 "collectionAddArgument",
                 f"The key of '{toks[0].raw_text}.Add' is an array, which a Dictionary takes as no key. This will "
                 "raise Run-time error '5': Invalid procedure call or argument.",
                 at(args[0][0], args[0][-1]),
             )
+            return
+        if method == "add" and len(args) == 2 and (not key or not _literal_item_argument(args[1])):
+            states.clear()
             return
         if method == "add" and len(args) == 2 and key:
             if key in state.keys:

@@ -167,7 +167,7 @@ def _shape_env_module_base(symbols: ModuleSymbols) -> dict[str, DeclaredValueSha
     base: dict[str, DeclaredValueShape] = {}
     for sym in symbols.root.children or []:
         if sym.kind in _VALUE_DECLARATION_KINDS:
-            base[sym.name.lower()] = _shape_of(sym)
+            base[sym.name.lower()] = _shape_of(sym, symbols)
     return _SHAPE_ENV_MODULE_BASE_CACHE.put(base, symbols)  # type: ignore[no-any-return]
 
 
@@ -181,21 +181,25 @@ def declaration_shape_environment_for(
         return cached  # type: ignore[no-any-return]
     own: dict[str, DeclaredValueShape] = {}
     proc_sym = procedure_symbol_for(symbols, proc)
-    return_type = return_assignment_type_for(proc)
+    return_type = return_assignment_type_for(proc) or (
+        def_type_of(symbols, proc.name)
+        if proc.proc_kind in (ProcKind.FUNCTION, ProcKind.PROPERTY_GET) and not proc.type_suffix
+        else None
+    )
     if return_type:
         own[proc.name.lower()] = DeclaredValueShape(
             as_type=return_type, is_array=return_assignment_is_array(proc), is_fixed_array=False
         )
     for child in (proc_sym.children if proc_sym is not None else None) or []:
         if child.kind in _VALUE_DECLARATION_KINDS:
-            own[child.name.lower()] = _shape_of(child)
+            own[child.name.lower()] = _shape_of(child, symbols)
     out = _layered(_shape_env_module_base(symbols), own)
     return _SHAPE_ENV_CACHE.put(out, symbols, proc)  # type: ignore[no-any-return]
 
 
-def _shape_of(sym: VbaSymbol) -> DeclaredValueShape:
+def _shape_of(sym: VbaSymbol, symbols: ModuleSymbols) -> DeclaredValueShape:
     return DeclaredValueShape(
-        as_type=sym.as_type,
+        as_type=effective_declared_value_type(symbols, sym),
         is_array=sym.is_array is True,
         is_fixed_array=sym.array_bounds is not None,
     )
@@ -246,6 +250,16 @@ def def_type_of(symbols: ModuleSymbols, name: str) -> str | None:
     return None if type_ in ("Variant", "Decimal") else type_
 
 
+def effective_declared_value_type(symbols: ModuleSymbols, symbol: VbaSymbol) -> str | None:
+    """Resolve implicit types only in the module that owns the declaration."""
+    if symbol.as_type or symbol.param_array or symbol.module_name.lower() != symbols.module_name.lower():
+        return symbol.as_type
+    return def_type_of(symbols, symbol.name) if symbol.kind in (
+        VbaSymbolKind.LOCAL_VARIABLE, VbaSymbolKind.PARAMETER, VbaSymbolKind.MODULE_VARIABLE,
+        VbaSymbolKind.FUNCTION, VbaSymbolKind.PROPERTY_GET,
+    ) else None
+
+
 def type_environment_for(symbols: ModuleSymbols, proc: ProcedureNode) -> dict[str, str]:
     """Per-procedure {lowercased name -> raw declared as-type} type environment.
 
@@ -267,11 +281,7 @@ def type_environment_for(symbols: ModuleSymbols, proc: ProcedureNode) -> dict[st
     if return_type:
         own[proc.name.lower()] = return_type
     for child in (proc_sym.children if proc_sym is not None else None) or []:
-        type_ = child.as_type or (
-            def_type_of(symbols, child.name)
-            if child.kind in (VbaSymbolKind.LOCAL_VARIABLE, VbaSymbolKind.PARAMETER)
-            else None
-        )
+        type_ = effective_declared_value_type(symbols, child)
         if type_:
             own[child.name.lower()] = type_
     # A name the procedure assigns with no declaration is a local the DefType
@@ -362,8 +372,8 @@ def declared_type_for_source_binding(
         BareIdentifierResolutionScope.AMBIGUOUS,
     ):
         return SourceDeclaredType(resolved=binding.scope is BareIdentifierResolutionScope.AMBIGUOUS)
-    typed = next((d for d in binding.definitions if d.as_type), None)
-    return SourceDeclaredType(resolved=True, as_type=typed.as_type if typed is not None else None)
+    typed = next((d for d in binding.definitions if effective_declared_value_type(symbols, d)), None)
+    return SourceDeclaredType(resolved=True, as_type=effective_declared_value_type(symbols, typed) if typed is not None else None)
 
 
 def declared_value_type_for_source_binding(
@@ -383,12 +393,12 @@ def declared_value_type_for_source_binding(
     value_definitions = [d for d in binding.definitions if is_value_declaration_symbol(d)]
     if not value_definitions:
         return SourceDeclaredType(resolved=False)
-    typed = next((d for d in value_definitions if d.as_type), None)
+    typed = next((d for d in value_definitions if effective_declared_value_type(symbols, d)), None)
     chosen = typed if typed is not None else value_definitions[0]
     string_value = constant_string_value(chosen) if len(value_definitions) == 1 else None
     return SourceDeclaredType(
         resolved=True,
-        as_type=typed.as_type if typed is not None else None,
+        as_type=effective_declared_value_type(symbols, chosen),
         kind=chosen.kind,
         is_array=chosen.is_array is True,
         string_value=string_value,
@@ -416,8 +426,8 @@ def declared_value_type_for_qualified_source_binding(
     ]
     if not matching_values:
         return SourceDeclaredType(resolved=True)
-    typed = next((d for d in matching_values if d.as_type), None)
-    return SourceDeclaredType(resolved=True, as_type=typed.as_type if typed is not None else None)
+    typed = next((d for d in matching_values if effective_declared_value_type(symbols, d)), None)
+    return SourceDeclaredType(resolved=True, as_type=effective_declared_value_type(symbols, typed) if typed is not None else None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -506,13 +516,13 @@ def declared_shape_for_source_binding(
         BareIdentifierResolutionScope.AMBIGUOUS,
     ):
         return SourceDeclaredShape(resolved=binding.scope is BareIdentifierResolutionScope.AMBIGUOUS)
-    shaped = next((d for d in binding.definitions if d.as_type or d.is_array), None)
+    shaped = next((d for d in binding.definitions if effective_declared_value_type(symbols, d) or d.is_array), None)
     if shaped is None:
         return SourceDeclaredShape(resolved=True, shape=DeclaredValueShape(None, False, False))
     return SourceDeclaredShape(
         resolved=True,
         shape=DeclaredValueShape(
-            as_type=shaped.as_type,
+            as_type=effective_declared_value_type(symbols, shaped),
             is_array=shaped.is_array is True,
             is_fixed_array=shaped.array_bounds is not None,
         ),

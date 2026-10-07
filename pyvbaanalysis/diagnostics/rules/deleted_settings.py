@@ -19,7 +19,6 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator, Sequence
 
-from ...call.call_context import bare_call_statement_target
 from ...conditional import ConditionalActivityTracker
 from ...flow.procedure_labels import statement_label_declaration
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
@@ -140,5 +139,4 @@ def check_deleted_settings(
                 gone.add(f"{app}|{section if section is not None else '*'}|{key if key is not None else '*'}")
                 continue
             # A call may save or delete settings.
-            if bare_call_statement_target(source, node.span) or head == "call":
-                gone.clear()
+            gone.clear()

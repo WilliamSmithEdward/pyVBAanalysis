@@ -37,6 +37,7 @@ number closes every open file (XLIDE issue #146).
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, replace
@@ -63,8 +64,6 @@ from ..context import PushFn
 from ..dataflow import BlockEnteringState, tracked_locals_named_whole, walk_entering_blocks
 from ..opened_file_numbers import (
     OpenedFileNumbers,
-    merge_opened_file_numbers,
-    opened_file_numbers_in,
 )
 from ..walker import (
     active_module_members,
@@ -163,19 +162,12 @@ def check_file_statements(
     activity: ConditionalActivityTracker | None,
     push: PushFn,
     project_opened: OpenedFileNumbers | None = None,
+    project_callables: Iterable[str] = (),
 ) -> None:
-    if project_opened is not None:
-        _check_unopened_numbers(
-            source,
-            mod,
-            activity,
-            push,
-            merge_opened_file_numbers([project_opened, opened_file_numbers_in(source)]),
-        )
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
-        _check_procedure(source, member, activity, push)
+        _check_procedure(source, member, activity, push, {node.name.lower() for node in mod.members if isinstance(node, ProcedureNode)} | {name.lower() for name in project_callables})
 
 
 def _check_procedure(
@@ -183,8 +175,19 @@ def _check_procedure(
     member: ProcedureNode,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    callables: AbstractSet[str],
 ) -> None:
     states: _FileStates = {}
+    track_state = re.search(r"\bon\s+error\b", source[member.span.start:member.span.end], re.IGNORECASE) is None
+
+    def may_invoke(toks: Sequence[VbaToken]) -> bool:
+        for i, tok in enumerate(toks):
+            name = token_text(tok)
+            if not token_name(tok) or (name == member.name.lower() and _raw_at(toks, i + 1) == "="):
+                continue
+            if name in callables or (_raw_at(toks, i + 1) == "(" and (_raw_at(toks, i - 1) == "." or name not in _FILE_STATE_FUNCTIONS | _READ_ONLY_INTRINSICS | {"freefile", "environ", "environ$", "input", "input$"})):
+                return True
+        return False
     # Under On Error Resume Next a statement that fails goes on to the
     # next: nothing it would raise is reported (XLIDE issue #682).
     resume_next = False
@@ -201,7 +204,16 @@ def _check_procedure(
         if token_text(toks[0]) == "on" and token_text(_token_at(toks, 1)) == "error":
             resume_next = token_text(_token_at(toks, 2)) == "resume"
             return
+        if not track_state:
+            _check_statement(node.span, toks, {}, push, resume_next)
+            return
+        if may_invoke(toks):
+            states.clear()
         if isinstance(node, StatementNode) and node.single_line_if_branches is not None:
+            _mark_checked(states, toks)
+            for span in node.single_line_if_branches:
+                branch = statement_tokens_after_leading_label(source, span)
+                _check_statement(span, branch[1:] if branch and token_text(branch[0]) == "else" else branch, dict(states), push, resume_next)
             # A single-line If runs its statement on one path only.
             for key in _file_number_keys_in(toks):
                 states.pop(key, None)
@@ -267,18 +279,22 @@ def _check_procedure(
             _forget_path(states, f"path:{key}")
 
     def touches(stmt: LeafStatementNode) -> set[str]:
-        return _file_keys_touched_by(source, stmt)
+        return {"*"} if may_invoke(statement_tokens_after_leading_label(source, stmt.span)) else _file_keys_touched_by(source, stmt)
 
     def enter(node: BodyNode) -> None:
         # `Do Until EOF(f)` checks before its body reads.
         header = statement_tokens_after_leading_label(
             source, block_header_line_span(source, node.span)
         )
+        if may_invoke(header):
+            states.clear()
         _mark_checked(states, header)
         # A condition may test the path: `If Len(Dir(p)) > 0 Then Kill p`.
         _forget_paths_named_in(states, header)
         if isinstance(node, IfBlockNode):
             for branch in node.branches:
+                if may_invoke(statement_tokens_after_leading_label(source, branch.header_span)):
+                    states.clear()
                 _forget_paths_named_in(
                     states, statement_tokens_after_leading_label(source, branch.header_span)
                 )

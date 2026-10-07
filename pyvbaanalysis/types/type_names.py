@@ -13,7 +13,6 @@ import re
 from dataclasses import dataclass
 
 _TRAILING_PARENS = re.compile(r"\s*\(\s*\)\s*$")
-_LEADING_VB = re.compile(r"^vb", re.IGNORECASE)
 
 _NUMERIC_TYPES: frozenset[str] = frozenset(
     {"byte", "integer", "long", "longlong", "longptr", "single", "double", "currency", "decimal"}
@@ -21,11 +20,11 @@ _NUMERIC_TYPES: frozenset[str] = frozenset(
 
 
 def normalize_type(type_name: str | None) -> str | None:
-    """Normalize a declared type name: strip a trailing (), a leading 'vb', then
+    """Normalize a declared type name: strip a trailing (), then
     trim and lowercase. Returns None for an empty/missing name."""
     if not type_name:
         return None
-    stripped = _LEADING_VB.sub("", _TRAILING_PARENS.sub("", type_name))
+    stripped = _TRAILING_PARENS.sub("", type_name)
     return stripped.strip().lower()
 
 

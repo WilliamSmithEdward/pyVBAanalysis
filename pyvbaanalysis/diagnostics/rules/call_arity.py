@@ -12,6 +12,9 @@ stay silent to remain false-positive-free.
 
 from __future__ import annotations
 
+from ..setter_assignment import source_setter_assignment
+from ...types.type_inference import procedure_symbol_for
+
 from collections.abc import Callable, Mapping, Sequence
 
 from ...completion.member_access import MemberCompletionContext, resolve_exact_member_completion
@@ -73,6 +76,7 @@ def check_argument_count(
         def visitor(stmt: LeafStatementNode) -> None:
             for span in statement_and_branch_spans(stmt):
                 _check_unmodelled_arity(source, span, env, source_names, member_ctx, push)
+            setter_names = {setter.name_span.start for span in statement_and_branch_spans(stmt) if (setter := source_setter_assignment(source, span, symbols, procedure_symbol_for(symbols, member), project_visible_symbols, member_ctx)) is not None}
             project_qualified_call_spans: set[tuple[int, int]] = set()
             statement_call = extract_call(source, stmt.span)
             qualified_statement_call = (
@@ -85,7 +89,7 @@ def check_argument_count(
                 )
                 _record_project_qualified_call_span(effective, project_qualified_call_spans)
             for call in expression_calls(source, stmt.span, module_signatures, source_names):
-                if _same_call_target(call, effective):
+                if call.name_span.start in setter_names or _same_call_target(call, effective):
                     continue
                 _validate_callable_arity(
                     source, call, same_module_signatures, project_signatures, source_names, push
@@ -95,6 +99,8 @@ def check_argument_count(
                 *member_expression_calls(source, stmt.span, member_ctx),
                 *member_statement_calls(source, stmt.span, member_ctx),
             ):
+                if member_call.call.name_span.start in setter_names:
+                    continue
                 if _call_target_span_key(
                     member_call.call
                 ) in project_qualified_call_spans or _takes_print_list(member_call.signature):
@@ -119,6 +125,8 @@ def check_argument_count(
                     )
                     _record_project_qualified_call_span(branch_call, project_qualified_call_spans)
                 for member_call in member_statement_calls(source, branch, member_ctx):
+                    if member_call.call.name_span.start in setter_names:
+                        continue
                     if _call_target_span_key(
                         member_call.call
                     ) in project_qualified_call_spans or _takes_print_list(member_call.signature):

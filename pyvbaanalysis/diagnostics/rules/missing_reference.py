@@ -39,6 +39,12 @@ from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import Span
 from ..context import PushFn
 from ..model import VbaAddLibraryReferenceData, VbaDiagnosticData
+from ...symbols.build_module_symbols import build_module_symbols
+from ...symbols.symbol_model import ModuleSymbols, ModuleSymbolKind, VbaSymbol, is_procedure_kind
+from ...symbols.name_resolution import BareIdentifierContext, BareIdentifierResolutionInput, BareIdentifierResolutionScope, resolve_bare_identifier_binding
+from ...identity_cache import IdentityLru
+
+_MODEL_LIBRARIES = IdentityLru()
 
 # The libraries a project can be given a reference to: lowercased name -> as written.
 _ADDABLE = {
@@ -49,15 +55,18 @@ _ADDABLE = {
 
 def _libraries_in_model(model: HostObjectModel) -> set[str]:
     """Which libraries the model can already answer for, from its own type keys."""
+    cached = _MODEL_LIBRARIES.get(model)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
     out: set[str] = set()
     for qualified in model.get("types") or {}:
         library, dot, _ = qualified.partition(".")
         if dot and library:
             out.add(library.lower())
-    return out
+    return _MODEL_LIBRARIES.put(out, model)  # type: ignore[no-any-return]
 
 
-def _qualified_names_in(source: str) -> list[tuple[str, Span]]:
+def _qualified_names_in(source: str, symbols: ModuleSymbols | None = None, project_visible_symbols: Sequence[VbaSymbol] | None = None) -> list[tuple[str, Span, bool]]:
     """Every `Library.Member` in the module where the compiler has to resolve
     `Library`: in an As clause, after New, or standing as a value.
 
@@ -70,12 +79,28 @@ def _qualified_names_in(source: str) -> list[tuple[str, Span]]:
     match: late binding names nothing the compiler has to resolve.
     """
     # The module's shared tokenization, not a second lex of the whole module.
+    tokens = tokenize_cached(source)
+    symbols = symbols or build_module_symbols("", ModuleSymbolKind.STANDARD, source)
+    procedures = [symbol for symbol in symbols.root.children or [] if is_procedure_kind(symbol.kind)]
+    implicit_writes: dict[int, set[str]] = {}
+    procedure_index = 0
+    previous = ""
+    for i, tok in enumerate(tokens):
+        if tok.kind is TokenKind.COMMENT:
+            continue
+        while procedure_index < len(procedures) and procedures[procedure_index].full_span.end < tok.start:
+            procedure_index += 1
+        procedure = procedures[procedure_index] if procedure_index < len(procedures) else None
+        if procedure and procedure.full_span.start <= tok.start and tok.kind is TokenKind.IDENTIFIER and i + 1 < len(tokens) and tokens[i + 1].raw_text == "=" and previous in ("", "set", "let", "then", "else"):
+            implicit_writes.setdefault(procedure.full_span.start, set()).add(tok.raw_text.lower())
+        previous = "" if tok.kind is TokenKind.NEWLINE or tok.raw_text == ":" else tok.raw_text.lower()
+    procedure_index = 0
     toks = [
         t
-        for t in tokenize_cached(source)
+        for t in tokens
         if t.kind is not TokenKind.COMMENT and t.kind is not TokenKind.NEWLINE
     ]
-    out: list[tuple[str, Span]] = []
+    out: list[tuple[str, Span, bool]] = []
     for i in range(len(toks) - 2):
         library = token_name(toks[i])
         if toks[i].kind is not TokenKind.IDENTIFIER or not library:
@@ -88,7 +113,15 @@ def _qualified_names_in(source: str) -> list[tuple[str, Span]]:
         # qualifier: `b` there is a member of whatever `a` is.
         if i > 0 and toks[i - 1].raw_text == ".":
             continue
-        out.append((library, Span(toks[i].start, toks[i + 2].end)))
+        type_qualifier = i > 0 and toks[i - 1].raw_text.lower() in ("as", "new", "implements")
+        if not type_qualifier:
+            while procedure_index < len(procedures) and procedures[procedure_index].full_span.end < toks[i].start:
+                procedure_index += 1
+            procedure = procedures[procedure_index] if procedure_index < len(procedures) else None
+            binding = resolve_bare_identifier_binding(BareIdentifierResolutionInput(current_module=symbols, project_visible_symbols=project_visible_symbols or (), enclosing_procedure=procedure if procedure and procedure.full_span.start <= toks[i].start else None, name=library, context=BareIdentifierContext.MEMBER_RECEIVER, offset=toks[i].start))
+            if binding.scope is not BareIdentifierResolutionScope.UNRESOLVED or (procedure and library.lower() in implicit_writes.get(procedure.full_span.start, set())):
+                continue
+        out.append((library, Span(toks[i].start, toks[i + 2].end), type_qualifier))
     return out
 
 
@@ -99,7 +132,7 @@ def libraries_named_in(source: str) -> set[str]:
     of its modules would stop compiling before the reference goes, which is what the
     VBE's own Tools > References dialog never says.
     """
-    return {library.lower() for library, _ in _qualified_names_in(source)}
+    return {library.lower() for library, _, _ in _qualified_names_in(source)}
 
 
 # The Scripting library's types a module names unqualified, which no default
@@ -179,6 +212,8 @@ def check_missing_library_reference(
     references_known: bool,
     push: PushFn,
     project_modules: AbstractSet[str] = frozenset(),
+    symbols: ModuleSymbols | None = None,
+    project_visible_symbols: Sequence[VbaSymbol] | None = None,
 ) -> None:
     """Module rule: a type or constant qualified with an Office library the project
     does not reference.
@@ -198,7 +233,10 @@ def check_missing_library_reference(
     if not present:
         return
     seen: set[str] = set()
-    for found_library, span in _qualified_names_in(source):
+    explicit = any(tok.kind is TokenKind.KEYWORD and tok.raw_text.lower() == "explicit" for tok in tokenize_cached(source))
+    for found_library, span, type_qualifier in _qualified_names_in(source, symbols, project_visible_symbols):
+        if not type_qualifier and not explicit:
+            continue
         lower = found_library.lower()
         library = _ADDABLE.get(lower)
         if library is None or lower in present or lower in project_modules or lower in seen:

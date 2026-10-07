@@ -525,6 +525,7 @@ def _check_span(
     target_index = (
         next((i for i, tok in enumerate(toks) if tok.raw_text == "="), -1) - 1 if target is not None else -1
     )
+    property_assignment_equals: int | None = None
     for i, tok in enumerate(toks):
         if i == target_index or _raw_at(toks, i - 1) == ".":
             continue
@@ -612,6 +613,16 @@ def _check_span(
         if array and (nxt is None or nxt.raw_text != "("):
             # The operator on either side, never the assignment's own `=`.
             previous = None if i - 1 == target_index + 1 else _at(toks, i - 1)
+            if target is None and previous is not None and previous.raw_text == "=":
+                if property_assignment_equals is None:
+                    from ..setter_assignment import assignment_target_from_tokens
+                    equals = top_level_equals_index(toks)
+                    prefix = list(toks[:equals + 1])
+                    if prefix and token_text(prefix[0]) == "set":
+                        prefix = prefix[1:]
+                    property_assignment_equals = equals if assignment_target_from_tokens(prefix) else -1
+                if i - 1 == property_assignment_equals:
+                    previous = None
             operator = next(
                 (
                     side

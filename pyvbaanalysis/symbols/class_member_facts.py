@@ -87,6 +87,7 @@ def class_member_values(source: str, children: Sequence[VbaSymbol]) -> dict[str,
             found[1] = tok.start
         else:
             mentions_by_name[lower] = [tok.start, tok.start]
+    module_values = {child.name.lower(): child for child in children if child.kind in (VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.CONSTANT)}
     for symbol in children:
         lower = symbol.name.lower()
         type_ = _normalize_type(symbol.as_type)
@@ -108,7 +109,7 @@ def class_member_values(source: str, children: Sequence[VbaSymbol]) -> dict[str,
             continue
         if symbol.kind is not VbaSymbolKind.FUNCTION and symbol.kind is not VbaSymbolKind.PROPERTY_GET:
             continue
-        if any(child.kind is VbaSymbolKind.PARAMETER for child in symbol.children or []):
+        if _ARRAY_SUFFIX_RE.search(symbol.as_type or ""):
             continue
         # The body's statements, the header line left out.
         body: list[VbaToken] = []
@@ -165,12 +166,14 @@ def class_member_values(source: str, children: Sequence[VbaSymbol]) -> dict[str,
                 else None
             )
             second = _at(stmt, 1)
+            referenced = _name(value[0]) if len(value) == 1 else None
+            bound = (next((child for child in symbol.children or [] if child.name.lower() == referenced), None) or module_values.get(referenced)) if referenced else None
+            scalar_variable = bound is not None and not bound.is_array and not _ARRAY_SUFFIX_RE.search(bound.as_type or "") and _is_known_scalar_type(_normalize_type(bound.as_type) or "")
             if (
                 _name(stmt[0]) == lower
                 and second is not None
                 and second.raw_text == "="
-                and literal is not None
-                and literal.kind in _LITERAL_KINDS
+                and ((literal is not None and literal.kind in _LITERAL_KINDS) or scalar_variable)
             ):
                 out[lower] = "scalar"
     return out

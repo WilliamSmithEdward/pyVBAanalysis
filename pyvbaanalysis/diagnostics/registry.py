@@ -322,6 +322,8 @@ def _missing_library_reference(ctx: RulePassContext, push: PushFn) -> None:
                 *(surface.name for surface in ctx.member_ctx.project_class_members or []),
             ]
         },
+        ctx.symbols,
+        ctx.opts.project_visible_symbols,
     )
 
 
@@ -501,7 +503,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(
         name="fileStatements",
         run=lambda ctx, push: check_file_statements(
-            ctx.source, ctx.mod, ctx.activity, push, ctx.opts.project_opened_file_numbers
+            ctx.source, ctx.mod, ctx.activity, push, ctx.opts.project_opened_file_numbers, ctx.opts.project_procedures or ()
         ),
     ),
     DiagnosticRuleEntry(
@@ -549,7 +551,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(
         name="documentNames",
         run=lambda ctx, push: check_document_names(
-            ctx.source, ctx.mod, _host_name(ctx), _callable_names(ctx), ctx.activity, push
+            ctx.source, ctx.mod, _host_name(ctx), _callable_names(ctx), ctx.activity, push, ctx.member_ctx
         ),
     ),
     DiagnosticRuleEntry(
@@ -568,7 +570,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     ),
     DiagnosticRuleEntry(
         name="lateBoundObjectState",
-        run=lambda ctx, push: check_late_bound_objects(ctx.source, ctx.mod, ctx.activity, push),
+        run=lambda ctx, push: check_late_bound_objects(ctx.source, ctx.mod, ctx.activity, push, ctx.opts.project_procedures or ()),
     ),
     DiagnosticRuleEntry(
         name="variantValueMisuse",
@@ -585,7 +587,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(
         name="runtimeMemberNotFound",
         run=lambda ctx, push: check_runtime_member_not_found(
-            ctx.source, ctx.mod, ctx.symbols, ctx.member_ctx, ctx.activity, push
+            ctx.source, ctx.mod, ctx.symbols, ctx.member_ctx, ctx.activity, push, ctx.opts.project_procedures or ()
         ),
     ),
     DiagnosticRuleEntry(
@@ -1099,6 +1101,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     ),
     DiagnosticRuleEntry(
         name="argumentCount",
+        block_headers=True,
         procedure_statements=lambda ctx, push: check_argument_count(
             ctx.source,
             ctx.symbols,
@@ -1116,6 +1119,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     ),
     DiagnosticRuleEntry(
         name="argumentTypes",
+        block_headers=True,
         procedure_statements=lambda ctx, push: check_argument_types(
             ctx.source,
             ctx.symbols,
@@ -1182,6 +1186,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     ),
     DiagnosticRuleEntry(
         name="argumentShapeMismatch",
+        block_headers=True,
         procedure_statements=lambda ctx, push: check_argument_shape(
             ctx.source,
             ctx.symbols,

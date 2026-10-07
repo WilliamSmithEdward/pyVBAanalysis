@@ -328,6 +328,8 @@ def _project_member_form_problem(
     member = project_class_member_at(source, ref.dot_end_offset, ref.member, member_ctx)
     if member is None or member.kind != "property":
         return None
+    if next_raw == "=" and member.let_accessor and member.procedure_params and member.procedure_params.get("propertyLet") is not None:
+        return None
     if member.signature is not None:
         open_ = member.signature.find("(")
         first_param = member.signature[open_ + 1 :].lstrip(JS_WHITESPACE) if open_ >= 0 else ""
@@ -340,6 +342,8 @@ def _project_member_form_problem(
             if index_required and next_raw != "("
             else None
         )
+    if member.is_array:
+        return None
     field = member.writable is True and not member.let_accessor and not member.set_accessor
     type_ = normalize_type(member.returns)
     if (
@@ -1064,13 +1068,17 @@ def _library_qualifier_names(
     whose types the host model carries (its own and the shared ones merged into it),
     the libraries the project references, and the project itself, which is
     `VBAProject` unless renamed. An absent model is Excel's by default."""
+    from ...host.host_model import get_excel_object_model
+    model = host_model if host_model is not None else get_excel_object_model()
     out = {"vbaproject"}
-    if host_model is None:
-        out.add("excel")
-    for qualified in (host_model.get("types") if host_model is not None else None) or {}:
+    for qualified in model.get("types") or {}:
         dot = qualified.find(".")
         if dot > 0:
             out.add(qualified[:dot].lower())
+    for enumeration in (model.get("enums") or {}).values():
+        library = enumeration.get("library")
+        if library:
+            out.add(library.lower())
     for token in referenced_hosts or []:
         name = HOST_LIBRARY_NAMES.get(token)
         if name:

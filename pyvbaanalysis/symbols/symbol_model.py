@@ -178,6 +178,7 @@ class VbaProjectClassMember:
     signature: str | None = None
     writable: bool | None = None
     write_type: str | None = None
+    write_is_array: bool | None = None
     # A field of a user-defined type that holds an array: its type is the
     # element's (XLIDE issue #417).
     is_array: bool | None = None

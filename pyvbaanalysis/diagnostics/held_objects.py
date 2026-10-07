@@ -19,7 +19,7 @@ from ..conditional import ConditionalActivityTracker
 from ..lexer.token_helpers import split_top_level_token_groups
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..parser.nodes import BodyNode, LeafStatementNode, ProcedureNode, StatementNode, is_leaf_statement
-from ..symbols.symbol_model import ModuleSymbols, VbaSymbolKind
+from ..symbols.symbol_model import ModuleSymbols, VbaSymbolKind, SymbolVisibility
 from ..types.type_names import normalize_type
 from .walker import set_assignment_target, statement_tokens_after_leading_label, token_name, token_text
 
@@ -124,17 +124,23 @@ def held_objects_at(
     from .dataflow import BlockEnteringState, walk_entering_blocks
     from .rules.shared import names_in
 
+    if re.search(r"\bon\s+error\b", source[proc.span.start:proc.span.end], re.IGNORECASE):
+        return lambda _: _NOTHING_HELD
+
     # Keyed by node identity; each entry holds its node so the id stays its own.
     seen: dict[int, tuple[BodyNode, HeldObjects]] = {}
     state = HeldObjects(classes={}, items={})
     proc_symbol = procedure_symbol_for(symbols, proc)
     own = (proc_symbol.children if proc_symbol is not None else None) or []
+    static_procedure = re.search(r"\bstatic\s+(?:sub|function|property)\b", source[proc.span.start:proc.body[0].span.start if proc.body else proc.span.end], re.IGNORECASE) is not None
+    locals_ = {child.name.lower() for child in own if child.kind is VbaSymbolKind.LOCAL_VARIABLE and child.visibility is not SymbolVisibility.STATIC and not static_procedure}
+    locals_.update(param.name.lower() for param in proc.params if param.by_val)
     # The names a local or parameter takes, which hide a host's global.
     declared = {child.name.lower() for child in own} | {param.name.lower() for param in proc.params}
     # `Dim c As New Collection` holds an empty one from the start.
     for child in own:
         if (
-            child.kind is VbaSymbolKind.LOCAL_VARIABLE
+            child.name.lower() in locals_
             and child.is_auto_instantiated
             and not child.is_array
             and child.as_type
@@ -209,7 +215,7 @@ def held_objects_at(
             forget([name for name in [lower, *names_in(source, node.span)] if name != from_ or not held])
             if from_ and held:
                 drop_items(from_)
-            if held:
+            if held and lower in locals_:
                 current_snapshot = None
                 state.classes[lower] = held
                 if created and normalize_type(created) == "collection":

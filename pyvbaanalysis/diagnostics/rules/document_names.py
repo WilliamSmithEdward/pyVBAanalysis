@@ -15,11 +15,9 @@ every time it runs.
 
 XLIDE issue #610 adds, each measured: a variable added again after its value
 was written, or through another name for the document, `Set d2 = d` (5903); a
-custom property named "" (-2147418113); and, on a presentation the procedure
-made with Presentations.Add, the slides it adds: each is named Slide1, Slide2
-in the order it was added, so `a.Name = b.Name` and `a.Name = "Slide2"` raise
--2147188160, as does `p.Slides(2).Name` given a name another slide has; and
-`p.Slides.Add 3` or `a.MoveTo 2` past the count raise -2147188160 too.
+custom property named "" (-2147418113). Presentation events and other references
+can change slide contents and names, so the rule does not infer positive bounds
+or default slide names. Adding another slide also invalidates earlier name facts.
 
 What is known is followed in a straight line. Any other mention of the
 document or slide variable, a label, a block or a call into the project's own
@@ -28,18 +26,18 @@ code ends it.
 
 from __future__ import annotations
 
-import math
+from ...completion.member_access import MemberCompletionContext, resolve_receiver_type_at
+
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 
 from ...conditional import ConditionalActivityTracker
 from ...flow.procedure_labels import statement_label_declaration
-from ...js_compat import js_number, js_number_to_string
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import (
     BodyNode,
-    LeafStatementNode,
     ModuleNode,
     ProcedureNode,
     Span,
@@ -135,332 +133,140 @@ def check_document_names(
     callables: AbstractSet[str],
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    member_ctx: MemberCompletionContext,
 ) -> None:
     if host != "Word" and host != "PowerPoint":
         return
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
-        _check_procedure(source, member, host, callables, activity, push)
+        _check_procedure(source, member, host, callables, activity, push, member_ctx)
 
 
-def _check_procedure(
-    source: str,
-    member: ProcedureNode,
-    host: str,
-    callables: AbstractSet[str],
-    activity: ConditionalActivityTracker | None,
-    push: PushFn,
-) -> None:
-    # `d.variables` -> the names added; `#slide:a` -> the name slide a was given ('' none).
+def _check_procedure(source: str, member: ProcedureNode, host: str, callables: AbstractSet[str], activity: ConditionalActivityTracker | None, push: PushFn, member_ctx: MemberCompletionContext) -> None:
+    if re.search(r"\bon\s+error\b", source[member.span.start:member.span.end], re.IGNORECASE):
+        return
     state: dict[str, set[str]] = {}
-    # By presentation variable (XLIDE issue #610).
-    presentations: dict[str, _PresentationState] = {}
-    # The presentation each followed slide is in, by slide state key.
+    presentations: set[str] = set()
     slide_in: dict[str, str] = {}
+
+    def forget_all() -> None:
+        state.clear()
+        presentations.clear()
+        slide_in.clear()
 
     def forget(names: Iterable[str]) -> None:
         gone = set(names)
-        for key in list(state.keys()):
-            head = key[len(_SLIDE) :] if key.startswith(_SLIDE) else key.split(".")[0]
+        for key in list(state):
+            head = key[len(_SLIDE):] if key.startswith(_SLIDE) else key.split(".")[0]
             if head in gone:
                 state.pop(key, None)
                 slide_in.pop(key, None)
-        for lower in gone:
-            presentations.pop(lower, None)
-
-    # The slide `p.Slides(2)` names, by its state key, or None.
-    def slide_at(pres: str, index: float) -> str | None:
-        held = presentations.get(pres)
-        if held is None or math.isnan(index) or not float(index).is_integer():
-            return None
-        k = int(index) - 1
-        return held.order[k] if 0 <= k < len(held.order) else None
-
-    # A name another followed slide holds, in any case: its variable.
-    def holder(key: str, lower: str) -> str | None:
-        for other, held in state.items():
-            if other.startswith(_SLIDE) and other != key and lower in held:
-                return other[len(_SLIDE) :]
-        return None
+        presentations.difference_update(gone)
 
     def name_slide(key: str, name: str, name_at: VbaToken, at: Callable[[VbaToken], Span]) -> None:
         lower = name.lower()
-        taken = holder(key, lower)
+        taken = next((other[len(_SLIDE):] for other, held in state.items() if other.startswith(_SLIDE) and other != key and key in slide_in and slide_in.get(other) == slide_in[key] and lower in held), None)
         if taken is not None:
             who = "a slide the code added" if taken.startswith("#") else f"'{taken}', another slide the code added"
-            push(
-                "hostArgumentOutOfRange",
-                f"\"{name}\" is the name of {who}, and slide names ignore case. This will raise "
-                "Run-time error '-2147188160': Another slide already has this name.",
-                at(name_at),
-            )
+            push("hostArgumentOutOfRange", f"\"{name}\" is the name of {who}, and slide names ignore case. This will raise Run-time error '-2147188160': Another slide already has this name.", at(name_at))
         state[key] = {lower}
 
-    # `Slides.Add(i, ...)` on a presentation the procedure made: a new slide at
-    # i, named Slide<n> by the order it was added.
-    def add_slide(
-        pres: str,
-        index: float | None,
-        key: str,
-        index_at: VbaToken | None,
-        at: Callable[[VbaToken], Span],
-    ) -> None:
-        held = presentations.get(pres)
-        if held is None:
-            return
-        if index is None or index < 1:
-            presentations.pop(pres, None)
-            return
-        if index > len(held.order) + 1:
-            count = len(held.order)
-            assert index_at is not None
-            push(
-                "hostArgumentOutOfRange",
-                f"'{pres}' holds {count} slide{_plural(count)}, so a new one goes at 1 to {count + 1}; "
-                f"{js_number_to_string(index)} is past that. This will raise Run-time error "
-                "'-2147188160': Integer out of range.",
-                at(index_at),
-            )
-            presentations.pop(pres, None)
-            return
-        held.added += 1
-        # Array.prototype.splice reads a NaN start as 0, and truncates a fraction.
-        start = 0 if math.isnan(index) else int(index - 1)
-        held.order.insert(start, key)
-        state[key] = {f"slide{held.added}"}
-        slide_in[key] = pres
+    def add_slide(pres: str | None, key: str) -> None:
+        for other in state:
+            if other.startswith(_SLIDE):
+                state[other] = set()
+        state[key] = set()
+        if pres and pres in presentations:
+            slide_in[key] = pres
 
     def visit(node: BodyNode) -> None:
         if not is_leaf_statement(node):
             return
         toks = statement_tokens_after_leading_label(source, node.span)
-        if (
-            statement_label_declaration(source, node.span)
-            or token_text(_at(toks, 0)) == "gosub"
-            or any(token_name(tok) is not None and token_text(tok) in callables for tok in toks)
-        ):
-            state.clear()
+        if statement_label_declaration(source, node.span) or token_text(_at(toks, 0)) == "gosub" or any(token_name(tok) is not None and token_text(tok) in callables for tok in toks):
+            forget_all()
         if isinstance(node, StatementNode) and node.single_line_if_branches:
-            forget(names_in(source, node.span))
+            forget_all()
             return
 
         def at(tok: VbaToken) -> Span:
             return Span(node.span.start + tok.start, node.span.start + tok.end)
 
         if host == "Word":
-            add = _word_add(toks)
-            if add is not None and add.name == "" and add.key.endswith(".customdocumentproperties"):
-                push(
-                    "hostArgumentOutOfRange",
-                    "A custom property needs a name, and \"\" is none. This will raise Run-time error "
-                    "'-2147418113': Automation error.",
-                    at(add.name_token),
-                )
-            if add is not None:
-                held_names = state.get(add.key)
-                if held_names is None:
-                    held_names = set()
-                name = add.name.lower()
-                if name in held_names:
-                    kind = _WORD_NAMED[add.key[add.key.rfind(".") + 1 :]]
-                    push(
-                        "hostArgumentOutOfRange",
-                        f"The {kind.noun} \"{add.name}\" was already added to {add.chain}, and the names "
-                        f"ignore case. This will raise Run-time error {kind.error}.",
-                        at(add.name_token),
-                    )
-                head = add.key.split(".")[0]
-                forget([lower for lower in names_in(source, node.span) if lower != head])
-                held_names.add(name)
-                state[add.key] = held_names
+            candidate = _word_add(toks)
+            collection = next((i for i, tok in enumerate(toks) if token_text(tok) in _WORD_NAMED), -1)
+            actual_document = collection > 0 and resolve_receiver_type_at(source, node.span.start + toks[collection - 1].end, member_ctx) == "Word.Document"
+            add = candidate if actual_document else None
+            if add and add.name == "" and add.key.endswith(".customdocumentproperties"):
+                push("hostArgumentOutOfRange", "A custom property needs a name, and \"\" is none. This will raise Run-time error '-2147418113': Automation error.", at(add.name_token))
+            if add:
+                index = next((i for i, tok in enumerate(toks) if token_text(tok) == "add"), -1)
+                args = toks[index + 1:]
+                allowed = {"msopropertytypeboolean", "msopropertytypedate", "msopropertytypefloat", "msopropertytypenumber", "msopropertytypestring"}
+                if any(tok.kind is TokenKind.IDENTIFIER and _raw(args, i + 1) != ":=" and token_text(tok) not in allowed for i, tok in enumerate(args)):
+                    forget_all()
+                    return
+                held = state.get(add.key, set())
+                lower = add.name.lower()
+                if lower in held:
+                    kind = _WORD_NAMED[add.key.rsplit(".", 1)[-1]]
+                    push("hostArgumentOutOfRange", f"The {kind.noun} \"{add.name}\" was already added to {add.chain}, and the names ignore case. This will raise Run-time error {kind.error}.", at(add.name_token))
+                forget(name for name in names_in(source, node.span) if name != add.key.split(".")[0])
+                held.add(lower)
+                state[add.key] = held
                 return
-            # `d.Variables("zq").Value = 3` changes the value, not the names;
-            # `.Delete` takes the name out (XLIDE issue #610).
             use = _variable_use(toks)
-            if use is not None and use.key in state:
+            if use and use.key in state:
+                eq = next((i for i, tok in enumerate(toks) if tok.raw_text == "="), -1)
+                if eq >= 0 and any(tok.kind is TokenKind.IDENTIFIER for tok in toks[eq + 1:]):
+                    forget_all()
+                    return
                 if use.deletes:
                     state[use.key].discard(use.name)
-                head = use.key.split(".")[0]
-                forget([lower for lower in names_in(source, node.span) if lower != head])
+                forget(name for name in names_in(source, node.span) if name != use.key.split(".")[0])
                 return
-        set_target = set_assignment_target(source, node.span)
-        if set_target is not None:
-            lower = set_target[0].lower()
-            value = [tok for tok in set_target[2] if tok.kind is not TokenKind.COMMENT]
-            # `Set d2 = d`: another name for the document, whose names it shares
-            # (XLIDE issue #610).
+        target = set_assignment_target(source, node.span)
+        if target:
+            lower = target[0].lower()
+            value = [tok for tok in target[2] if tok.kind is not TokenKind.COMMENT]
             alias = _lower_name(value[0]) if len(value) == 1 else None
-            shared = (
-                [
-                    (key, held)
-                    for key, held in state.items()
-                    if not key.startswith(_SLIDE) and key.split(".")[0] == alias
-                ]
-                if alias
-                else []
-            )
-            call = next(
-                (
-                    k
-                    for k, tok in enumerate(value)
-                    if _raw(value, k - 1) == "."
-                    and _at(value, k - 2) is not None
-                    and token_text(_at(value, k - 2)) == "slides"
-                    and token_text(tok) in ("add", "addslide")
-                ),
-                -1,
-            )
-            # `Set a = p.Slides.Add(1, ...)` keeps what is known of p.
-            pres = (
-                _lower_name(value[0])
-                if call == 4 and value[1].raw_text == "." and value[3].raw_text == "."
-                else None
-            )
-            forget([name for name in names_in(source, node.span) if name != pres or name == lower])
+            shared = [(key, held) for key, held in state.items() if not key.startswith(_SLIDE) and key.split(".")[0] == alias] if alias else []
+            call = next((i for i, tok in enumerate(value) if _raw(value, i - 1) == "." and token_text(_at(value, i - 2)) == "slides" and token_text(tok) in ("add", "addslide")), -1)
+            pres = _lower_name(value[0]) if call == 4 and _raw(value, 1) == "." and _raw(value, 3) == "." else None
+            forget(name for name in names_in(source, node.span) if name != pres or name == lower)
             for key, held in shared:
                 state[key] = held
                 assert alias is not None
-                state[lower + key[len(alias) :]] = held
-            if (
-                host == "PowerPoint"
-                and call > 0
-                and _raw(value, call + 1) == "("
-                and match_paren_from(value, call + 1) == len(value) - 1
-            ):
-                state[_SLIDE + lower] = set()
-                # `p.Slides.Add(1, ...)` on a presentation the procedure made.
-                if pres and pres in presentations:
-                    index = _at(value, call + 2)
-                    add_slide(
-                        pres,
-                        js_number(index.raw_text)
-                        if index is not None and index.kind is TokenKind.INTEGER_LITERAL
-                        else None,
-                        _SLIDE + lower,
-                        index,
-                        at,
-                    )
-            # `Set p = Presentations.Add(...)`: a new presentation, no slides.
-            if (
-                host == "PowerPoint"
-                and token_text(_at(value, 0)) == "presentations"
-                and _raw(value, 1) == "."
-                and token_text(_at(value, 2)) == "add"
-                and (
-                    len(value) == 3
-                    or (_raw(value, 3) == "(" and match_paren_from(value, 3) == len(value) - 1)
-                )
-            ):
-                presentations[lower] = _PresentationState()
+                state[lower + key[len(alias):]] = held
+            if host == "PowerPoint" and call > 0 and _raw(value, call + 1) == "(" and match_paren_from(value, call + 1) == len(value) - 1 and resolve_receiver_type_at(source, node.span.start + value[call - 1].end, member_ctx) == "PowerPoint.Slides":
+                add_slide(pres, _SLIDE + lower)
+            if host == "PowerPoint" and token_text(_at(value, 0)) == "presentations" and _raw(value, 1) == "." and token_text(_at(value, 2)) == "add" and resolve_receiver_type_at(source, node.span.start + value[1].end, member_ctx) == "PowerPoint.Presentations" and (len(value) == 3 or (_raw(value, 3) == "(" and match_paren_from(value, 3) == len(value) - 1)):
+                presentations.add(lower)
             return
         if host == "PowerPoint":
-            # `p.Slides.Add 3, ppLayoutBlank` as a statement.
             pres = _lower_name(_at(toks, 0))
-            if (
-                pres
-                and pres in presentations
-                and _raw(toks, 1) == "."
-                and token_text(_at(toks, 2)) == "slides"
-                and _raw(toks, 3) == "."
-                and token_text(_at(toks, 4)) == "add"
-                and _raw(toks, 5) != "("
-            ):
-                index = _at(toks, 5)
-                add_slide(
-                    pres,
-                    js_number(index.raw_text)
-                    if index is not None and index.kind is TokenKind.INTEGER_LITERAL
-                    else None,
-                    f"{_SLIDE}#{node.span.start}",
-                    index,
-                    at,
-                )
+            if pres and pres in presentations and _raw(toks, 1) == "." and token_text(_at(toks, 2)) == "slides" and _raw(toks, 3) == "." and token_text(_at(toks, 4)) == "add" and _raw(toks, 5) != "(":
+                add_slide(pres, f"{_SLIDE}#{node.span.start}")
                 return
-            # `p.Slides(2).Name = "zq"`.
-            if (
-                pres
-                and pres in presentations
-                and _raw(toks, 1) == "."
-                and token_text(_at(toks, 2)) == "slides"
-                and _raw(toks, 3) == "("
-                and _kind(toks, 4) is TokenKind.INTEGER_LITERAL
-                and _raw(toks, 5) == ")"
-                and _raw(toks, 6) == "."
-                and token_text(_at(toks, 7)) == "name"
-                and _raw(toks, 8) == "="
-                and len(toks) == 10
-                and toks[9].kind is TokenKind.STRING_LITERAL
-            ):
-                slide_key = slide_at(pres, js_number(toks[4].raw_text))
-                if slide_key:
-                    name_slide(slide_key, string_literal_value(toks[9].raw_text), toks[9], at)
-                    return
-            # `a.MoveTo 2` past the slides of the presentation a is in.
-            moved = _lower_name(_at(toks, 0))
-            moved_in = slide_in.get(_SLIDE + moved) if moved else None
-            moved_pres = presentations.get(moved_in) if moved_in else None
-            count = len(moved_pres.order) if moved_pres is not None else None
-            if (
-                count is not None
-                and _raw(toks, 1) == "."
-                and token_text(_at(toks, 2)) == "moveto"
-                and len(toks) == 4
-                and toks[3].kind is TokenKind.INTEGER_LITERAL
-                and js_number(toks[3].raw_text) > count
-            ):
-                push(
-                    "hostArgumentOutOfRange",
-                    f"'{moved_in}' holds {count} slide{_plural(count)}, so {toks[3].raw_text} is past "
-                    "the last. This will raise Run-time error '-2147188160': Integer out of range.",
-                    at(toks[3]),
-                )
-                return
-        # `a.Name = "Zq"` or `a.Name = b.Name` on a slide the procedure added.
-        slide = (
-            _lower_name(_at(toks, 0))
-            if _raw(toks, 1) == "." and token_text(_at(toks, 2)) == "name" and _raw(toks, 3) == "="
-            else None
-        )
-        if slide is not None and _SLIDE + slide in state and (len(toks) == 5 or len(toks) == 7):
-            other = (
-                _lower_name(toks[4])
-                if len(toks) == 7 and toks[5].raw_text == "." and token_text(toks[6]) == "name"
-                else None
-            )
-            other_name = next(iter(state.get(_SLIDE + other, set())), None) if other is not None else None
-            name_value = (
-                string_literal_value(toks[4].raw_text)
-                if len(toks) == 5 and toks[4].kind is TokenKind.STRING_LITERAL
-                else other_name
-            )
-            if name_value is not None:
-                name_slide(_SLIDE + slide, name_value, toks[4], at)
+        slide = _lower_name(_at(toks, 0)) if _raw(toks, 1) == "." and token_text(_at(toks, 2)) == "name" and _raw(toks, 3) == "=" else None
+        if slide and _SLIDE + slide in state and len(toks) in (5, 7):
+            other = _lower_name(toks[4]) if len(toks) == 7 and toks[5].raw_text == "." and token_text(toks[6]) == "name" else None
+            other_name = next(iter(state.get(_SLIDE + other, ())), None) if other else None
+            value_name = string_literal_value(toks[4].raw_text) if len(toks) == 5 and toks[4].kind is TokenKind.STRING_LITERAL else other_name
+            if value_name is not None:
+                name_slide(_SLIDE + slide, value_name, toks[4], at)
             else:
                 state[_SLIDE + slide] = set()
             return
-        forget(names_in(source, node.span))
+        forget_all()
 
-    # A block forgets the presentations; what it names it forgets too.
-    def snapshot() -> dict[str, set[str]]:
-        return {key: set(held) for key, held in state.items()}
-
-    def restore(saved: Mapping[str, set[str]]) -> None:
+    def restore(saved: dict[str, set[str]]) -> None:
         state.clear()
         presentations.clear()
-        for key, held in saved.items():
-            state[key] = set(held)
+        state.update((key, set(held)) for key, held in saved.items())
 
-    def touches(stmt: LeafStatementNode) -> set[str]:
-        return names_in(source, stmt.span)
-
-    walk_entering_blocks(
-        source,
-        member.body,
-        lambda node: activity is not None and activity.is_inactive(node.span),
-        visit,
-        BlockEnteringState(snapshot=snapshot, restore=restore, forget=forget, touches=touches),
-    )
+    walk_entering_blocks(source, member.body, lambda node: activity is not None and activity.is_inactive(node.span), visit, BlockEnteringState(snapshot=lambda: {key: set(held) for key, held in state.items()}, restore=restore, forget=forget, touches=lambda stmt: names_in(source, stmt.span) | presentations | {key[len(_SLIDE):] if key.startswith(_SLIDE) else key.split(".")[0] for key in state}))
 
 
 def _variable_use(toks: Sequence[VbaToken]) -> _VariableUse | None:

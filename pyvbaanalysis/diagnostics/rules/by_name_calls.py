@@ -243,20 +243,12 @@ _PARAM_ARRAY_RE = re.compile(r"paramarray", re.IGNORECASE | re.ASCII)
 
 def _parameter_counts(signature: str) -> tuple[int, float] | None:
     """The parameters a member signature lists: how many a call must pass, and may."""
-    open_index = signature.find("(")
-    if open_index < 0:
+    from ...types.type_inference import runtime_signature_parameter_text, split_signature_top_level
+    inner = runtime_signature_parameter_text(signature)
+    if inner is None:
         return None
-    depth = 0
-    close = -1
-    for i in range(open_index, len(signature)):
-        depth += 1 if signature[i] == "(" else -1 if signature[i] == ")" else 0
-        if depth == 0:
-            close = i
-            break
-    if close < 0:
-        return None
-    listed = js_trim(signature[open_index + 1 : close])
-    params = [] if listed == "" else [js_trim(param) for param in listed.split(",")]
+    listed = js_trim(inner)
+    params = [] if listed == "" else [js_trim(param) for param in split_signature_top_level(listed)]
     required = len(
         [param for param in params if not param.startswith("[") and _PARAM_ARRAY_HEAD_RE.match(param) is None]
     )

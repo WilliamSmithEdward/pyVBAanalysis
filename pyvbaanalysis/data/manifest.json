@@ -1,23 +1,23 @@
 {
   "sourceRepo": "WilliamSmithEdward/xlide_vscode",
-  "xlideVersion": "11.0.0",
-  "xlideCommit": "751fdb2bcec07e2f4dc956d97bed5ae159bfb93a",
+  "xlideVersion": "11.1.0",
+  "xlideCommit": "8f64c2ce8d4c7104c7aa3559da0e98b6c178303e",
   "files": {
     "vbe_oracle_cases.json": {
-      "sha256": "7dc79fd75825aeab608f5ab6090bfe7b0b2da1280cf11c736138a7899034c713",
-      "bytes": 6011735
+      "sha256": "0ba793cfbc05389d20e8eeff2ac1a4ee348a7d3c380e58736ab8b9a6c9e2c0e0",
+      "bytes": 6169708
     },
     "diagnostic_influence_audit.json": {
-      "sha256": "417acf47868b1e7bf3facef36faf6e5b806b627feadd9e2e5481b4fd8bb1cbdf",
-      "bytes": 444865
+      "sha256": "63a9864a2b0c3c36a28ab781aa039144231e2e8f757983356c71a86c4a4a7beb",
+      "bytes": 453466
     },
     "rule_metadata.json": {
-      "sha256": "27bb8bc480c462de809e178f3e23c95eb8cd015ca2cee4e648e96ef4cb0a462e",
-      "bytes": 88985
+      "sha256": "f855c3b7acbd73b59f606751f3ebb6680f6e1e3d765d801ebc14f9f504d498fb",
+      "bytes": 89627
     }
   },
-  "oracleCaseCount": 9072,
-  "diagnosticCodeCount": 222,
+  "oracleCaseCount": 9273,
+  "diagnosticCodeCount": 223,
   "diagnosticCodes": [
     "addressof-misuse",
     "ambiguous-enum-member",
@@ -113,6 +113,7 @@
     "handler-fall-through",
     "host-argument-out-of-range",
     "host-property-value-out-of-range",
+    "host-readonly-value-assignment",
     "identifier-too-long",
     "if-missing-then",
     "if-reserved-keyword-in-condition",
@@ -242,7 +243,7 @@
     "withevents-declaration",
     "wrong-number-of-dimensions"
   ],
-  "ruleCount": 219,
+  "ruleCount": 220,
   "ruleNames": [
     "addressOfMisuse",
     "ambiguousEnumMember",
@@ -338,6 +339,7 @@
     "handlerFallThrough",
     "hostArgumentOutOfRange",
     "hostPropertyValueOutOfRange",
+    "hostReadonlyValueAssignment",
     "identifierTooLong",
     "ifMissingThen",
     "ifReservedKeywordInCondition",

@@ -156,16 +156,30 @@ def check_late_bound_objects(
     mod: ModuleNode,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    project_callables: Iterable[str] = (),
 ) -> None:
+    callables = {node.name.lower() for node in mod.members if isinstance(node, ProcedureNode)} | {name.lower() for name in project_callables}
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
-        _check_procedure(source, member, activity, push)
+        _check_procedure(source, member, activity, push, callables)
 
 
 def _check_procedure(
-    source: str, member: ProcedureNode, activity: ConditionalActivityTracker | None, push: PushFn
+    source: str, member: ProcedureNode, activity: ConditionalActivityTracker | None, push: PushFn,
+    callables: Iterable[str],
 ) -> None:
+    if re.search(r"\bon\s+error\b", source[member.span.start:member.span.end], re.IGNORECASE):
+        return
+    from ..walker import for_each_variable_group
+    from ...parser.nodes import VariableGroupNode
+    locals_: set[str] = set()
+
+    def collect(group: VariableGroupNode) -> None:
+        if not group.is_const and group.modifier.lower() != "static":
+            locals_.update(decl.name.lower() for decl in group.declarations)
+
+    for_each_variable_group(member.body, collect, activity)
     states: dict[str, _LateObject] = {}
 
     def forget(names: Iterable[str]) -> None:
@@ -176,6 +190,15 @@ def _check_procedure(
         if not is_leaf_statement(node):
             return
         toks = statement_tokens_after_leading_label(source, node.span)
+        if any(token_name(tok) is not None and token_text(tok) in callables and not (token_text(tok) == member.name.lower() and _raw(toks, i + 1) == "=") for i, tok in enumerate(toks)):
+            states.clear()
+        file_owners = {token_text(tok) for i, tok in enumerate(toks) if _raw(toks, i + 1) == "." and isinstance(states.get(token_text(tok)), _FsoState)}
+        if file_owners:
+            for lower, held in states.items():
+                if isinstance(held, _FsoState) and (lower not in file_owners or len(file_owners) > 1):
+                    held.files = {}
+                if isinstance(held, _TextStreamState):
+                    held.empty = None
         if (
             statement_label_declaration(source, node.span) is not None
             or token_text(_at(toks, 0)) == "gosub"
@@ -245,7 +268,7 @@ def _check_procedure(
             if isinstance(created, _TextStreamState):
                 named.discard(_lower_name(_at(value, 0)) or "")
             forget(named)
-            if created is not None:
+            if created is not None and lower in locals_:
                 states[lower] = created
             return
         _check_members(node.span, toks, states, push)

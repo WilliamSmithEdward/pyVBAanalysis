@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 from ..call.call_context import standalone_empty_parenthesized_call_statement
 from ..completion.member_access import (
     MemberCompletionContext,
+    MemberCompletionEntry,
     resolve_exact_member_completion,
 )
 from ..conditional import ConditionalActivityTracker
@@ -477,6 +478,19 @@ class BoundMemberCall:
 
     call: CallArguments
     signature: CallableTypeSignature
+    source_parameters: bool = False
+
+
+def member_callable_signature(member: MemberCompletionEntry) -> CallableTypeSignature:
+    kind = ("sub" if member.sub else "function") if member.kind == "method" else "propertyGet"
+    source = (member.procedure_params or {}).get(kind)
+    if source is None:
+        return parse_runtime_display_signature(member.name, member.signature or "")
+    return CallableTypeSignature(name=member.name, params=[CallableParamType(
+        name=strip_header_brackets(param.name), type_=param.type_, optional=bool(param.optional),
+        param_array=bool(param.param_array), is_array=param.is_array,
+        by_ref=is_by_ref_procedure_param(param.by_ref, param.by_val, param.param_array),
+    ) for param in source], return_type=member.returns, valued=kind != "sub")
 
 
 _WHITESPACE_RE = re.compile(r"\s")
@@ -510,7 +524,7 @@ def member_expression_calls(
             and standalone_empty_call.span.end == call_span.end
         ):
             continue
-        parsed = parse_runtime_display_signature(member.name, member.signature)
+        parsed = member_callable_signature(member)
         if is_property_result_indexing(member, parsed, inner):
             continue
         # A Function of a project class gives a value, and `k.Items(1)` may index
@@ -529,12 +543,15 @@ def member_expression_calls(
             BoundMemberCall(
                 call=CallArguments(
                     name=member.name,
+                    qualifier=member.owner if member.procedure_params is not None else None,
+                    arguments_parenthesized=member.kind == "method" and token_text(toks[0]) != "call" and close == len(toks) - 1 and is_member_statement_chain_through(toks, first_executable_token_index(toks), i),
                     name_span=Span(call_span.start, span.start + toks[i].end),
                     slots=split.slots,
                     slot_spans=split.spans,
                     slice_start=span.start,
                 ),
                 signature=signature,
+                source_parameters=member.procedure_params is not None,
             )
         )
     return out
@@ -580,13 +597,15 @@ def member_statement_calls(
             BoundMemberCall(
                 call=CallArguments(
                     name=member.name,
+                    qualifier=member.owner if member.procedure_params is not None else None,
                     name_span=Span(span.start + toks[i].start, span.start + toks[i].end),
                     explicit_call=explicit_call,
                     slots=split.slots,
                     slot_spans=split.spans,
                     slice_start=span.start,
                 ),
-                signature=parse_runtime_display_signature(member.name, member.signature),
+                signature=member_callable_signature(member),
+                source_parameters=member.procedure_params is not None,
             )
         ]
     return []

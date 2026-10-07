@@ -22,9 +22,11 @@ Let raises 451 when assigned, and one with a Let and no Get 450 when read.
 
 from __future__ import annotations
 
+from ...symbols.symbol_model import VbaSymbolKind, SymbolVisibility
+
 import dataclasses
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence, Iterable
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -335,20 +337,13 @@ _JS_SPACES_RE = re.compile(f"{_JS_SPACE}+")
 
 def _signature_params(signature: str) -> list[_KnownParam] | None:
     """The parameters a member signature lists: `M(ByVal a As Long, [ByVal b As Long])`."""
-    open_index = signature.find("(")
-    depth = 0
-    close = -1
-    if open_index >= 0:
-        for i in range(open_index, len(signature)):
-            depth += 1 if signature[i] == "(" else -1 if signature[i] == ")" else 0
-            if depth == 0:
-                close = i
-                break
-    if close < 0:
+    from ...types.type_inference import runtime_signature_parameter_text, split_signature_top_level
+    inner = runtime_signature_parameter_text(signature)
+    if inner is None:
         return None
-    listed = js_trim(signature[open_index + 1 : close])
+    listed = js_trim(inner)
     params: list[_KnownParam] = []
-    for raw in [] if listed == "" else listed.split(","):
+    for raw in [] if listed == "" else split_signature_top_level(listed):
         text = js_trim(raw)
         optional = text.startswith("[") or _OPTIONAL_HEAD_RE.match(text) is not None
         words = [
@@ -474,39 +469,42 @@ def check_runtime_member_not_found(
     member_ctx: MemberCompletionContext,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    project_callables: Iterable[str] = (),
 ) -> None:
     """`Application.Zzq` in Excel, and `o.Foo` on an Object or Variant local that
     holds a New Collection or an exhaustive project class, raise 438 at run time."""
     model = member_ctx.model
+    callables = {node.name.lower() for node in mod.members if isinstance(node, ProcedureNode)} | {name.lower() for name in project_callables}
     application_surface = _excel_application_surface(model)
     range_surface = _excel_range_surface(model) if application_surface is not None else None
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
         env = type_environment_for(symbols, member)
-        added = _controls_added_in(source, member.body, activity)
 
         def each_statement(
             stmt: LeafStatementNode,
             env: Mapping[str, str] = env,
-            added: AbstractSet[str] | Literal["any"] = added,
         ) -> None:
             for span in statement_and_branch_spans(stmt):
                 toks = statement_tokens(source, span)
-                _check_form_control_names(source, span.start, toks, member_ctx, added, push)
                 _check_open_type_members(
                     source, span.start, toks, env, application_surface, range_surface, member_ctx, push
                 )
 
         for_each_statement(member.body, each_statement, activity)
         _check_collection_items(source, member, symbols, env, member_ctx, activity, push)
+        if re.search(r"\bon\s+error\b", source[member.span.start:member.span.end], re.IGNORECASE):
+            continue
         proc_sym = procedure_symbol_for(symbols, member)
         auto_instanced = {
             child.name.lower()
             for child in (proc_sym.children if proc_sym is not None else None) or []
             if child.is_auto_instantiated
         }
-        _walk_held_classes(source, member, env, auto_instanced, application_surface, member_ctx, activity, push)
+        static_proc = re.match(r"\s*(?:(?:Public|Private|Friend)\s+)?Static\b", source[member.span.start:member.span.end], re.IGNORECASE) is not None
+        locals_ = {child.name.lower() for child in (proc_sym.children if proc_sym else None) or [] if child.kind is VbaSymbolKind.LOCAL_VARIABLE and child.visibility is not SymbolVisibility.STATIC and not static_proc}
+        _walk_held_classes(source, member, env, auto_instanced, application_surface, member_ctx, activity, push, locals_, callables)
 
 
 def _walk_held_classes(
@@ -518,6 +516,8 @@ def _walk_held_classes(
     member_ctx: MemberCompletionContext,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    locals_: AbstractSet[str],
+    callables: AbstractSet[str],
 ) -> None:
     """The per-procedure walk that follows what class each late-bound local holds."""
 
@@ -536,6 +536,8 @@ def _walk_held_classes(
         if not is_leaf_statement(node):
             return  # a Dim inside the body declares, and runs nothing
         toks = statement_tokens_after_leading_label(source, node.span)
+        if any(token_text(tok) in callables and not (_raw(toks, i - 1) == "." and token_text(_at(toks, i - 2)) in held) and not (token_text(tok) == member.name.lower() and _raw(toks, i + 1) == "=") for i, tok in enumerate(toks)):
+            held.clear()
         if (
             jump_target_label_declaration(source, node.span) is not None
             or token_text(toks[0] if toks else None) == "gosub"
@@ -569,7 +571,7 @@ def _walk_held_classes(
             )
             return
         assigned = set_assignment_target(source, node.span)
-        if assigned is not None and is_late_bound(assigned[0].lower()):
+        if assigned is not None and assigned[0].lower() in locals_ and is_late_bound(assigned[0].lower()):
             lower = assigned[0].lower()
             equals = next((k for k, tok in enumerate(toks) if tok.raw_text == "="), -1)
             value = list(toks[equals + 1 :])
@@ -617,7 +619,7 @@ def _walk_held_classes(
             held.pop(lower, None)
 
     def touches(stmt: LeafStatementNode) -> set[str]:
-        return names_in(source, stmt.span)
+        return names_in(source, stmt.span) | held.keys()
 
     walk_entering_blocks(
         source,

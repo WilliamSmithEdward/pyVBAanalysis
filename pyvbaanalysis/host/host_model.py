@@ -126,6 +126,14 @@ def _load_host_model(file_name: str) -> HostObjectModel:
     return raw  # type: ignore[no-any-return]
 
 
+def get_scripting_object_model() -> HostObjectModel:
+    return _load_host_model("scripting_host_model.json")
+
+
+def get_regexp_object_model() -> HostObjectModel:
+    return _load_host_model("regexp_host_model.json")
+
+
 def get_excel_object_model() -> HostObjectModel:
     """The vendored Excel host object model (data/excel_host_model.json)."""
     return _load_host_model("excel_host_model.json")
