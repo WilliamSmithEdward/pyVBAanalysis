@@ -54,6 +54,9 @@ _RETIRED_UPSTREAM = {
     # XLIDE issue #107 (10.12.0): a Property Let's value parameter may be of any
     # type, object types included, so the report was wrong and upstream removed it.
     "propertyLetObjectValue",
+    # XLIDE 11.1: the process clipboard is mutable external state, so a local
+    # CutCopyMode assignment cannot prove that a later paste has nothing to use.
+    "pasteWithNothingCopied",
 }
 
 # Rules emitted by the engine without going through a rule's push() callback,

@@ -76,7 +76,7 @@ def test_does_not_normalize_every_host_type_again_for_each_unrelated_statement(
 
 def test_keeps_host_types_separate_across_procedures_that_shadow_module_variables() -> None:
     source = (
-        "Dim x As Application\nSub A()\nSet x = Application\nDebug.Print X + 1\nEnd Sub\n"
+        "Dim x As Long\nSub A()\nDim x As Application\nSet x = Application\nDebug.Print X + 1\nEnd Sub\n"
         "Sub B()\nDim x As Long\nx = 2\nDebug.Print x + 1\nEnd Sub"
     )
     hits = _run_host(source)

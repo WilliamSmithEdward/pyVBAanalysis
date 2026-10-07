@@ -51,9 +51,13 @@ def test_runtime_conversion_value_invalid_date_string() -> None:
 
 
 def test_oracle_asserted_cases() -> None:
+    # XLIDE 11.1 forgets mutable file state in procedures with error handlers.
+    # The historical Kill/RmDir cases remain evidence, but their state inference
+    # is intentionally retired to avoid false positives after handled failures.
+    handled_file_state = frozenset(f"issue682_{number:02d}_runtime" for number in range(6, 14))
     for code in _CODES:
         if asserted_cases(code):
-            assert assert_oracle_behavior(code) > 0
+            assert assert_oracle_behavior(code, handled_file_state if code == "runtime-argument-value" else frozenset()) > 0
 
 
 def test_no_false_positives_on_accepted_cases() -> None:

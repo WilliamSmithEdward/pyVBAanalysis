@@ -13,8 +13,8 @@ from pyvbaanalysis.types import (
 
 def test_normalize_type() -> None:
     assert normalize_type("Long") == "long"
-    assert normalize_type("vbLong") == "long"  # leading vb stripped
-    assert normalize_type("VBString") == "string"  # case-insensitive vb strip
+    assert normalize_type("vbLong") == "vblong"  # declared names keep their prefix
+    assert normalize_type("VBString") == "vbstring"
     assert normalize_type("String()") == "string"  # trailing () stripped
     assert normalize_type("  Variant ( ) ") == "variant"
     assert normalize_type(None) is None

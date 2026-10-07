@@ -160,7 +160,7 @@ def test_project_class_member_calls_are_checked() -> None:
         "    Call p.Save()\nEnd Sub\n"
     )
     modules = [ModuleInput("Caller", _STD, caller), _PERSON]
-    arity = "Wrong number of arguments to 'Save': expected 1 argument, but got 0."
+    arity = "Wrong number of arguments to 'Person.Save': expected 1 argument, but got 0."
     assert _project_messages(modules, "Caller", "argument-count") == [arity, arity]
     mismatch = (
         "Argument 'Count' of 'Save' expects Long, but got String literal \"bad\". This string "
