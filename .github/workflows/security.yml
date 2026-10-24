@@ -33,11 +33,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+      - uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           languages: ${{ matrix.language }}
           queries: security-extended
-      - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+      - uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           category: codeql-${{ matrix.language }}
           output: sarif
@@ -81,7 +81,7 @@ jobs:
       - name: Drop suppressed results for code scanning
         if: always() && hashFiles('semgrep.sarif') != ''
         run: jq '.runs[].results |= map(select((.suppressions // []) | length == 0))' semgrep.sarif > semgrep-upload.sarif
-      - uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+      - uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         if: always() && hashFiles('semgrep-upload.sarif') != ''
         with:
           sarif_file: semgrep-upload.sarif
@@ -159,7 +159,7 @@ jobs:
           zizmor --format plain .github/workflows || true
           exit "$status"
 
-      - uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+      - uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         if: ${{ !cancelled() }}
         with:
           sarif_file: zizmor.sarif
