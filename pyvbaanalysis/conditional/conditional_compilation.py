@@ -15,6 +15,7 @@ import math
 import re
 import unicodedata
 from collections.abc import Callable, Generator, Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Any, Protocol, Union, cast
 
@@ -429,40 +430,122 @@ def conditional_activity_for_span(
     return conditional_activity_at_offset(module, span.start, env)
 
 
-def null_condition_directives(
+@dataclass(frozen=True, slots=True)
+class StringMismatch:
+    """A string an expression could not convert, and what it was needed as:
+    "boolean" (True or False), "number" or "date"."""
+
+    value: str
+    conversion: str
+
+
+@dataclass(frozen=True, slots=True)
+class InvalidConditionDirective:
+    """An `#If`, `#ElseIf` or `#Const` expression the VBE refuses to compile,
+    and why: ``reason`` is "null" or "type-mismatch"; ``mismatch`` is set for
+    a Type mismatch only."""
+
+    reason: str
+    directive: ConditionalDirectiveNode
+    mismatch: StringMismatch | None = None
+
+
+def invalid_condition_directives(
     module: ModuleNode, env: ConditionalCompilationEnvironment | None = None
-) -> list[ConditionalDirectiveNode]:
-    """The `#If` and `#ElseIf` lines whose condition is Null, which the VBE
-    refuses to compile: "Invalid use of Null" (XLIDE issue #208, Excel 16.0).
-    `#If Null`, `#If Null = 1`, `#If Not Null` and a `#Const N = Null` read by
-    `#If N` all are. Only a line the VBE is sure to evaluate is listed: one in
-    code that is compiled, and for `#ElseIf`, after arms that were all False."""
+) -> list[InvalidConditionDirective]:
+    """The `#If` and `#ElseIf` lines whose condition the VBE refuses, in one replay:
+
+    - Null: "Invalid use of Null" (XLIDE issue #208, Excel 16.0). `#If Null`,
+      `#If Null = 1`, `#If Not Null` and a `#Const N = Null` read by `#If N`
+      all are. Only a line the VBE is sure to evaluate is listed: one in code
+      that is compiled, and for `#ElseIf`, after arms that were all False.
+    - A string VBA cannot convert: "Type mismatch" (Excel 16.0). A condition
+      that is a string no locale reads as True or False (`#If "abc"`, `#If ""`,
+      `#If " True "`, `#If S` after `#Const S = "x"`), or that hands one to an
+      operator needing a number or a Boolean (`#If Not "abc"`,
+      `#If UNDEFINED_X - "abc"`, `#If "abc" = 1`). A `#Const` value that hands
+      one to an operator is refused too (`#Const A = "abc" + 1`), even when
+      nothing reads it; one that is a string is not (`#Const S = "x"`). Unlike
+      Null, the VBE refuses these in an arm it skips as well, and an `#ElseIf`
+      after a taken arm, so a line the VBE does not evaluate is read too, when
+      it can hold a string at all: a quote, an `&`, or a constant that is one.
+    """
     if not module_has_conditional_directives(module):
         return []
     effective_env = _effective_environment(env)
     project_constants = _lowercased(effective_env.project_constants)
+    tables = (effective_env.compiler_constants, effective_env.project_constants)
+    # Strings the host supplied, until a module #Const gives the name a value.
+    host_strings = {
+        name.lower() for table in tables for name, value in (table or {}).items() if isinstance(value, str)
+    }
+
+    def read(expression: str | None) -> _ConditionalReading:
+        return _read_with_project_constants(
+            expression, effective_env, project_constants, host_strings=host_strings
+        )
+
     stack: list[_ConditionalFrame] = []
     current = ConditionalActivity.ACTIVE
-    out: list[ConditionalDirectiveNode] = []
+    out: list[InvalidConditionDirective] = []
+    # Whether any constant holds a string, so a condition with no quote and no
+    # `&` can still be one.
+    string_constant = any(isinstance(value, str) for table in tables for value in (table or {}).values())
+
+    def may_hold_string(raw: str) -> bool:
+        return string_constant or '"' in raw or "&" in raw
+
     for occ in collect_conditional_directives(module):
         directive = occ.directive
-        frame = stack[-1] if stack else None
-        if directive.directive_kind is ConditionalDirectiveKind.IF:
-            evaluated = current is ConditionalActivity.ACTIVE
-        else:
-            evaluated = (
-                directive.directive_kind is ConditionalDirectiveKind.ELSE_IF
-                and frame is not None
-                and frame.parent is ConditionalActivity.ACTIVE
-                and not frame.seen_true
-                and not frame.seen_unknown
-            )
-        if evaluated:
-            value = _evaluate_with_project_constants(directive.condition_raw, effective_env, project_constants)
-            if value is not None and _is_null(value):
-                out.append(directive)
+        kind = directive.directive_kind
+        if kind is ConditionalDirectiveKind.CONST and directive.name and may_hold_string(directive.value_raw or ""):
+            operator_mismatch = read(directive.value_raw).operator_mismatch
+            if operator_mismatch is not None:
+                out.append(InvalidConditionDirective("type-mismatch", directive, operator_mismatch))
+        if kind is ConditionalDirectiveKind.IF or kind is ConditionalDirectiveKind.ELSE_IF:
+            frame = stack[-1] if stack else None
+            if kind is ConditionalDirectiveKind.IF:
+                evaluated = current is ConditionalActivity.ACTIVE
+            else:
+                evaluated = (
+                    frame is not None
+                    and frame.parent is ConditionalActivity.ACTIVE
+                    and not frame.seen_true
+                    and not frame.seen_unknown
+                )
+            raw = directive.condition_raw or ""
+            if not evaluated and not may_hold_string(raw):
+                current = _apply_conditional_directive(directive, effective_env, project_constants, stack, current)
+                continue
+            reading = read(directive.condition_raw)
+            if reading.mismatch is not None:
+                out.append(InvalidConditionDirective("type-mismatch", directive, reading.mismatch))
+            elif evaluated and reading.value is not None and _is_null(reading.value):
+                out.append(InvalidConditionDirective("null", directive))
+        # A #Const that gives its name a value replaces a host string; one that
+        # fails (`#Const FLAG = 1 / 0`) leaves it.
+        replaces_host = (
+            kind is ConditionalDirectiveKind.CONST
+            and directive.name is not None
+            and directive.name.lower() in host_strings
+            and _evaluate_with_project_constants(directive.value_raw, effective_env, project_constants)
+            is not None
+        )
         current = _apply_conditional_directive(directive, effective_env, project_constants, stack, current)
+        if kind is ConditionalDirectiveKind.CONST and directive.name:
+            lower = directive.name.lower()
+            if replaces_host:
+                host_strings.discard(lower)
+            if isinstance(project_constants.get(lower), str):
+                string_constant = True
     return out
+
+
+def null_condition_directives(
+    module: ModuleNode, env: ConditionalCompilationEnvironment | None = None
+) -> list[ConditionalDirectiveNode]:
+    """The lines `invalid_condition_directives` refuses for Null."""
+    return [item.directive for item in invalid_condition_directives(module, env) if item.reason == "null"]
 
 
 def _apply_conditional_directive(
@@ -625,6 +708,40 @@ def _evaluate_with_project_constants(
     ).parse()
 
 
+@dataclass(frozen=True, slots=True)
+class _ConditionalReading:
+    """An expression's value, and the string it could not convert, if any: one
+    an operator needed (``operator_mismatch``), or, read as a condition, the
+    value itself (``mismatch``, which includes the first)."""
+
+    value: ConditionalValue | None
+    mismatch: StringMismatch | None = None
+    operator_mismatch: StringMismatch | None = None
+
+
+def _read_with_project_constants(
+    expression: str | None,
+    env: ConditionalCompilationEnvironment,
+    project_constants: Mapping[str, ConditionalValue],
+    undefined_is_zero: bool | None = None,
+    host_strings: AbstractSet[str] | None = None,
+) -> _ConditionalReading:
+    """`_evaluate_with_project_constants`, with the string it could not convert."""
+    if expression is None or js_trim(expression) == "":
+        return _ConditionalReading(None)
+    if undefined_is_zero is None:
+        undefined_is_zero = env.project_constants is not None
+    compiler_constants = conditional_compiler_constants(
+        ConditionalCompilationEnvironment(compiler_constants=env.compiler_constants)
+    )
+    return _ConditionalExpressionParser(
+        _directive_expression_tokens(expression),
+        _ConstantLookup(project_constants, compiler_constants),
+        undefined_is_zero,
+        host_strings,
+    ).read()
+
+
 def _combine_activity(
     parent: ConditionalActivity, condition: ConditionalActivity
 ) -> ConditionalActivity:
@@ -650,18 +767,55 @@ def _is_null(value: ConditionalValue) -> bool:
 
 def _truthy(value: ConditionalValue) -> bool | None:
     """Whether a condition holds. None for Null, which the VBE refuses as a
-    condition ("Invalid use of Null"), and for Nothing ("Invalid use of object")."""
+    condition ("Invalid use of Null"), for Nothing ("Invalid use of object"),
+    and for a string VBA cannot read as a Boolean ("Type mismatch")."""
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
         return value != 0
     if isinstance(value, str):
-        return len(value) > 0
+        return _string_truthy(value)
     if value.kind == "empty":
         return False
     if value.kind == "date":
         return value.serial != 0
     return None
+
+
+_TRUE_RE = re.compile(r"true", re.IGNORECASE | re.ASCII)
+_FALSE_RE = re.compile(r"false", re.IGNORECASE | re.ASCII)
+
+
+def _string_truthy(value: str) -> bool | None:
+    """A string as the VBE reads it for a condition: as VBA converts a string
+    to a Boolean (XLIDE issue #188), measured in a directive in Excel 16.0
+    (#If "0", "0.0", "False" and #Const S = "0" then #If S are False; "1",
+    "2.5", "True", "true", "&H10" and "1e3" are True; "", "abc" and " True "
+    are a Type mismatch). "True" and "False" in any case, with nothing around
+    them, are those values; a number is True unless it is zero. A plain number
+    whose value depends on the locale ("2.5", "1,000") is zero in one reading
+    exactly when it is in the other, so it is decided too. None for a string no
+    locale converts, and for any other number without a value here (a hex
+    string past a Long, a currency symbol, an exponent beside a separator),
+    which may not convert at all."""
+    # Imported here: the diagnostics package imports this one.
+    from ..diagnostics.string_conversion import numeric_string_readings, numeric_string_verdict
+
+    if _TRUE_RE.fullmatch(value):
+        return True
+    if _FALSE_RE.fullmatch(value):
+        return False
+    trimmed = value.strip(" \t")
+    if _RADIX_STRING_RE.fullmatch(trimmed):
+        radix = _radix_string_value(trimmed)
+        return None if radix is None else radix != 0
+    verdict = numeric_string_verdict(value)
+    if verdict.kind == "invalid":
+        return None
+    if verdict.value is not None:
+        return verdict.value != 0
+    readings = numeric_string_readings(value)
+    return None if readings is None else readings[0] != 0
 
 
 def _lowercased(
@@ -719,9 +873,25 @@ class _ConditionalExpressionParser:
     is its serial, so `#12:00:00 AM#` is False. `Nothing Is Nothing` is True.
     """
 
-    __slots__ = ("_tokens", "_constants", "_undefined_is_zero", "_index", "_parenthesis_depth")
+    __slots__ = (
+        "_tokens",
+        "_constants",
+        "_undefined_is_zero",
+        "_host_strings",
+        "_index",
+        "_parenthesis_depth",
+        "mismatch",
+        "_host_string",
+        "_broken",
+    )
 
-    def __init__(self, tokens: list[VbaToken], constants: _ConstantGetter, undefined_is_zero: bool) -> None:
+    def __init__(
+        self,
+        tokens: list[VbaToken],
+        constants: _ConstantGetter,
+        undefined_is_zero: bool,
+        host_strings: AbstractSet[str] | None = None,
+    ) -> None:
         self._tokens = tokens
         self._constants = constants
         # Whether a name no constant defines evaluates as the VBE evaluates it,
@@ -732,8 +902,21 @@ class _ConditionalExpressionParser:
         # module's `#Const` lines are folded into the same table before any `#If`
         # reads them.
         self._undefined_is_zero = undefined_is_zero
+        # Names whose value is a string the host supplied, not a module
+        # `#Const`: how the VBE reads such an argument was not measured.
+        self._host_strings = host_strings
         self._index = 0
         self._parenthesis_depth = 0
+        # The first string an operator needed as a number or a Boolean and
+        # could not convert, a compile error ("Type mismatch", measured in
+        # Excel 16.0).
+        self.mismatch: StringMismatch | None = None
+        # A string came from the host's constants, whose reading was not measured.
+        self._host_string = False
+        # A value was missing where the expression needs one, a `(` or a
+        # string was not closed, or a keyword stood for a value. Only the
+        # mismatch depends on it.
+        self._broken = False
 
     def parse(self) -> ConditionalValue | None:
         try:
@@ -743,6 +926,27 @@ class _ConditionalExpressionParser:
             return None
         return value if self._index >= len(self._tokens) else None
 
+    def read(self) -> _ConditionalReading:
+        """The value, and the string the expression could not convert, if any.
+        An expression the parser cannot read, missing a value or a `)` or with
+        tokens left over, reports no mismatch."""
+        from ..diagnostics.string_conversion import is_invalid_boolean_string
+
+        try:
+            value = run_expression(self._parse_logical(0))
+        except RecursionError:
+            return _ConditionalReading(None)
+        if self._index < len(self._tokens):
+            return _ConditionalReading(None)
+        if self._broken or self._host_string:
+            # The value is as `parse` gives it; only the mismatch is withheld.
+            return _ConditionalReading(value)
+        operator_mismatch = self.mismatch
+        mismatch = operator_mismatch
+        if mismatch is None and isinstance(value, str) and is_invalid_boolean_string(value):
+            mismatch = StringMismatch(value, "boolean")
+        return _ConditionalReading(value, mismatch, operator_mismatch)
+
     def _parse_logical(self, level: int) -> Generator[Any, Any, ConditionalValue | None]:
         """Imp, Eqv, Xor, Or, And, loosest first; each level is left-associative."""
         if level == len(_LOGICAL_LEVELS):
@@ -751,6 +955,8 @@ class _ConditionalExpressionParser:
         left = (cast("ConditionalValue | None", (yield self._parse_logical(level + 1))))
         while self._match_word(op):
             right = (cast("ConditionalValue | None", (yield self._parse_logical(level + 1))))
+            self._require_convertible(left, "boolean")
+            self._require_convertible(right, "boolean")
             left = None if left is None or right is None else _logical(op, left, right)
         return left
 
@@ -760,6 +966,8 @@ class _ConditionalExpressionParser:
         while self._match_word("not"):
             count += 1
         value = (cast("ConditionalValue | None", (yield self._parse_comparison())))
+        if count > 0:
+            self._require_convertible(value, "boolean")
         for _ in range(count):
             if isinstance(value, bool):
                 value = not value
@@ -771,14 +979,26 @@ class _ConditionalExpressionParser:
         return value
 
     def _parse_comparison(self) -> Generator[Any, Any, ConditionalValue | None]:
+        left_start = self._index
         left = (cast("ConditionalValue | None", (yield self._parse_concat())))
+        left_end = self._index
         while True:
             relational = relational_operator_at(self._tokens, self._index)
             word = None if relational is not None else token_word(self._peek())
             if relational is None and word != "like" and word != "is":
                 return left
             self._index += relational[1] if relational is not None else 1
+            right_start = self._index
             right = (cast("ConditionalValue | None", (yield self._parse_concat())))
+            if relational is not None:
+                for_left = self._literal_conversion(right_start, self._index)
+                for_right = self._literal_conversion(left_start, left_end)
+                if for_left:
+                    self._require_convertible(left, for_left)
+                if for_right:
+                    self._require_convertible(right, for_right)
+            left_start = self._index
+            left_end = self._index
             if left is None or right is None:
                 left = None
             elif relational is not None:
@@ -795,23 +1015,43 @@ class _ConditionalExpressionParser:
         return left
 
     def _parse_additive(self) -> Generator[Any, Any, ConditionalValue | None]:
+        left_start = self._index
         left = (cast("ConditionalValue | None", (yield self._parse_mod())))
+        left_end = self._index
         while self._peek_raw() in ("+", "-"):
             op = self._tokens[self._index].raw_text
             self._index += 1
+            right_start = self._index
             right = (cast("ConditionalValue | None", (yield self._parse_mod())))
+            # `-` reads a number (`UNDEFINED_X - "abc"` is a Type mismatch), or
+            # a date beside a date literal; `+` joins two strings, and beside a
+            # literal converts as `_literal_conversion` says
+            # (`#1/1/2020# + "abc"` is a Type mismatch).
+            beside_right = self._literal_conversion(right_start, self._index)
+            beside_left = self._literal_conversion(left_start, left_end)
+            for_left = beside_right if beside_right == "date" or op != "-" else "number"
+            for_right = beside_left if beside_left == "date" or op != "-" else "number"
+            if for_left:
+                self._require_convertible(left, for_left)
+            if for_right:
+                self._require_convertible(right, for_right)
             if left is None or right is None:
                 left = None
             elif op == "+" and isinstance(left, str) and isinstance(right, str):
                 left = left + right
             else:
                 left = _arithmetic(op, left, right)
+            # What follows reads the whole sum so far, which is no literal.
+            left_start = self._index
+            left_end = self._index
         return left
 
     def _parse_mod(self) -> Generator[Any, Any, ConditionalValue | None]:
         left = (cast("ConditionalValue | None", (yield self._parse_integer_division())))
         while self._match_word("mod"):
             right = (cast("ConditionalValue | None", (yield self._parse_integer_division())))
+            self._require_convertible(left, "number")
+            self._require_convertible(right, "number")
             left = None if left is None or right is None else _arithmetic("mod", left, right)
         return left
 
@@ -820,6 +1060,8 @@ class _ConditionalExpressionParser:
         while self._peek_raw() == "\\":
             self._index += 1
             right = (cast("ConditionalValue | None", (yield self._parse_product())))
+            self._require_convertible(left, "number")
+            self._require_convertible(right, "number")
             left = None if left is None or right is None else _arithmetic("\\", left, right)
         return left
 
@@ -829,6 +1071,8 @@ class _ConditionalExpressionParser:
             op = self._tokens[self._index].raw_text
             self._index += 1
             right = (cast("ConditionalValue | None", (yield self._parse_negation())))
+            self._require_convertible(left, "number")
+            self._require_convertible(right, "number")
             left = None if left is None or right is None else _arithmetic(op, left, right)
         return left
 
@@ -839,6 +1083,8 @@ class _ConditionalExpressionParser:
             self._index += 1
         end = self._index
         value = (cast("ConditionalValue | None", (yield self._parse_power())))
+        if end > start:
+            self._require_convertible(value, "number")
         for i in range(end - 1, start - 1, -1):
             value = _signed(self._tokens[i].raw_text, value)
         return value
@@ -848,6 +1094,8 @@ class _ConditionalExpressionParser:
         while self._peek_raw() == "^":
             self._index += 1
             right = (cast("ConditionalValue | None", (yield self._parse_negation_operand())))
+            self._require_convertible(left, "number")
+            self._require_convertible(right, "number")
             left = None if left is None or right is None else _arithmetic("^", left, right)
         return left
 
@@ -856,12 +1104,15 @@ class _ConditionalExpressionParser:
         op = self._peek_raw()
         if op in ("-", "+"):
             self._index += 1
-            return _signed(op, (cast("ConditionalValue | None", (yield self._parse_primary()))))
+            value = (cast("ConditionalValue | None", (yield self._parse_primary())))
+            self._require_convertible(value, "number")
+            return _signed(op, value)
         return (cast("ConditionalValue | None", (yield self._parse_primary())))
 
     def _parse_primary(self) -> Generator[Any, Any, ConditionalValue | None]:
         token = self._peek()
-        if token is None:
+        if token is None or token.raw_text == ")" or token.kind is TokenKind.OPERATOR:
+            self._broken = True
             return None
         if token.raw_text == "(":
             if self._parenthesis_depth >= 256:
@@ -872,6 +1123,7 @@ class _ConditionalExpressionParser:
             value = (cast("ConditionalValue | None", (yield self._parse_logical(0))))
             self._parenthesis_depth -= 1
             if self._peek_raw() != ")":
+                self._broken = True
                 return None
             self._index += 1
             return value
@@ -882,6 +1134,9 @@ class _ConditionalExpressionParser:
             number = js_number(_D_EXPONENT_RE.sub("e", _FLOAT_SUFFIX_RE.sub("", token.raw_text, count=1), count=1))
             return _js_value(number) if math.isfinite(number) else None
         if token.kind is TokenKind.STRING_LITERAL:
+            if not _CLOSED_STRING_RE.fullmatch(token.raw_text):
+                # A string left open: the line cannot be read as written.
+                self._broken = True
             return token.raw_text[1:-1].replace('""', '"')
         if token.kind is TokenKind.DATE_LITERAL:
             serial = date_literal_serial(token.raw_text)
@@ -897,10 +1152,78 @@ class _ConditionalExpressionParser:
             return _NULL
         if word == "nothing":
             return _NOTHING
+        if token.kind is not TokenKind.IDENTIFIER:
+            # A keyword where a value belongs (`"abc" - Not`).
+            self._broken = True
         value = self._constants.get(word)
+        if isinstance(value, str) and self._host_strings is not None and word in self._host_strings:
+            self._host_string = True
         if value is None and self._undefined_is_zero and token.kind is TokenKind.IDENTIFIER:
             return 0
         return value
+
+    def _require_convertible(self, value: ConditionalValue | None, conversion: str) -> None:
+        """Notes a string an operator converts that no locale reads as a
+        number, or, for the logical operators, as a Boolean ("True" Or 0 runs,
+        XLIDE issue #191), or, beside a Date, as a date (`"1/1/2020" =
+        #1/1/2020#` is True)."""
+        if self.mismatch is not None or not isinstance(value, str):
+            return
+        from ..diagnostics.string_conversion import (
+            is_invalid_boolean_string,
+            is_invalid_date_string,
+            is_invalid_numeric_string,
+        )
+
+        if conversion == "number":
+            invalid = is_invalid_numeric_string(value)
+        elif conversion == "boolean":
+            invalid = is_invalid_boolean_string(value)
+        else:
+            invalid = is_invalid_date_string(value)
+        if invalid:
+            self.mismatch = StringMismatch(value, conversion)
+
+    def _literal_conversion(self, start: int, end: int) -> str | None:
+        """What a string beside the operand written at `start`..`end` is
+        converted to by `+` or a comparison: one written as a literal (a sign
+        allowed) decides it, a number as a number, True or False as a Boolean,
+        a date as a date (Excel 16.0: `1 = "True"` and `"abc" = True` are a
+        Type mismatch, `"True" = True` is True). Beside a name the string
+        compares as with a Variant and is not converted (`UNDEFINED_X = "abc"`
+        and `UNDEFINED_X = ""` compile), nor beside anything else."""
+        tokens = self._tokens
+        # A literal in brackets keeps its type: `(1) = "abc"`.
+        while (
+            end - start >= 3
+            and tokens[start].raw_text == "("
+            and tokens[end - 1].raw_text == ")"
+            and self._closing_bracket(start) == end - 1
+        ):
+            start += 1
+            end -= 1
+        at = start
+        while at < end - 1 and tokens[at].raw_text in ("-", "+"):
+            at += 1
+        if at != end - 1:
+            return None
+        token = tokens[at]
+        if token.kind is TokenKind.INTEGER_LITERAL or token.kind is TokenKind.FLOAT_LITERAL:
+            return "number"
+        if token.kind is TokenKind.DATE_LITERAL:
+            return "date"
+        word = token_word(token)
+        return "boolean" if word in ("true", "false") else None
+
+    def _closing_bracket(self, open_index: int) -> int:
+        """The index of the `)` that closes the `(` at `open_index`."""
+        depth = 0
+        for i in range(open_index, len(self._tokens)):
+            text = self._tokens[i].raw_text
+            depth += 1 if text == "(" else -1 if text == ")" else 0
+            if depth == 0:
+                return i
+        return -1
 
     def _match_word(self, word: str) -> bool:
         if token_word(self._peek()) != word:
@@ -918,6 +1241,8 @@ class _ConditionalExpressionParser:
 
 _LOGICAL_LEVELS: tuple[str, ...] = ("imp", "eqv", "xor", "or", "and")
 
+_CLOSED_STRING_RE = re.compile(r'"(?:[^"]|"")*"')
+
 
 def _number_of(value: ConditionalValue) -> int | float | None:
     """The number a value converts to: True is -1, Empty 0, a Date its serial, a
@@ -932,9 +1257,34 @@ def _number_of(value: ConditionalValue) -> int | float | None:
         if value.kind == "date":
             return value.serial
         return None
+    # A hex or octal string as VBA reads it (XLIDE issue #188): "&H10" is 16, so
+    # "&H10" And 1 is 0 (measured in a directive in Excel 16.0). Any other
+    # string is read as before, with "." as the decimal point.
     trimmed = js_trim(value)
+    if _RADIX_STRING_RE.fullmatch(trimmed):
+        radix = _radix_string_value(trimmed)
+        return None if radix is None else _js_value(radix)
     parsed = math.nan if len(trimmed) == 0 else js_number(trimmed)
     return _js_value(parsed) if math.isfinite(parsed) else None
+
+
+# A hex or octal string: "&H10", "&O17" or "&17".
+_RADIX_STRING_RE = re.compile(r"&[Hh][0-9A-Fa-f]+|&[Oo]?[0-7]+")
+_HEX_STRING_RE = re.compile(r"&[Hh]([0-9A-Fa-f]+)")
+_OCTAL_PREFIX_RE = re.compile(r"^&[Oo]?")
+
+
+def _radix_string_value(trimmed: str) -> float | None:
+    """A hex or octal string's value as XLIDE issue #188 reads it, or None for
+    one past a Long, whose conversion was not measured in a directive."""
+    from ..diagnostics.string_conversion import numeric_string_verdict
+
+    hex_match = _HEX_STRING_RE.fullmatch(trimmed)
+    digits = hex_match.group(1) if hex_match else _OCTAL_PREFIX_RE.sub("", trimmed, count=1)
+    if int(digits, 16 if hex_match else 8) > 0xFFFFFFFF:
+        return None
+    verdict = numeric_string_verdict(trimmed)
+    return verdict.value if verdict.kind == "number" else None
 
 
 def _whole_number(value: ConditionalValue) -> int | float | None:

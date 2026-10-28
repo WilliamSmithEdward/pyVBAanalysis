@@ -11,6 +11,11 @@ in Excel 16.0 (build 20326, 2026-09-26):
   longer part of it).
 - null-directive-condition: `#If Null Then`, `#If Null = 1 Then`, or `#If N` after
   `#Const N = Null` -> "Invalid use of Null" (issue #208).
+- directive-type-mismatch: a condition that is a string VBA cannot read as
+  True or False (`#If "abc"`, `#If ""`, `#If " True "`), or that hands such a
+  string to an operator (`#If Not "abc"`, `#If "abc" = 1`) -> "Type mismatch",
+  even in an arm the VBE skips (Excel 16.0, 2026-10-12); and a `#Const` value
+  that does the same (`#Const A = "abc" + 1`), even unread.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ import re
 from ...conditional.conditional_compilation import (
     ConditionalActivityTracker,
     ConditionalCompilationEnvironment,
-    null_condition_directives,
+    invalid_condition_directives,
 )
 from ...lexer.token_helpers import (
     colon_directive_starts,
@@ -124,13 +129,36 @@ def check_directive_forms(
                 "comment with '. This is a VBE compile error.",
                 Span(from_offset, colon.end if from_offset == colon.start else line_end),
             )
-    for null_directive in null_condition_directives(mod, conditional_compilation):
-        push(
-            "nullDirectiveCondition",
-            f"This #{null_directive.directive_kind.value} condition is Null, which is neither "
-            "True nor False. This is a VBE compile error: Invalid use of Null.",
-            null_directive.span,
-        )
+    for item in invalid_condition_directives(mod, conditional_compilation):
+        directive = item.directive
+        kind = directive.directive_kind.value
+        if item.reason == "null":
+            push(
+                "nullDirectiveCondition",
+                f"This #{kind} condition is Null, which is neither True nor False. This is a VBE "
+                "compile error: Invalid use of Null.",
+                directive.span,
+            )
+        elif item.mismatch is not None:
+            what = (
+                "#Const value"
+                if directive.directive_kind is ConditionalDirectiveKind.CONST
+                else f"#{kind} condition"
+            )
+            conversion = item.mismatch.conversion
+            as_text = "True or False" if conversion == "boolean" else f"a {conversion}"
+            push(
+                "directiveTypeMismatch",
+                f"This {what} needs the string {_vba_string_literal(item.mismatch.value)} as "
+                f"{as_text}, and VBA cannot convert it. This is a VBE compile error: Type mismatch.",
+                directive.span,
+            )
+
+
+def _vba_string_literal(value: str) -> str:
+    """A string as VBA writes it, shortened past 40 characters."""
+    shown = f"{value[:40]}..." if len(value) > 40 else value
+    return '"' + shown.replace('"', '""') + '"'
 
 
 def _line_end_at_or_after(source: str, start: int) -> int:

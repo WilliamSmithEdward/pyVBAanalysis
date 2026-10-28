@@ -14,10 +14,15 @@ import re
 import pytest
 
 from pyvbaanalysis import analyze_module
-from pyvbaanalysis.conditional import ConditionalCompilationEnvironment
+from pyvbaanalysis.conditional import (
+    ConditionalCompilationEnvironment,
+    create_conditional_activity_tracker,
+)
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions
 from pyvbaanalysis.diagnostics.model import DiagnosticSeverity
 from pyvbaanalysis.diagnostics.model import VbaDiagnostic as Diagnostic
+from pyvbaanalysis.parser import parse_module
+from pyvbaanalysis.parser.nodes import Span
 
 
 def _analyze(source: str) -> list[Diagnostic]:
@@ -406,3 +411,247 @@ def test_colon_directive_findings_keep_their_lines(eol: str) -> None:
     )  # fmt: skip
     found = _by_code(source, "directive-trailing-statement")
     assert [_span_text(source, d) for d in found] == ["Debug.Print 1", "'comment", "Debug.Print 4"]
+
+
+# -- String directive conditions (XLIDE issue #1339, commit 09dabe4f) --------
+
+_PROJECT_ENV = ConditionalCompilationEnvironment(project_constants={})
+
+
+def _arms(condition: str, setup: str = "") -> str:
+    return (
+        f"{setup}Function Main() As Variant\n#If {condition} Then\n    Main = 1\n#Else\n"
+        "    Main = 2\n#End If\nEnd Function\n"
+    )
+
+
+def _activities(src: str, env: ConditionalCompilationEnvironment | None = _PROJECT_ENV) -> list[str]:
+    tracker = create_conditional_activity_tracker(parse_module(src), env)
+    assert tracker is not None
+    out = []
+    for text in ("Main = 1", "Main = 2"):
+        at = src.index(text)
+        out.append(tracker.activity_for_span(Span(at, at + 1)).value)
+    return out
+
+
+def _mismatches(src: str) -> list[Diagnostic]:
+    return _by_code(src, "directive-type-mismatch")
+
+
+def _sfn(*lines: str) -> str:
+    return "\n".join(["Function Main() As Variant", *lines, "    Main = 1", "End Function", ""])
+
+
+@pytest.mark.parametrize(
+    "condition, setup",
+    [('"0"', ""), ('"00"', ""), ("0 & 0", ""), ('"False"', ""), ('"0.0"', ""),
+     ("S", '#Const S = "0"\n'), ('" 1 " - 1', ""), ('"&H10" And 1', "")],
+)  # fmt: skip
+def test_string_condition_takes_else_arm(condition: str, setup: str) -> None:
+    assert _activities(_arms(condition, setup)) == ["inactive", "active"]
+
+
+@pytest.mark.parametrize(
+    "condition",
+    ['"1"', '"2"', '"-1"', '"True"', '"true"', '"&H10"', '"1e3"', '"2.5"', '"1,000"', 'Not "0"',
+     '"1" And 1'],
+)  # fmt: skip
+def test_string_condition_takes_if_arm(condition: str) -> None:
+    assert _activities(_arms(condition)) == ["active", "inactive"]
+
+
+def test_string_condition_in_elseif_and_nested_if() -> None:
+    else_if = (
+        'Function Main() As Variant\n#If False Then\n    Main = 0\n#ElseIf "0" Then\n'
+        "    Main = 1\n#Else\n    Main = 2\n#End If\nEnd Function\n"
+    )
+    assert _activities(else_if) == ["inactive", "active"]
+    nested = (
+        'Function Main() As Variant\n#If True Then\n#If "0" Then\n    Main = 1\n#Else\n'
+        "    Main = 2\n#End If\n#End If\nEnd Function\n"
+    )
+    assert _activities(nested) == ["inactive", "active"]
+
+
+def test_string_condition_analyzes_the_compiled_arm() -> None:
+    src = (
+        'Option Explicit\nSub S()\n#If "0" Then\n    skipped = 1\n#Else\n    compiled = 1\n'
+        "#End If\nEnd Sub\n"
+    )
+    assert _undeclared(src) == ["compiled"]
+
+
+@pytest.mark.parametrize(
+    "condition",
+    ['""', '"abc"', '" True "', '"$5"', '"1e400"', '"1.5.5"', '"&H100000000"',
+     '"&H100000000" And 1'],
+)  # fmt: skip
+def test_string_condition_left_unknown(condition: str) -> None:
+    assert _activities(_arms(condition)) == ["unknown", "unknown"]
+
+
+@pytest.mark.parametrize(
+    "directive, shown",
+    [
+        ('#If "abc" Then', '"abc"'),
+        ('#If "" Then', '""'),
+        ('#If " True " Then', '" True "'),
+        ('#If Not "abc" Then', '"abc"'),
+        ('#If "abc" = 1 Then', '"abc"'),
+        ('#If "a" & "b" Then', '"ab"'),
+        ('#If UNDEFINED_X - "abc" Then', '"abc"'),
+        ('#If "abc" = #1/1/2020# Then', '"abc"'),
+        ('#If #1/1/2020# + "abc" Then', '"abc"'),
+        ('#If Null - "abc" Then', '"abc"'),
+        ('#If "abc" * Null Then', '"abc"'),
+    ],
+)
+def test_directive_type_mismatch(directive: str, shown: str) -> None:
+    src = _sfn(directive, "#End If")
+    found = _mismatches(src)
+    assert len(found) == 1
+    assert _span_text(src, found[0]) == directive
+    assert found[0].severity is DiagnosticSeverity.ERROR
+    assert shown in found[0].message
+    assert "Type mismatch" in found[0].message
+
+
+def test_type_mismatch_after_string_const() -> None:
+    read = '#Const S = "x"\n' + _sfn("#If S Then", "#End If")
+    found = _mismatches(read)
+    assert [_span_text(read, d) for d in found] == ["#If S Then"]
+    assert _mismatches('#Const S = "x"\n' + _sfn()) == []
+
+
+def test_type_mismatch_in_const_value() -> None:
+    unread = '#Const A = "abc" + 1\n' + _sfn()
+    found = _mismatches(unread)
+    assert [_span_text(unread, d) for d in found] == ['#Const A = "abc" + 1']
+    assert "#Const value" in found[0].message
+    assert len(_mismatches('#If False Then\n#Const A = "abc" + 1\n#End If\n' + _sfn())) == 1
+
+
+@pytest.mark.parametrize("condition", ['"abc"', 'Not "abc"', '"a" & "b"', 'UNDEFINED_X - "abc"'])
+def test_type_mismatch_in_skipped_arm(condition: str) -> None:
+    src = _sfn("#If False Then", f"#If {condition} Then", "#End If", "#End If")
+    assert [_span_text(src, d) for d in _mismatches(src)] == [f"#If {condition} Then"]
+
+
+def test_type_mismatch_after_taken_arm() -> None:
+    skipped = '#Const S = "x"\n' + _sfn("#If False Then", "#If S Then", "#End If", "#End If")
+    assert len(_mismatches(skipped)) == 1
+    assert len(_mismatches(_sfn("#If True Then", '#ElseIf "abc" Then', "#End If"))) == 1
+
+
+@pytest.mark.parametrize(
+    "condition",
+    ['"0"', '"1"', '"True"', '"false"', '"2.5"', '"1,000"', '"&H10" And 1', '" 1 " - 1',
+     'Not "0"', '"1" And 1', '"2" - 2'],
+)  # fmt: skip
+def test_converted_strings_are_quiet(condition: str) -> None:
+    assert _mismatches(_sfn(f"#If {condition} Then", "#End If")) == []
+
+
+def test_string_beside_date_and_null() -> None:
+    date = _arms('"1/1/2020" = #1/1/2020#')
+    assert _mismatches(date) == []
+    assert _activities(date) == ["unknown", "unknown"]
+    for condition in ('"abc" = Null', 'Null + "abc"'):
+        src = _sfn(f"#If {condition} Then", "#End If")
+        assert _mismatches(src) == []
+        assert len(_by_code(src, "null-directive-condition")) == 1
+
+
+@pytest.mark.parametrize(
+    "condition, conversion",
+    [('1 = "True"', "as a number"), ('"abc" = True', "as True or False"),
+     ('"abc" = -1', "as a number"), ('"abc" = #1/1/2020#', "as a date"),
+     ('(1) = "abc"', "as a number"), ('"abc" + (1)', "as a number")],
+)  # fmt: skip
+def test_conversion_beside_a_literal(condition: str, conversion: str) -> None:
+    found = _mismatches(_arms(condition))
+    assert len(found) == 1
+    assert conversion in found[0].message
+
+
+@pytest.mark.parametrize(
+    "condition", ['"True" = True', 'UNDEFINED_X = "abc"', 'UNDEFINED_X = ""', 'UNDEFINED_X = "0"']
+)
+def test_no_conversion_beside_a_name(condition: str) -> None:
+    assert _mismatches(_arms(condition)) == []
+    assert _mismatches(_sfn("#If False Then", f"#If {condition} Then", "#End If", "#End If")) == []
+
+
+def test_variant_comparison_arms() -> None:
+    assert _mismatches(_arms('A = "abc"', "#Const A = 1\n")) == []
+    assert _activities(_arms('UNDEFINED_X = "0"')) == ["active", "inactive"]
+    assert _activities(_arms('"True" = True')) == ["unknown", "unknown"]
+
+
+def test_host_strings_report_nothing_until_redefined() -> None:
+    def mismatches(src: str, env: ConditionalCompilationEnvironment) -> list[Diagnostic]:
+        options = AnalyzeModuleOptions(known_identifiers=set(), conditional_compilation=env)
+        return [d for d in analyze_module(src, options) if d.code == "directive-type-mismatch"]
+
+    host = ConditionalCompilationEnvironment(project_constants={"FLAG": "x"})
+    read = _sfn("#If FLAG Then", "#End If")
+    assert mismatches(read, host) == []
+    assert len(mismatches('#Const FLAG = "y"\n' + read, host)) == 1
+    failed = "#Const FLAG = 1 / 0\n" + read
+    assert mismatches(failed, host) == []
+    compiler = ConditionalCompilationEnvironment(
+        compiler_constants={"FLAG": "x"}, project_constants={}
+    )
+    assert mismatches(read, compiler) == []
+    assert mismatches(failed, compiler) == []
+
+
+def test_skipped_if_after_string_const_in_skipped_arm() -> None:
+    src = _sfn("#If False Then", '#Const S = "x"', "#If S Then", "#End If", "#End If")
+    found = _mismatches(src)
+    assert [_span_text(src, d) for d in found] == ["#If S Then"]
+    assert "as True or False" in found[0].message
+
+
+def test_unknown_constant_concatenation_is_quiet() -> None:
+    src = _sfn('#If (MISSING & "x") - 1 Then', "#End If")
+    assert [d for d in analyze_module(src) if d.code == "directive-type-mismatch"] == []
+
+
+@pytest.mark.parametrize(
+    "condition", ['VBA7 And "x" = "x"', '"x" = Empty', 'Empty = "x"', '"x" + "y" = "xy"', 'S & "y" = "xy"']
+)
+def test_string_operations_are_quiet(condition: str) -> None:
+    assert _mismatches(_arms(condition, '#Const S = "x"\n')) == []
+
+
+@pytest.mark.parametrize(
+    "condition",
+    ['"abc" Mod 2', '"abc" \\ 2', '"abc" * 2', '"abc" / 2', '-"abc"', '+"abc"', '"abc" ^ 2',
+     '2 ^ -"abc"', '"abc" And 1', '"abc" Or 1', '"abc" Xor 1', '"abc" Eqv 1', '"abc" Imp 1',
+     '1 + "abc"', '"abc" < 1'],
+)  # fmt: skip
+def test_every_operator_converts(condition: str) -> None:
+    assert len(_mismatches(_arms(condition))) == 1
+
+
+@pytest.mark.parametrize(
+    "condition", ['"6" Mod 4', '"6" \\ 4', '"6" * 1', '-"1"', '"True" Or 0', '"1" + 1 = 2', '"2" < 3']
+)
+def test_every_operator_converts_good_strings(condition: str) -> None:
+    assert _mismatches(_arms(condition)) == []
+
+
+@pytest.mark.parametrize(
+    "condition", ['("abc" - 1', '"abc" -', '"abc" 1', '"abc" - Not', '"abc" - "oops']
+)
+def test_unreadable_expression_reports_nothing(condition: str) -> None:
+    assert _mismatches(_arms(condition)) == []
+
+
+def test_mismatch_message_quotes_the_string() -> None:
+    long = "x" * 50
+    found = _mismatches(_arms(f'"a""b" & "{long}"'))
+    assert '"a""b' + "x" * 37 + '..."' in found[0].message
+    assert "#ElseIf condition" in _mismatches(_sfn("#If False Then", '#ElseIf "abc" Then', "#End If"))[0].message
