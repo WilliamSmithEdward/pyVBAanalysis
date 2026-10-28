@@ -16,6 +16,7 @@ import pytest
 from pyvbaanalysis import analyze_module
 from pyvbaanalysis.conditional import (
     ConditionalCompilationEnvironment,
+    conditional_activity_at_offset,
     create_conditional_activity_tracker,
 )
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions
@@ -655,3 +656,82 @@ def test_mismatch_message_quotes_the_string() -> None:
     found = _mismatches(_arms(f'"a""b" & "{long}"'))
     assert '"a""b' + "x" * 37 + '..."' in found[0].message
     assert "#ElseIf condition" in _mismatches(_sfn("#If False Then", '#ElseIf "abc" Then', "#End If"))[0].message
+
+
+# -- A #Const whose value reads a name with no value (XLIDE issue #1347,
+#    commit 518dd817) ---------------------------------------------------------
+
+
+def _win64_module(lines: str) -> str:
+    return (
+        f"{lines}\nSub Main()\n#If Win64 Then\n    Debug.Print 1\n#Else\n    Debug.Print 2\n"
+        "#End If\nEnd Sub\n"
+    )
+
+
+def _win64_arms(source: str, env: ConditionalCompilationEnvironment | None = None) -> list[str]:
+    parsed = parse_module(source)
+    tracker = create_conditional_activity_tracker(parsed, env)
+    assert tracker is not None
+    out = []
+    for text in ("Debug.Print 1", "Debug.Print 2"):
+        at = source.index(text)
+        activity = tracker.activity_for_span(Span(at, at + 1))
+        # The offset replay shares the change.
+        assert conditional_activity_at_offset(parsed, at, env) is activity
+        out.append(activity.value)
+    return out
+
+
+@pytest.mark.parametrize("value", ["UNDEFINED_X", "MISSING + 1"])
+def test_const_reading_unknown_name_shadows_builtin(value: str) -> None:
+    assert _win64_arms(_win64_module(f"#Const Win64 = {value}")) == ["unknown", "unknown"]
+
+
+def test_const_reading_undefined_name_with_project_arguments() -> None:
+    assert _win64_arms(_win64_module("#Const Win64 = UNDEFINED_X"), _PROJECT_ENV) == [
+        "inactive",
+        "active",
+    ]
+    assert _win64_arms(_win64_module("#Const Win64 = MISSING + 1"), _PROJECT_ENV) == [
+        "active",
+        "inactive",
+    ]
+    env = ConditionalCompilationEnvironment(project_constants={"MISSING": -1})
+    assert _win64_arms(_win64_module("#Const Win64 = MISSING + 1"), env) == ["inactive", "active"]
+
+
+def test_const_builtin_value_and_default() -> None:
+    assert _win64_arms(_win64_module("#Const Win64 = 0")) == ["inactive", "active"]
+    assert _win64_arms(_win64_module("' no #Const")) == ["active", "inactive"]
+
+
+def test_const_reading_unknown_name_shadows_twinbasic() -> None:
+    source = "#Const TWINBASIC = UNDEFINED_X\n#If TWINBASIC Then\nDim a\n#Else\nDim b\n#End If\n"
+    tracker = create_conditional_activity_tracker(parse_module(source))
+    assert tracker is not None
+    at = source.index("Dim b")
+    assert tracker.activity_for_span(Span(at, at + 1)).value == "unknown"
+
+
+def test_const_reading_unknown_const_is_unknown() -> None:
+    source = _win64_module("#Const VBA7 = UNDEFINED_X\n#Const Win64 = VBA7 + 1")
+    assert _win64_arms(source) == ["unknown", "unknown"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["1 / 0", "UNDEFINED_X +", "(UNDEFINED_X", "UNDEFINED_X 1", "UNDEFINED_X + ,",
+     "UNDEFINED_X + Then", 'UNDEFINED_X + "bad', "[UNDEFINED_X]"],
+)  # fmt: skip
+def test_const_failing_otherwise_keeps_earlier_value(value: str) -> None:
+    assert _win64_arms(_win64_module(f"#Const Win64 = {value}")) == ["active", "inactive"]
+
+
+@pytest.mark.parametrize("condition", ["True", "False"])
+def test_duplicate_const_across_arms(condition: str) -> None:
+    src = (
+        f"#If {condition} Then\n#Const A = 1\n#Else\n#Const A = 2\n#End If\n"
+        "Function Main() As Variant\n    Main = 1\nEnd Function\n"
+    )
+    assert len(_by_code(src, "duplicate-const-directive")) == 1

@@ -551,7 +551,7 @@ def null_condition_directives(
 def _apply_conditional_directive(
     directive: ConditionalDirectiveNode,
     env: ConditionalCompilationEnvironment,
-    project_constants: dict[str, ConditionalValue],
+    project_constants: dict[str, ConditionalValue | None],
     stack: list[_ConditionalFrame],
     current: ConditionalActivity,
 ) -> ConditionalActivity:
@@ -563,6 +563,12 @@ def _apply_conditional_directive(
             value = _evaluate_with_project_constants(directive.value_raw, env, project_constants)
             if value is not None:
                 project_constants[directive.name.lower()] = value
+            elif _read_with_project_constants(directive.value_raw, env, project_constants).unknown_name:
+                # The value reads a name with no value, so it is unknown, not
+                # the name's earlier value: a built-in's default is shadowed
+                # too (`#Const Win64 = UNDEFINED_X` is 0 in Excel 16.0 when the
+                # project leaves UNDEFINED_X undefined).
+                project_constants[directive.name.lower()] = None
         return current
     if kind is ConditionalDirectiveKind.IF:
         condition = _condition_activity(directive, env, project_constants)
@@ -657,7 +663,7 @@ def _collect_conditional_constants(
 def _condition_activity(
     directive: ConditionalDirectiveNode,
     env: ConditionalCompilationEnvironment,
-    project_constants: Mapping[str, ConditionalValue],
+    project_constants: Mapping[str, ConditionalValue | None],
 ) -> ConditionalActivity:
     value = _evaluate_with_project_constants(directive.condition_raw, env, project_constants)
     holds = None if value is None else _truthy(value)
@@ -674,7 +680,7 @@ class _ConstantLookup:
     __slots__ = ("_project", "_compiler")
 
     def __init__(
-        self, project: Mapping[str, ConditionalValue], compiler: Mapping[str, ConditionalValue]
+        self, project: Mapping[str, ConditionalValue | None], compiler: Mapping[str, ConditionalValue]
     ) -> None:
         self._project = project
         self._compiler = compiler
@@ -688,7 +694,7 @@ class _ConstantLookup:
 def _evaluate_with_project_constants(
     expression: str | None,
     env: ConditionalCompilationEnvironment,
-    project_constants: Mapping[str, ConditionalValue],
+    project_constants: Mapping[str, ConditionalValue | None],
     undefined_is_zero: bool | None = None,
 ) -> ConditionalValue | None:
     if expression is None or js_trim(expression) == "":
@@ -717,12 +723,14 @@ class _ConditionalReading:
     value: ConditionalValue | None
     mismatch: StringMismatch | None = None
     operator_mismatch: StringMismatch | None = None
+    # The expression is well formed and read a name with no value.
+    unknown_name: bool = False
 
 
 def _read_with_project_constants(
     expression: str | None,
     env: ConditionalCompilationEnvironment,
-    project_constants: Mapping[str, ConditionalValue],
+    project_constants: Mapping[str, ConditionalValue | None],
     undefined_is_zero: bool | None = None,
     host_strings: AbstractSet[str] | None = None,
 ) -> _ConditionalReading:
@@ -820,8 +828,8 @@ def _string_truthy(value: str) -> bool | None:
 
 def _lowercased(
     source: Mapping[str, ConditionalValue] | None,
-) -> dict[str, ConditionalValue]:
-    out: dict[str, ConditionalValue] = {}
+) -> dict[str, ConditionalValue | None]:
+    out: dict[str, ConditionalValue | None] = {}
     for name, value in (source or {}).items():
         out[name.lower()] = value
     return out
@@ -883,6 +891,7 @@ class _ConditionalExpressionParser:
         "mismatch",
         "_host_string",
         "_broken",
+        "_read_unknown_name",
     )
 
     def __init__(
@@ -917,6 +926,8 @@ class _ConditionalExpressionParser:
         # string was not closed, or a keyword stood for a value. Only the
         # mismatch depends on it.
         self._broken = False
+        # An identifier with no value was read.
+        self._read_unknown_name = False
 
     def parse(self) -> ConditionalValue | None:
         try:
@@ -929,7 +940,7 @@ class _ConditionalExpressionParser:
     def read(self) -> _ConditionalReading:
         """The value, and the string the expression could not convert, if any.
         An expression the parser cannot read, missing a value or a `)` or with
-        tokens left over, reports no mismatch."""
+        tokens left over, reports no mismatch, and no name with no value."""
         from ..diagnostics.string_conversion import is_invalid_boolean_string
 
         try:
@@ -938,14 +949,18 @@ class _ConditionalExpressionParser:
             return _ConditionalReading(None)
         if self._index < len(self._tokens):
             return _ConditionalReading(None)
-        if self._broken or self._host_string:
+        if self._broken:
             # The value is as `parse` gives it; only the mismatch is withheld.
             return _ConditionalReading(value)
+        unknown_name = self._read_unknown_name
+        if self._host_string:
+            # A host string's reading was not measured: the mismatch is withheld.
+            return _ConditionalReading(value, unknown_name=unknown_name)
         operator_mismatch = self.mismatch
         mismatch = operator_mismatch
         if mismatch is None and isinstance(value, str) and is_invalid_boolean_string(value):
             mismatch = StringMismatch(value, "boolean")
-        return _ConditionalReading(value, mismatch, operator_mismatch)
+        return _ConditionalReading(value, mismatch, operator_mismatch, unknown_name)
 
     def _parse_logical(self, level: int) -> Generator[Any, Any, ConditionalValue | None]:
         """Imp, Eqv, Xor, Or, And, loosest first; each level is left-associative."""
@@ -1160,6 +1175,8 @@ class _ConditionalExpressionParser:
             self._host_string = True
         if value is None and self._undefined_is_zero and token.kind is TokenKind.IDENTIFIER:
             return 0
+        if value is None and token.kind is TokenKind.IDENTIFIER:
+            self._read_unknown_name = True
         return value
 
     def _require_convertible(self, value: ConditionalValue | None, conversion: str) -> None:
