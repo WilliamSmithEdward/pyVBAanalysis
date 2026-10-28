@@ -51,7 +51,7 @@ from ...lexer.keyword_table import is_reserved_identifier
 from ...lexer.token_helpers import (
     directive_rem,
     first_token_at_or_after,
-    rem_block_directive_starts,
+    rem_directive_starts,
 )
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize_cached
@@ -745,23 +745,22 @@ def _check_directive_rem(
 ) -> None:
     """`Rem` on a directive line: the VBE does not read it as a comment there
     (XLIDE issue #1321)."""
+    # The lines the parser reads as no directive; one after a colon is
+    # directive-trailing-statement's.
     rem = directive_rem(toks, hash_index)
-    if rem is None:
+    if rem is None or toks[hash_index].start not in rem_directive_starts(source):
         return
     keyword = token_text(_at(toks, hash_index + 1))
     span = Span(toks[hash_index].start, rem.start + len("Rem"))
     effect = _REM_DIRECTIVE_EFFECT.get(keyword)
     if effect is not None:
-        # The lines the parser reads as no directive; one after a colon is
-        # directive-trailing-statement's.
-        if toks[hash_index].start in rem_block_directive_starts(source):
-            push(
-                "malformedStatement",
-                "Rem does not start a comment on a compiler-directive line, so the VBE does not "
-                f"read this line as a directive at all: it {effect}. Start the comment with ' "
-                "instead. This is a VBE compile error.",
-                span,
-            )
+        push(
+            "malformedStatement",
+            "Rem does not start a comment on a compiler-directive line, so the VBE does not "
+            f"read this line as a directive at all: it {effect}. Start the comment with ' "
+            "instead. This is a VBE compile error.",
+            span,
+        )
         return
     at = toks.index(rem, hash_index)
     if at == hash_index + 2:

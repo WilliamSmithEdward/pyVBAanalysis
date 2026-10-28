@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from ..lexer.token_helpers import (
     colon_directive_starts,
     match_paren_from,
-    rem_block_directive_starts,
+    rem_directive_starts,
     split_top_level_token_groups,
     token_word,
     tokens_without_leading_line_number,
@@ -227,8 +227,7 @@ class _Parser:
     # (XLIDE issue #130): `End If` written in both arms closes one block, and
     # `If ... Then` written in both arms opens one.
     _directive_chains: list[_DirectiveChain]
-    # The #If, #ElseIf, #Else and #End If lines holding a Rem (XLIDE issue
-    # #1321), found once.
+    # The directive lines holding a Rem (XLIDE issue #1321), found once.
     _rem_directive_starts: frozenset[int] | None
     # The directive lines a statement colon follows (XLIDE issue #1323), found once.
     _colon_directive_starts: frozenset[int] | None
@@ -481,12 +480,13 @@ class _Parser:
     def _parse_conditional_directive_node(
         self, stmt: LogicalStatement, tokens: Sequence[VbaToken]
     ) -> ConditionalDirectiveNode:
-        # An #If, #ElseIf, #Else or #End If line holding a Rem is no directive
-        # to the VBE (XLIDE issue #1321): it opens, continues and closes nothing.
-        # So is any directive line a statement colon follows, a #Const too,
-        # which then defines nothing even in a skipped arm (XLIDE issue #1323).
+        # A directive line holding a Rem is no directive to the VBE (XLIDE issue
+        # #1321): an #If, #ElseIf, #Else or #End If one opens, continues and
+        # closes nothing, and a #Const one defines nothing, even in a skipped
+        # arm. So is any directive line a statement colon follows (XLIDE issue
+        # #1323).
         if self._rem_directive_starts is None:
-            self._rem_directive_starts = rem_block_directive_starts(self._source)
+            self._rem_directive_starts = rem_directive_starts(self._source)
         if self._colon_directive_starts is None:
             self._colon_directive_starts = colon_directive_starts(self._source)
         directive_word = (

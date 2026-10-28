@@ -291,6 +291,35 @@ def test_colon_directive_spans() -> None:
     assert "defines no constant" in found[0].message
 
 
+# -- A #Const line holding a Rem defines nothing (commit e3eca840) -----------
+
+
+@pytest.mark.parametrize(
+    "line, taken",
+    [
+        ("#Const A = 1", "a"),
+        ("#Const A = 1 ' note", "a"),
+        ("#Const A = 1 Rem note", "b"),
+        ("#Const A = 1 _\n    Rem note", "b"),
+    ],
+)
+def test_rem_const_defines_nothing_even_in_skipped_arm(line: str, taken: str) -> None:
+    source = (
+        f"Option Explicit\n#If False Then\n{line}\n#End If\nSub S()\n#If A = 1 Then\n"
+        "    a = 1\n#Else\n    b = 2\n#End If\nEnd Sub\n"
+    )
+    assert _undeclared(source) == [taken]
+
+
+def test_rem_const_after_colon_is_directive_trailing_statements() -> None:
+    src = _mod("#Const A = 1: #Const B = 1 Rem n")
+    assert len(_by_code(src, "directive-trailing-statement")) == 1
+    assert _malformed(src) == []
+    skipped = _mod("#If False Then\n#Const A = 1: #Const B = 1 Rem n\n#End If")
+    assert _by_code(skipped, "directive-trailing-statement") == []
+    assert _malformed(skipped) == []
+
+
 @pytest.mark.parametrize("eol", ["\n", "\r\n", "\r"])
 def test_colon_directive_findings_keep_their_lines(eol: str) -> None:
     source = eol.join(

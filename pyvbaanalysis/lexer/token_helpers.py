@@ -405,18 +405,20 @@ def directive_rem(tokens: Sequence[VbaToken], hash_index: int) -> VbaToken | Non
     return None
 
 
-_BLOCK_DIRECTIVE_WORDS = frozenset({"if", "elseif", "else", "end", "endif"})
+_DIRECTIVE_WORDS = frozenset({"if", "elseif", "else", "end", "endif", "const"})
 _NO_STARTS: frozenset[int] = frozenset()
 # One scan per token array: the parser and malformed-statement each ask, and
 # malformed-statement asks once per line.
 _rem_directive_starts_by_tokens = IdentityLru()
 
 
-def rem_block_directive_starts(source: str) -> frozenset[int]:
-    """The start offsets of the `#` of every #If, #ElseIf, #Else or #End If
-    line holding a `Rem`, which the VBE does not read as that directive (XLIDE
-    issue #1321). Only a `#` that starts its physical line counts (the token
-    before it is a newline: a continued line has none)."""
+def rem_directive_starts(source: str) -> frozenset[int]:
+    """The start offsets of the `#` of every #If, #ElseIf, #Else, #End If or
+    #Const line holding a `Rem`, which the VBE does not act on as that
+    directive (XLIDE issue #1321): a #Const one defines nothing, even in a
+    skipped arm, where a plain #Const still does. Only a `#` that starts its
+    physical line counts (the token before it is a newline: a continued line
+    has none)."""
     if _REM_RE.search(source) is None:
         return _NO_STARTS
     tokens = tokenize_cached(source)
@@ -428,7 +430,7 @@ def rem_block_directive_starts(source: str) -> frozenset[int]:
         for i in range(len(tokens))
         if tokens[i].kind is TokenKind.DIRECTIVE
         and (i == 0 or tokens[i - 1].kind is TokenKind.NEWLINE)
-        and token_word(tokens[i + 1] if i + 1 < len(tokens) else None) in _BLOCK_DIRECTIVE_WORDS
+        and token_word(tokens[i + 1] if i + 1 < len(tokens) else None) in _DIRECTIVE_WORDS
         and directive_rem(tokens, i) is not None
     )
     _rem_directive_starts_by_tokens.put(starts, tokens)
@@ -447,7 +449,6 @@ def directive_colon(tokens: Sequence[VbaToken], hash_index: int) -> VbaToken | N
     return None
 
 
-_COLON_DIRECTIVE_WORDS = _BLOCK_DIRECTIVE_WORDS | {"const"}
 _colon_directive_starts_by_tokens = IdentityLru()
 
 
@@ -469,7 +470,7 @@ def colon_directive_starts(source: str) -> frozenset[int]:
         for i in range(len(tokens))
         if tokens[i].kind is TokenKind.DIRECTIVE
         and (i == 0 or tokens[i - 1].kind is TokenKind.NEWLINE)
-        and token_word(tokens[i + 1] if i + 1 < len(tokens) else None) in _COLON_DIRECTIVE_WORDS
+        and token_word(tokens[i + 1] if i + 1 < len(tokens) else None) in _DIRECTIVE_WORDS
         and directive_colon(tokens, i) is not None
     )
     _colon_directive_starts_by_tokens.put(starts, tokens)
