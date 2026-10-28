@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 import pytest
+from oracle_support import DEFAULT_LIBRARIES, LIBRARY_NAMES, PROJECT_NAMES
 
 from pyvbaanalysis import analyze_module, analyze_module_options_for
 from pyvbaanalysis.conditional import ConditionalCompilationEnvironment
@@ -270,27 +271,6 @@ def test_outlook_library_and_globals_in_the_merged_model() -> None:
 # 728291c6: a type qualified by a library the project does not reference
 # (unreferencedQualifiers1413.test.ts).
 
-# The names the cases' references go by, as the dir stream records them (measured).
-_LIBRARY_NAMES = {
-    "{420B2830-E718-11CF-893D-00A0C9054228}": "Scripting",
-    "{3F4DACA7-160D-11D2-A8E9-00104B365C9F}": "VBScript_RegExp_55",
-    "{B691E011-1797-432E-907A-4D8C69339129}": "ADODB",
-    "{F5078F18-C551-11D3-89B9-0000F81FE221}": "MSXML2",
-    "{0002E157-0000-0000-C000-000000000046}": "VBIDE",
-    "{662901FC-6951-4854-9EB2-D9A2570F2B2E}": "WinHttp",
-    "{50A7E9B0-70EF-11D1-B75A-00A0C90564FE}": "Shell32",
-    "{00062FFF-0000-0000-C000-000000000046}": "Outlook",
-}
-# What a new file of each host records before any reference is added, and its
-# project's name (measured).
-_DEFAULTS = {
-    "excel": ["stdole", "Office"],
-    "word": ["stdole", "Normal", "Office"],
-    "powerpoint": ["stdole", "Office"],
-    "access": ["stdole", "DAO"],
-}
-_PROJECT_NAMES = {"excel": "VBAProject", "word": "Project", "powerpoint": "VBAProject", "access": "Database1"}
-
 
 def _codes_1413(case: dict[str, Any], known: bool = True) -> list[str]:
     """Each error code, with the project's references and name known, as the
@@ -298,8 +278,8 @@ def _codes_1413(case: dict[str, Any], known: bool = True) -> list[str]:
     host = case.get("host") or "excel"
     if not known:
         return _error_codes(case)
-    libraries = [*_DEFAULTS[host], *(_LIBRARY_NAMES[ref["guid"]] for ref in case.get("references", []))]
-    return _error_codes(case, libraries, _PROJECT_NAMES[host])
+    libraries = [*DEFAULT_LIBRARIES[host], *(LIBRARY_NAMES[ref["guid"]] for ref in case.get("references", []))]
+    return _error_codes(case, libraries, PROJECT_NAMES[host])
 
 
 def _each_host_1413(names: list[str]) -> list[str]:

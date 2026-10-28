@@ -19,6 +19,7 @@ positives for them thread a ProjectIndex in.
 from __future__ import annotations
 
 from oracle_support import (  # type: ignore[attr-defined]
+    UPSTREAM_SILENT,
     accepted_cases,
     asserted_cases,
     case_codes,
@@ -223,7 +224,7 @@ def test_oracle_asserted_cases() -> None:
     assert cases, "expected at least one asserted case"
     checked = 0
     for case in cases:
-        if case.id in _SKIP_IDS:
+        if case.id in _SKIP_IDS or (case.id, _CODE) in UPSTREAM_SILENT:
             continue
         # With the project context: XLIDE issue #490's cases put the Private
         # Type in another module, which only the project index can see.
