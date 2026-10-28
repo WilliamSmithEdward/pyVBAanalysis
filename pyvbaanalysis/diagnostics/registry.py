@@ -1172,11 +1172,16 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     ),
     DiagnosticRuleEntry(
         name="isOperatorNonObject",
-        procedure_expressions=lambda ctx, push: check_is_operator_operands(ctx.symbols, push),
+        procedure_expressions=lambda ctx, push: check_is_operator_operands(
+            ctx.symbols, push, ctx.opts.project_procedures, ctx.opts.project_visible_symbols
+        ),
     ),
     DiagnosticRuleEntry(
         name="isOperandsInConditions",
-        run=lambda ctx, push: check_is_operands_in_conditions(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push),
+        run=lambda ctx, push: check_is_operands_in_conditions(
+            ctx.source, ctx.mod, ctx.symbols, ctx.activity, push,
+            ctx.opts.project_procedures, ctx.opts.project_visible_symbols,
+        ),
     ),
     DiagnosticRuleEntry(
         name="nonScalarBinaryOperand",

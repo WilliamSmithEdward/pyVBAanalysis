@@ -56,6 +56,7 @@ from .symbol_model import (
     is_procedure_kind,
     procedure_params_from_symbol,
     procedure_signature_from_symbol,
+    procedure_signature_with_def_types,
     procedure_signature_label,
     qualified_procedure_key,
 )
@@ -903,7 +904,8 @@ class ProjectIndex:
                         or not _is_exported(symbol, mod.module_kind)
                     ):
                         continue
-                    sig = procedure_signature_from_symbol(symbol)
+                    declared = procedure_signature_from_symbol(symbol)
+                    sig = procedure_signature_with_def_types(declared, mod.def_types) if declared is not None else None
                     if sig is not None:
                         _add_procedure_signature(signatures, symbol.name.lower(), sig)
                         _add_procedure_signature(

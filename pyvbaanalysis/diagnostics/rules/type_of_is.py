@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import cast
 
 from ...completion.member_access import (
@@ -46,8 +46,11 @@ from ...parser.nodes import (
     DoBlockNode,
     ExprNode,
     IdentifierExpr,
+    IndexExpr,
     LiteralExpr,
     LiteralKind,
+    MemberAccessExpr,
+    MemberAccessKind,
     ModuleNode,
     ProcedureNode,
     Span,
@@ -58,10 +61,22 @@ from ...parser.nodes import (
 )
 from ...parser.parse_expression import parse_expression
 from ...identity_cache import IdentityLru
-from ...symbols.symbol_model import ModuleSymbolKind, ModuleSymbols
+from ...symbols.symbol_model import (
+    ModuleSymbolKind,
+    ModuleSymbols,
+    VbaProcedureSignature,
+    VbaSymbol,
+    qualified_procedure_key,
+)
 from ...types.type_inference import SCALAR_OBJECT_ASSIGNMENT_REASON, type_environment_for
 from ...types.type_names import is_known_scalar_type, normalize_type
-from ..call_extraction import InferredArgumentType
+from ..call_extraction import CallableTypeSignature, InferredArgumentType
+from ..callable_signatures import (
+    SourceNameScope,
+    bare_callable_source_shadowed,
+    callable_type_signatures_for,
+    source_name_scope_for,
+)
 from ..context import PushFn, statement_tokens
 from ..exprwalk import ProcedureExpressionVisitor, for_each_sub_expression
 from ..walker import (
@@ -106,8 +121,15 @@ _IS_NON_OBJECT_LITERAL_KINDS: dict[LiteralKind, str] = {
 }
 
 
-def _non_object_operand(expr: ExprNode, env: dict[str, str]) -> tuple[Span, str] | None:
+def _non_object_operand(
+    expr: ExprNode,
+    env: dict[str, str],
+    call_result: Callable[[ExprNode], tuple[str, str] | None] | None = None,
+) -> tuple[Span, str] | None:
     """A provably non-object (scalar) operand of `Is`, or None."""
+    result = call_result(expr) if call_result is not None else None
+    if result is not None and is_known_scalar_type(_TRAILING_ARRAY_RE.sub("", result[0]).strip().lower()):
+        return (expr.span, f"'{result[1]}' returns {result[0]}")
     if isinstance(expr, LiteralExpr):
         kind = _IS_NON_OBJECT_LITERAL_KINDS.get(expr.literal_kind)
         if kind is not None:
@@ -126,16 +148,76 @@ def _non_object_operand(expr: ExprNode, env: dict[str, str]) -> tuple[Span, str]
     return None  # member / call / paren / array / New / unary -> quiet (v1)
 
 
-def check_is_operator_operands(symbols: ModuleSymbols, push: PushFn) -> ProcedureExpressionVisitor:
+def _call_result_type(
+    expr: ExprNode,
+    env: dict[str, str],
+    module_signatures: Mapping[str, CallableTypeSignature],
+    source_names: SourceNameScope,
+) -> tuple[str, str] | None:
+    """The declared result of a call to a project or same-module Function, `Bar()`
+    or `Other.Foo()`, typed by the DefType of the module that declares it, with the
+    name to show for the call. None for a variable's element, a name a source
+    variable takes, and VBA's own functions, which were not measured (XLIDE issue
+    #1411)."""
+    if not isinstance(expr, IndexExpr):
+        return None
+    callee = expr.callee
+    if isinstance(callee, IdentifierExpr):
+        lower = callee.name.lower()
+        if lower in env or bare_callable_source_shadowed(callee.name, source_names):
+            return None
+        signature = module_signatures.get(lower)
+        type_ = signature.return_type if signature is not None else None
+        return (type_, callee.name) if type_ else None
+    if (
+        isinstance(callee, MemberAccessExpr)
+        and callee.access_kind is not MemberAccessKind.BANG
+        and isinstance(callee.object_, IdentifierExpr)
+    ):
+        qualifier = callee.object_.name
+        if qualifier.lower() in env or qualifier.lower() in source_names.callable_shadows:
+            return None
+        signature = module_signatures.get(qualified_procedure_key(qualifier, callee.member))
+        type_ = signature.return_type if signature is not None else None
+        return (type_, f"{qualifier}.{callee.member}") if type_ else None
+    return None
+
+
+def check_is_operator_operands(
+    symbols: ModuleSymbols,
+    push: PushFn,
+    project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None = None,
+    project_visible_symbols: Sequence[VbaSymbol] | None = None,
+) -> ProcedureExpressionVisitor:
     """The `Is` operator requires object operands; a provably-scalar operand is an error."""
+
+    module_signatures = callable_type_signatures_for(symbols, project_procedures)
 
     def factory(member: ProcedureNode) -> Callable[[ExprNode], None]:
         env = type_environment_for(symbols, member)
+        source_names = source_name_scope_for(symbols, member, project_visible_symbols)
+
+        def calls(expr: ExprNode) -> tuple[str, str] | None:
+            return _call_result_type(expr, env, module_signatures, source_names)
 
         def visitor(expr: ExprNode) -> None:
+            # `TypeOf n Is Collection` with n a Long is the same compile error,
+            # Type mismatch (XLIDE issue #1411, measured in Excel, Word,
+            # PowerPoint and Access 16.0). A literal operand there was not measured.
+            if isinstance(expr, TypeOfIsExpr):
+                type_of_offender = (
+                    None if isinstance(expr.operand, LiteralExpr) else _non_object_operand(expr.operand, env, calls)
+                )
+                if type_of_offender is not None:
+                    push(
+                        "isOperatorNonObject",
+                        f"'TypeOf ... Is' requires an object operand, but {type_of_offender[1]}, which is not an object.",
+                        type_of_offender[0],
+                    )
+                return
             if not isinstance(expr, BinaryExpr) or expr.operator != "Is":
                 return
-            offender = _non_object_operand(expr.left, env) or _non_object_operand(expr.right, env)
+            offender = _non_object_operand(expr.left, env, calls) or _non_object_operand(expr.right, env, calls)
             if offender is not None:
                 span, detail = offender
                 push(
@@ -156,16 +238,24 @@ def check_is_operands_in_conditions(
     symbols: ModuleSymbols,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None = None,
+    project_visible_symbols: Sequence[VbaSymbol] | None = None,
 ) -> None:
     """The same check on the conditions the expression walk does not parse: a
     single-line If's, and a Do or While loop's (XLIDE issue #325, measured in Excel
     16.0: each is a compile error, Type mismatch)."""
+    check_operands = check_is_operator_operands(symbols, push, project_procedures, project_visible_symbols)
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
-        env = type_environment_for(symbols, member)
+        check_expression = check_operands(member)
 
-        def check(span: Span, from_: int, to: Callable[[list[VbaToken]], int], env: dict[str, str] = env) -> None:
+        def check(
+            span: Span,
+            from_: int,
+            to: Callable[[list[VbaToken]], int],
+            check_expression: Callable[[ExprNode], None] = check_expression,
+        ) -> None:
             # Absolute offsets, so the parsed nodes carry the source's spans.
             toks = [
                 dataclasses.replace(tok, start=span.start + tok.start, end=span.start + tok.end)
@@ -178,21 +268,7 @@ def check_is_operands_in_conditions(
             parsed = parse_expression(toks, from_, end).expr
             if parsed is None:
                 return
-
-            def visit_expr(expr: ExprNode) -> None:
-                if not isinstance(expr, BinaryExpr) or expr.operator != "Is":
-                    return
-                offender = _non_object_operand(expr.left, env) or _non_object_operand(expr.right, env)
-                if offender is not None:
-                    offender_span, detail = offender
-                    push(
-                        "isOperatorNonObject",
-                        f"The 'Is' operator requires object operands, but {detail}, "
-                        "which is not an object.",
-                        offender_span,
-                    )
-
-            for_each_sub_expression(parsed, visit_expr)
+            for_each_sub_expression(parsed, check_expression)
 
         def if_condition_end(toks: list[VbaToken]) -> int:
             if token_text(toks[0] if toks else None) != "if":

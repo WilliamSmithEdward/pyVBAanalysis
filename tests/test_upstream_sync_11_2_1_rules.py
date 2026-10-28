@@ -554,3 +554,53 @@ def test_module_variable_reset_through_its_module(case_id: str) -> None:
 def test_module_variable_reset_controls_run(case_id: str) -> None:
     assert CASES[case_id].expected == "accepted"
     assert _case_errors(case_id) == []
+
+
+# -- 7283146d: a procedure's types come from its own module's DefType ----------
+
+@pytest.mark.parametrize("case_id, expected", [
+    *[(case_id, ["byref-argument-type-mismatch: s"]) for case_id in _each_host(["f_byref_string_variable"], "compile")],
+    *[(case_id, ['argument-type-mismatch: "abc"']) for case_id in _each_host(["f_text_string_literal"], "runtime")],
+    *[(case_id, []) for case_id in _each_host(["f_numeric_string_literal"], "runtime")],
+    *[(case_id, []) for case_id in _each_host(["f_caller_deftype_only"], "compile")],
+])
+def test_untyped_parameter_takes_declaring_module_deftype(case_id: str, expected: list[str]) -> None:
+    assert CASES[case_id].expected == ("accepted" if not expected else "rejected")
+    assert _case_errors(case_id) == expected
+
+
+_IS_REFUSED_1411 = [
+    ("g_is_long_function", "Bar()"),
+    ("g_is_long_function_with_argument", "Bar(1)"),
+    ("g_is_string_function", "Bar()"),
+    ("g_is_long_array_function", "Bar()"),
+    ("g_is_deflng_bare", "Foo()"),
+    ("g_is_deflng_qualified", "Other.Foo()"),
+    ("g_is_deflng_caller_defobj", "Foo()"),
+    ("g_typeof_long_identifier", "n"),
+    ("g_typeof_string_identifier", "s"),
+    ("g_typeof_long_function", "Bar()"),
+    ("g_typeof_deflng_qualified", "Other.Foo()"),
+]
+
+
+@pytest.mark.parametrize("case_id, operand", [
+    (case_id, operand) for name, operand in _IS_REFUSED_1411 for case_id in _each_host([name], "compile")
+])
+def test_is_and_typeof_refuse_a_scalar_operand(case_id: str, operand: str) -> None:
+    assert CASES[case_id].expected == "rejected"
+    assert _case_errors(case_id) == [f"is-operator-non-object: {operand}"]
+
+
+@pytest.mark.parametrize("case_id", _each_host([
+    "g_is_object_function", "g_is_variant_function", "g_is_defobj_qualified",
+    "g_typeof_variant_identifier", "g_typeof_object_identifier", "g_typeof_defobj_bare",
+], "compile"))
+def test_is_and_typeof_accept_object_operands(case_id: str) -> None:
+    assert CASES[case_id].expected == "accepted"
+    assert _case_errors(case_id) == []
+
+
+@pytest.mark.parametrize("case_id", _each_host(["g_is_deflng_shadowed_qualifier"], "compile"))
+def test_is_leaves_a_late_bound_call_alone(case_id: str) -> None:
+    assert [f for f in _case_errors(case_id) if f.startswith("is-operator-non-object:")] == []
