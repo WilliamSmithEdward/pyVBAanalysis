@@ -388,3 +388,77 @@ def test_qualified_runtime_function_name_is_another_librarys_type() -> None:
     found = _codes(src, "invalid-as-type-name")
     # VBA.Shell and the bare Shell are the runtime function; Shell32.Shell is not.
     assert [d.span.start for d in found] == [src.index("VBA.Shell") + 4, src.rindex("Shell")]
+
+
+# f6575c3b: a renamed workbook or document module keeps its host type
+# (ownObjectMembers228.test.ts, vbaProjectIndexService.test.ts).
+
+
+def _project_module_findings(
+    source: str,
+    modules: list[tuple[str, ModuleSymbolKind, str, str | None]],
+    current: str,
+    code: str,
+    host: str = "excel",
+    document_type: str | None = None,
+) -> list[str]:
+    """The text of each finding of `code` in `current`, analyzed with the project's
+    modules (name, kind, source, document type) indexed."""
+    index = ProjectIndex()
+    for name, kind, text, doc_type in modules:
+        index.set_module(ModuleInput(name, kind, text, document_type=doc_type))
+    kind = next(kind for name, kind, _, _ in modules if name == current)
+    opts = analyze_module_options_for(index, current, kind, host=host)
+    opts.document_type = document_type
+    return [source[d.span.start:d.span.end] for d in analyze_module(source, opts) if d.code == code]
+
+
+_ME = "Option Explicit\nPublic Sub T()\n    Me.UsedRange.Select\n    Debug.Print Me.FullName\nEnd Sub\n"
+
+
+@pytest.mark.parametrize(
+    "module_name, document_type, host",
+    [
+        ("ThisWorkbook", None, "excel"),
+        ("ThisWorkbook", "workbook", "excel"),
+        ("BookCode", "workbook", "excel"),
+        ("ThisDocument", None, "word"),
+        ("DocCode", "document", "word"),
+    ],
+)
+def test_me_in_a_document_module_is_its_host_object(module_name: str, document_type: str | None, host: str) -> None:
+    modules = [(module_name, ModuleSymbolKind.DOCUMENT, _ME, document_type)]
+    found = _project_module_findings(_ME, modules, module_name, "member-not-found", host, document_type)
+    assert found == ["UsedRange"]
+
+
+@pytest.mark.parametrize(
+    "module_name, document_type",
+    [("BookCode", None), ("Sheet1", "worksheet"), ("Chart1", "chart")],
+)
+def test_me_in_a_sheet_or_unnamed_document_keeps_to_its_own_members(module_name: str, document_type: str | None) -> None:
+    # With no document type a name proves nothing, and a sheet's Me waits for its
+    # designer class: only with it are the sheet's ActiveX controls known.
+    modules = [(module_name, ModuleSymbolKind.DOCUMENT, _ME, document_type)]
+    assert _project_module_findings(_ME, modules, module_name, "member-not-found", "excel", document_type) == []
+
+
+def test_document_type_reaches_the_project_type_across_edits() -> None:
+    index = ProjectIndex()
+    index.set_module(ModuleInput("BookCode", ModuleSymbolKind.DOCUMENT, "Public Sub Alpha()\nEnd Sub\n", document_type="workbook"))
+    index.set_module(ModuleInput("Sheet1", ModuleSymbolKind.DOCUMENT, ""))
+
+    def document_types() -> list[tuple[str, str | None]]:
+        return [
+            (surface.name, surface.document_type)
+            for surface in index.project_member_surfaces("Sheet1")
+            if surface.kind == "document"
+        ]
+
+    assert document_types() == [("BookCode", "workbook"), ("Sheet1", None)]
+    index.set_module(ModuleInput("Sheet1", ModuleSymbolKind.DOCUMENT, "Public Sub Delta()\nEnd Sub\n"))
+    assert document_types() == [("BookCode", "workbook"), ("Sheet1", None)]
+    index.set_module(ModuleInput("BookCode", ModuleSymbolKind.DOCUMENT, "Public Sub Gamma()\nEnd Sub\n"))
+    assert document_types() == [("BookCode", None), ("Sheet1", None)]
+    index.remove_module("BookCode")
+    assert document_types() == [("Sheet1", None)]

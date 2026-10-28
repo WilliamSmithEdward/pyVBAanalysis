@@ -185,6 +185,7 @@ def _rebuilt_index(project: Mapping[str, Any]) -> ProjectIndex:
                 implicit_members=_implicit_members(item.get("implicitMembers")),
                 predeclared_id=item.get("predeclaredId"),
                 designer_class=item.get("designerClass"),
+                document_type=item.get("documentType"),
             )
         )
     return index

@@ -460,7 +460,9 @@ def diagnostic_member_completion_context(
     me_project_type = _me_project_type_for(opts.module_name, opts.module_kind)
     if me_project_type:
         ctx.me_project_type = me_project_type
-    me_type = _me_host_type_for(opts.module_name, opts.module_kind, opts.host, opts.designer_class)
+    me_type = _me_host_type_for(
+        opts.module_name, opts.module_kind, opts.host, opts.designer_class, opts.document_type
+    )
     if me_type:
         ctx.me_type = me_type
     return ctx
@@ -477,6 +479,7 @@ def _me_host_type_for(
     module_kind: ModuleSymbolKind | None,
     host: str | None = None,
     designer_class: str | None = None,
+    document_type: str | None = None,
 ) -> str | None:
     # A designer class is what the module IS, whatever kind it is listed as: an
     # Access form's `Me` reaches Requery from `Access.Form`, which the module's own
@@ -484,7 +487,19 @@ def _me_host_type_for(
     # `Me` keeps its own procedures too.
     if designer_class:
         return designer_class
-    if not module_name or module_kind is not ModuleSymbolKind.DOCUMENT:
+    if module_kind is not ModuleSymbolKind.DOCUMENT:
+        return None
+    # The host's word for the object outranks the code name, which the user can
+    # change: a workbook module renamed BookCode is still a Workbook. A sheet stays
+    # without one unless its designer class came with it, since only then are the
+    # ActiveX controls that are members of it known too.
+    if document_type == "workbook":
+        return "Excel.Workbook"
+    if document_type == "document":
+        return "Word.Document"
+    if document_type in ("worksheet", "chart"):
+        return None
+    if not module_name:
         return None
     lower = module_name.lower()
     token = (host or "excel").lower()
