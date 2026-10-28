@@ -19,7 +19,7 @@ from pyvbaanalysis.evidence import DATA_DIR
 from pyvbaanalysis.host.host_libraries import host_token_for_libid
 from pyvbaanalysis.host.host_model import get_host_global_members, resolve_host_global_member
 from pyvbaanalysis.host.host_registry import host_object_model_for_tokens
-from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex, ProjectIndexOptions
+from pyvbaanalysis.symbols import ImplicitMember, ModuleInput, ModuleSymbolKind, ProjectIndex, ProjectIndexOptions
 
 _ORACLE: list[dict[str, Any]] = json.loads((DATA_DIR / "vbe_oracle_cases.json").read_text(encoding="utf-8"))["cases"]
 
@@ -462,3 +462,89 @@ def test_document_type_reaches_the_project_type_across_edits() -> None:
     assert document_types() == [("BookCode", None), ("Sheet1", None)]
     index.remove_module("BookCode")
     assert document_types() == [("Sheet1", None)]
+
+
+# 385af160: a document module reached from another module is checked against its
+# host class (documentModuleMembers.test.ts, assignments.test.ts, sheetControls225.test.ts).
+
+_DOCUMENT_MEMBER_CASES = [case for case in _ORACLE if case["id"].startswith("document_member_")]
+_DOCUMENT_TYPE_BY_NAME = {"thisworkbook": "workbook", "thisdocument": "document"}
+
+
+def _oracle_module_input(case: dict[str, Any], module: dict[str, Any]) -> ModuleInput:
+    """The module as the extension reads it: a renamed document module keeps the
+    document type it was made with, and an Access form's module is its form."""
+    code_name = module.get("codeName")
+    kind = _KIND.get(module["type"], ModuleSymbolKind.STANDARD)
+    if case.get("host") == "access" and module["type"] == "document":
+        kind = ModuleSymbolKind.USERFORM
+    implicit = module.get("implicitMembers")
+    return ModuleInput(
+        code_name or module["name"],
+        kind,
+        module["source"],
+        implicit_members=[ImplicitMember(m["name"], m["type"]) for m in implicit] if implicit is not None else None,
+        designer_class=module.get("designerClass"),
+        document_type=(
+            _DOCUMENT_TYPE_BY_NAME.get(module["name"].lower(), "worksheet") if code_name is not None else None
+        ),
+    )
+
+
+def _member_not_found(case: dict[str, Any]) -> list[str]:
+    index = ProjectIndex()
+    inputs = [_oracle_module_input(case, module) for module in case["modules"]]
+    for one in inputs:
+        index.set_module(one)
+    out: list[str] = []
+    for one in inputs:
+        opts = analyze_module_options_for(index, one.module_name, one.module_kind, host=case.get("host"))
+        out.extend(d.message for d in analyze_module(one.source, opts) if d.code == "member-not-found")
+    return out
+
+
+def test_document_member_fixtures_cover_every_host_with_document_modules() -> None:
+    assert {case.get("host") or "excel" for case in _DOCUMENT_MEMBER_CASES} == {"excel", "word", "access"}
+
+
+@pytest.mark.parametrize("case", _DOCUMENT_MEMBER_CASES, ids=[case["id"] for case in _DOCUMENT_MEMBER_CASES])
+def test_document_member_fixture(case: dict[str, Any]) -> None:
+    assert len(_member_not_found(case)) == (1 if case["expected"] == "rejected" else 0)
+
+
+_HELLO = "Option Explicit\nPublic Sub Hello()\nEnd Sub\n"
+
+
+def _caller_findings(host: str, document_module: str, body: str) -> list[str]:
+    caller = f"Option Explicit\nPublic Sub T()\n{body}\nEnd Sub\n"
+    index = ProjectIndex()
+    index.set_module(ModuleInput("Module1", ModuleSymbolKind.STANDARD, caller))
+    index.set_module(ModuleInput(document_module, ModuleSymbolKind.DOCUMENT, _HELLO))
+    opts = analyze_module_options_for(index, "Module1", ModuleSymbolKind.STANDARD, host=host)
+    return [d.message for d in analyze_module(caller, opts) if d.code == "member-not-found"]
+
+
+def test_document_member_names_the_module_and_the_member() -> None:
+    [message] = _caller_findings("excel", "ThisWorkbook", "    Dim w As ThisWorkbook\n    Debug.Print w.UsedRange")
+    assert "'ThisWorkbook.UsedRange'" in message
+
+
+def test_document_member_leaves_a_sheet_unchecked_while_its_controls_are_unknown() -> None:
+    body = "    Dim s As Sheet1\n    Debug.Print s.FullName\n    Debug.Print Sheet1.FullName"
+    assert _caller_findings("excel", "Sheet1", body) == []
+
+
+def test_document_member_leaves_a_plain_workbook_or_document_variable_unchecked() -> None:
+    assert _caller_findings("excel", "ThisWorkbook", "    Dim w As Workbook\n    Debug.Print w.UsedRange") == []
+    assert _caller_findings("word", "ThisDocument", "    Dim d As Document\n    Debug.Print d.UsedRange") == []
+
+
+def test_document_member_checks_a_module_only_against_its_own_hosts_class() -> None:
+    assert _caller_findings("word", "ThisWorkbook", "    Dim w As ThisWorkbook\n    Debug.Print w.Nope") == []
+    assert _caller_findings("excel", "ThisDocument", "    Dim d As ThisDocument\n    Debug.Print d.Nope") == []
+
+
+def test_document_member_workbook_module_keeps_its_own_and_its_hosts_members() -> None:
+    body = "    Dim wb As ThisWorkbook\n    wb.Hello\n    Debug.Print wb.FullName\n    wb.DoesntExist"
+    [message] = _caller_findings("excel", "ThisWorkbook", body)
+    assert "ThisWorkbook.DoesntExist" in message
