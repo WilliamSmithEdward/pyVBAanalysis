@@ -620,6 +620,20 @@ _NAMES: Mapping[str, str] = {
         "whtmlcontrolevents3 whtmlcontrolevents4 whtmlcontrolevents5 whtmlcontrolevents6 "
         "whtmlcontrolevents7 whtmlcontrolevents9"
     ),
+    # DAO 12.0, 77 types.
+    "dao": (
+        "_collection _dao _daosupphelp _dbengine _dynacollection _field _group _index _querydef "
+        "_relation _tabledef _user collatingorderenum committransoptionsenum complextype connection "
+        "connections container containers cursordriverenum database databases databasetypeenum "
+        "datatypeenum dbengine document documents driverpromptenum editmodeenum error errors field "
+        "field2 field3 fieldattributeenum fields group groups idleenum index indexes indexfields "
+        "languageconstants locktypeenum parameter parameterdirectionenum parameters permissionenum "
+        "privdbengine properties property querydef querydefs querydefstateenum querydeftypeenum "
+        "recordset recordset2 recordsetoptionenum recordsets recordsettypeenum recordstatusenum "
+        "relation relationattributeenum relations replicatypeenum setoptionenum synchronizetypeenum "
+        "tabledef tabledefattributeenum tabledefs updatecriteriaenum updatetypeenum user users "
+        "workspace workspaces workspacetypeenum"
+    ),
 }
 
 _CACHE: dict[str, frozenset[str]] = {}

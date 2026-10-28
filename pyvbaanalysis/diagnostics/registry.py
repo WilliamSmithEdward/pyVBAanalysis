@@ -63,6 +63,7 @@ from .rules.control_flow import (
     check_statement_context,
     check_undefined_labels,
 )
+from .rules.base_class_members import check_base_class_member_clash
 from .rules.dead_code import (
     check_unreachable_code,
     check_unused_declarations,
@@ -958,6 +959,10 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(
         name="invalidAsTypeNames",
         run=lambda ctx, push: check_invalid_as_type_names(ctx.source, ctx.mod, ctx.activity, ctx.opts, push),
+    ),
+    DiagnosticRuleEntry(
+        name="baseClassMemberClash",
+        run=lambda ctx, push: check_base_class_member_clash(ctx.mod, ctx.activity, ctx.opts, push),
     ),
     DiagnosticRuleEntry(
         name="callParens",
