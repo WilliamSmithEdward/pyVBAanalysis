@@ -2,8 +2,8 @@
 
 Ported from statementOperands.ts. The shared expression walk (exprwalk.py)
 parses assignments, calls and If conditions. A Case item, a Print # or
-Debug.Print item, a file number, a Seek position, a record number or a Lock
-range is an expression too, and the VBE judges it as one: an array or a scalar
+Debug.Print item, a file number, a Seek position, a record number, a Lock
+range or a ReDim bound is an expression too, and the VBE judges it as one: an array or a scalar
 `Is` there is the same Type mismatch it is anywhere (XLIDE issue #1415,
 measured in Excel, Word, PowerPoint and Access 16.0). This module finds those
 expressions in a statement's own text, so every expression rule sees them
@@ -254,4 +254,37 @@ def _operand_ranges(toks: Sequence[VbaToken]) -> list[_OperandRange]:
             as_index = as_at[-1]
             len_at = _top_level(toks, as_index + 1, end, lambda tok: token_word(tok) == "len")
             out.append(_file_number(toks, as_index + 1, len_at[0] if len_at else end))
+    elif head == "redim":
+        out.extend(_redim_bound_ranges(toks))
+    return [operand for operand in out if operand[0] < operand[1]]
+
+
+def _redim_bound_ranges(toks: Sequence[VbaToken]) -> list[_OperandRange]:
+    """The bounds of `ReDim [Preserve] a(1 To n, m) [As T], b(k)`: each lower and
+    upper bound of each variable, an expression the VBE judges as one, so
+    `ReDim a(n Is Nothing)` is the Type mismatch it is anywhere (XLIDE issue
+    #1412, measured in Excel, Word, PowerPoint and Access 16.0)."""
+    out: list[_OperandRange] = []
+    from_ = 2 if _word_at(toks, 1) == "preserve" else 1
+    for start, stop in _pieces(toks, from_, len(toks), _COMMA):
+        open_ = next((i for i in range(start, stop) if toks[i].raw_text == "("), -1)
+        if open_ < 0:
+            continue
+        depth = 0
+        close = -1
+        for i in range(open_, stop):
+            raw = toks[i].raw_text
+            depth += 1 if raw == "(" else -1 if raw == ")" else 0
+            if depth == 0:
+                close = i
+                break
+        if close < 0:
+            continue
+        for dim_start, dim_stop in _pieces(toks, open_ + 1, close, _COMMA):
+            to_at = _top_level(toks, dim_start, dim_stop, lambda tok: token_word(tok) == "to")
+            if not to_at:
+                out.append((dim_start, dim_stop, None))
+            else:
+                out.append((dim_start, to_at[0], None))
+                out.append((to_at[0] + 1, dim_stop, None))
     return [operand for operand in out if operand[0] < operand[1]]

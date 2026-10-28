@@ -51,6 +51,12 @@ Issue #1417, measured in Excel, Word, PowerPoint and Access 16.0 (build
   or not, as a For start, end or Step value, "Type mismatch", whatever the
   counter's type. An element, UBound(a) and a Variant that is not declared
   as an array take.
+
+Issue #1412, measured the same way (2026-10-23):
+
+- redim-bound-array: an array variable as a ReDim bound, lower or upper,
+  in parentheses or not, with Preserve or not, in any dimension, "Type
+  mismatch". An element, UBound(a) and a Variant take.
 """
 
 from __future__ import annotations
@@ -74,6 +80,7 @@ from ...parser.nodes import (
     ConditionalDirectiveNode,
     DeclareNode,
     EnumNode,
+    ExprNode,
     ForBlockNode,
     IdentifierExpr,
     IfBlockNode,
@@ -100,6 +107,7 @@ from ...symbols.symbol_model import (
 from ...types.type_inference import procedure_symbol_for, source_identifier_binding
 from ...types.type_names import is_known_scalar_type, normalize_type
 from ..context import PushFn
+from ..statement_operands import statement_operand_roots
 from ..type_fields import ModuleTypes, is_fixed_array_field, module_types
 from ..walker import (
     absolute_span,
@@ -325,6 +333,8 @@ def _walk_body(
             for branch in node.branches:
                 _check_condition(ctx, proc_sym, branch.condition_raw, branch.header_span)
         elif isinstance(node, (StatementNode, AssignmentNode, CallNode)):
+            if isinstance(node, StatementNode):
+                _check_redim_bounds(ctx, proc_sym, node)
             # A single-line If's branches are statements of their own, and its
             # condition is read up to Then.
             for statement_span in condition_and_branch_spans(ctx.source, node):
@@ -342,6 +352,37 @@ def _is_counter_name(name: str) -> bool:
     if not name or not (name[0] == "_" or _is_unicode_letter(name[0])):
         return False
     return all(ch == "_" or unicodedata.category(ch)[0] in ("L", "N") for ch in name[1:])
+
+
+def _array_variable_value(ctx: _Context, proc_sym: VbaSymbol | None, expr: ExprNode) -> str | None:
+    """The name of the array variable `expr` is, bare or in parentheses, or None."""
+    value = expr
+    while isinstance(value, ParenExpr):
+        value = value.inner
+    if not isinstance(value, IdentifierExpr):
+        return None
+    variable = _variable_named(ctx, proc_sym, value.name)
+    return value.name if variable is not None and variable.is_array else None
+
+
+_REDIM_HEAD_RE = re.compile(
+    rf"\A[{JS_WHITESPACE}]*(?:[0-9]+[{JS_WHITESPACE}]+)?ReDim(?![A-Za-z0-9_])", re.IGNORECASE
+)
+
+
+def _check_redim_bounds(ctx: _Context, proc_sym: VbaSymbol | None, node: StatementNode) -> None:
+    """`ReDim d(a)`, `ReDim d(1 To (a))`: an array variable as a bound (XLIDE issue #1412)."""
+    if node.single_line_if_branches or not _REDIM_HEAD_RE.match(node.raw):
+        return
+    for bound in statement_operand_roots(node):
+        array = _array_variable_value(ctx, proc_sym, bound)
+        if array is not None:
+            ctx.push(
+                "redimBoundArray",
+                f"'{array}' is an array, and a ReDim bound must be a single number. This is a VBE "
+                "compile error: Type mismatch.",
+                bound.span,
+            )
 
 
 def _check_for(
@@ -365,18 +406,14 @@ def _check_for(
         )
     variable = _variable_named(ctx, proc_sym, name)
     for bound in node.bound_expressions or []:
-        value = bound
-        while isinstance(value, ParenExpr):
-            value = value.inner
-        if isinstance(value, IdentifierExpr):
-            bound_variable = _variable_named(ctx, proc_sym, value.name)
-            if bound_variable is not None and bound_variable.is_array:
-                ctx.push(
-                    "forBoundArray",
-                    f"'{value.name}' is an array, and a For start, end or Step value must be a single "
-                    "value. This is a VBE compile error: Type mismatch.",
-                    bound.span,
-                )
+        array = _array_variable_value(ctx, proc_sym, bound)
+        if array is not None:
+            ctx.push(
+                "forBoundArray",
+                f"'{array}' is an array, and a For start, end or Step value must be a single value. "
+                "This is a VBE compile error: Type mismatch.",
+                bound.span,
+            )
     if not node.each:
         kind = _category(ctx, variable)
         if kind in ("string", "boolean", "object", "udt", "class") and variable is not None:

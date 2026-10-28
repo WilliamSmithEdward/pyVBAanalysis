@@ -466,3 +466,50 @@ def test_fixture_adapter_types_controls_by_prog_id() -> None:
     )
     assert (sheet.designer_class, sheet.implicit_members) == ("Excel.Worksheet", [])
     assert oracle_module_input({"name": "Timer", "type": "class", "source": "", "predeclaredId": True}).predeclared_id is True
+
+
+# -- 7ec04b3f: a ReDim bound is an expression --------------------------------
+
+
+def _ids1412(*names: str) -> list[str]:
+    return [f"issue1412_{host}{name}_compile" for name in names for host in _HOSTS]
+
+
+@pytest.mark.parametrize("case_id", _ids1412("rb_is_nothing", "rb_cdbl_is", "rb_typeof_n"))
+def test_redim_bound_is_operand_is_judged(case_id: str) -> None:
+    _expect_1417(case_id, "rejected", ["is-operator-non-object"])
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    _ids1412("rb_array_upper", "rb_array_lower", "rb_array_paren", "rb_array_preserve", "rb_array_second_dim"),
+)
+def test_array_as_redim_bound_is_type_mismatch(case_id: str) -> None:
+    _expect_1417(case_id, "rejected", ["redim-bound-array"])
+
+
+@pytest.mark.parametrize("case_id", _ids1412("rb_array_plus"))
+def test_array_under_an_operator_in_redim_bound(case_id: str) -> None:
+    _expect_1417(case_id, "rejected", ["non-scalar-binary-operand"])
+
+
+@pytest.mark.parametrize(
+    "case_id", _ids1412("rb_element_ok", "rb_ubound_ok", "rb_variant_ok", "rb_object_is_ok", "rb_two_dims_ok")
+)
+def test_redim_bounds_that_compile_are_quiet(case_id: str) -> None:
+    _expect_1417(case_id, "accepted", [])
+
+
+def _redim_main(*body: str) -> list[str]:
+    source = "\r\n".join(
+        ["Option Explicit", "Sub Main()", "    Dim a(1) As Long, d() As Long, n As Long", *body, "End Sub", ""]
+    )
+    return _codes_of(_errors_for({"modules": [{"name": "Module1", "type": "standard", "source": source}]}))
+
+
+def test_redim_reads_each_variable_and_leaves_as_type_alone() -> None:
+    assert _redim_main("    Dim e() As Long", "    ReDim d(1) As Long, e(a)") == ["redim-bound-array"]
+
+
+def test_redim_in_if_arm_reports_through_operand_rules_only() -> None:
+    assert _redim_main("    If n = 0 Then ReDim d(n Is Nothing)") == ["is-operator-non-object"]
