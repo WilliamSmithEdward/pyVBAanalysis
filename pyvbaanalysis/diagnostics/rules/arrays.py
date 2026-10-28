@@ -124,6 +124,7 @@ from ..walker import (
     token_name,
     token_text,
 )
+from .overflow import constant_number_folder
 from .shared import is_bare_or_vba_qualified_intrinsic_call, source_expression_syntax_problem
 
 # -- node-keyed lookups ----------------------------------------------------
@@ -928,6 +929,7 @@ def check_redim_impossible_bounds(
     module_declarations = _redim_blocked_declarations_for_module(mod, activity)
     option_base = module_option_base(mod, activity)
     module_constants = _module_integer_constants(mod, project_integer_constants, activity)
+    folder = constant_number_folder(symbols, project_visible_symbols)
 
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
         local_declarations = _redim_blocked_declarations_for_body(member.body, activity)
@@ -944,6 +946,9 @@ def check_redim_impossible_bounds(
             return constants[0]
 
         values_at = known_local_literal_values_at(source, member, symbols, activity)
+
+        def fold(text: str) -> float | None:
+            return folder(text, member)
 
         def visitor(stmt: LeafStatementNode) -> None:
             # `zz = -1` then `ReDim a(zz)` (issue #238).
@@ -965,7 +970,7 @@ def check_redim_impossible_bounds(
                 if blocked is not None:
                     continue
                 for index, dimension in enumerate(target.dimensions):
-                    outside = _bound_outside_long(source, dimension.span, lookup())
+                    outside = _bound_outside_long(source, dimension.span, lookup(), fold)
                     if outside is not None:
                         push(
                             "arithmeticOverflow",
@@ -1014,6 +1019,9 @@ def check_array_declaration_bounds(
        literal or a constant expression the module, the procedure, another
        module's Public Const, an Enum or the host defines (issue #209). A bound
        that names a variable stays quiet.
+     - `array-bound-overflow`: a bound a Long cannot hold, "Overflow" in the
+       VBE: `Dim a(2147483648#)`, `Dim a(N)` with N a Double Const past the
+       range (issue #1412). The dimension is not also judged for its order.
      - `too-many-array-dimensions`: more than 60 dimensions, in a Type member too.
     ReDim is covered separately by check_redim_impossible_bounds."""
     option_base = module_option_base(mod, activity)
@@ -1029,23 +1037,36 @@ def check_array_declaration_bounds(
             )
         return module_lookup[0]
 
-    def inspect_group(group: VariableGroupNode, lookup: Callable[[], IntegerConstantLookup]) -> None:
+    # Read only for a bound that whole-number folding cannot read.
+    folder = constant_number_folder(symbols, project_visible_symbols)
+    module_bounds = _BoundScope(module_scope, lambda text: folder(text, None))
+
+    def inspect_group(group: VariableGroupNode, scope: _BoundScope) -> None:
         for decl in group.declarations:
             if not decl.is_array or decl.array_bounds is None or is_inactive_node(activity, decl):
                 continue
-            _inspect_array_declaration(source, decl, lookup, option_base, push)
+            _inspect_array_declaration(source, decl, scope, option_base, push)
 
     for member in active_module_members(mod, activity):
         if isinstance(member, VariableGroupNode):
-            inspect_group(member, module_scope)
+            inspect_group(member, module_bounds)
         elif isinstance(member, TypeNode):
             for type_field in member.fields:
                 if type_field.is_array and not is_inactive_node(activity, type_field):
-                    _inspect_array_declaration(source, type_field, module_scope, option_base, push)
+                    _inspect_array_declaration(source, type_field, module_bounds, option_base, push)
         elif isinstance(member, ProcedureNode):
             _inspect_procedure_declarations(
-                member, module_constants, symbols, project_visible_symbols, activity, host_model, inspect_group
+                member, module_constants, symbols, project_visible_symbols, activity, host_model, inspect_group,
+                folder,
             )
+
+
+@dataclass(frozen=True)
+class _BoundScope:
+    """How a declaration's bounds are read: whole-number Consts first, then VBA's typed folding."""
+
+    lookup: Callable[[], IntegerConstantLookup]
+    fold: Callable[[str], int | float | None]
 
 
 def _inspect_procedure_declarations(
@@ -1055,7 +1076,8 @@ def _inspect_procedure_declarations(
     project_visible_symbols: Sequence[VbaSymbol] | None,
     activity: ConditionalActivityTracker | None,
     host_model: HostObjectModel | None,
-    inspect_group: Callable[[VariableGroupNode, Callable[[], IntegerConstantLookup]], None],
+    inspect_group: Callable[[VariableGroupNode, _BoundScope], None],
+    folder: Callable[[str, ProcedureNode | None], float | None],
 ) -> None:
     constants: list[IntegerConstantLookup] = []
 
@@ -1068,7 +1090,8 @@ def _inspect_procedure_declarations(
             )
         return constants[0]
 
-    for_each_variable_group(member.body, lambda group: inspect_group(group, procedure_scope), activity)
+    scope = _BoundScope(procedure_scope, lambda text: folder(text, member))
+    for_each_variable_group(member.body, lambda group: inspect_group(group, scope), activity)
 
 
 def _module_integer_constants(
@@ -1094,6 +1117,9 @@ class _DimensionBounds:
     explicit_lower: bool
     # A bound holds a type-suffixed literal its type cannot hold, a compile error of its own.
     malformed_literal: bool
+    # Each written bound's text, for a reading past whole numbers.
+    lower_text: str | None = None
+    upper_text: str | None = None
 
 
 def _dimension_bounds(source: str, span: Span, lookup: IntegerConstantLookup) -> _DimensionBounds:
@@ -1126,11 +1152,15 @@ def _dimension_bounds(source: str, span: Span, lookup: IntegerConstantLookup) ->
             return rounded + 0
         return evaluate_integer_constant_expression(text[part[0].start : part[-1].end], lookup)
 
+    upper_part = toks if to < 0 else toks[to + 1 :]
+    lower_part = [] if to < 0 else toks[:to]
     return _DimensionBounds(
-        lower=None if to < 0 else side(toks[:to]),
-        upper=side(toks if to < 0 else toks[to + 1 :]),
+        lower=side(lower_part),
+        upper=side(upper_part),
         explicit_lower=to >= 0,
         malformed_literal=any(_suffixed_literal_out_of_range(tok) for tok in toks),
+        lower_text=text[lower_part[0].start : lower_part[-1].end] if lower_part else None,
+        upper_text=text[upper_part[0].start : upper_part[-1].end] if upper_part else None,
     )
 
 
@@ -1167,18 +1197,34 @@ def _suffixed_literal_out_of_range(tok: VbaToken) -> bool:
     return math.isfinite(value) and (value < limits[0] or value > limits[1])
 
 
-def _bound_outside_long(source: str, span: Span, lookup: IntegerConstantLookup) -> int | float | None:
-    """A bound a Long cannot hold: `ReDim a(2147483648#)`, from a Double literal,
-    a Const or an expression, raises 6 (issue #1412, measured in Excel, Word,
-    PowerPoint and Access 16.0). A Long- or Integer-suffixed literal out of
-    range is a compile error first, suffixed-literal-overflow's."""
+def _bound_outside_long(
+    source: str,
+    span: Span,
+    lookup: IntegerConstantLookup,
+    fold: Callable[[str], int | float | None],
+) -> int | float | None:
+    """A bound a Long cannot hold once it is rounded half to even, as VBA makes
+    a bound whole: `ReDim a(2147483648#)` raises 6 and `Dim a(2147483648#)` is
+    refused with "Overflow" (issue #1412, measured in Excel, Word, PowerPoint
+    and Access 16.0). 2147483647.5 rounds to 2147483648 and is past the range;
+    -2147483648.5 rounds to -2147483648 and is not. A bound whole-number
+    folding cannot read, a Double Const or `2147483647# + 1`, is read by
+    `fold`. A Long- or Integer-suffixed literal out of range is a compile
+    error first, suffixed-literal-overflow's."""
     bounds = _dimension_bounds(source, span, lookup)
     if bounds.malformed_literal:
         return None
+
+    def read(value: int | float | None, text: str | None) -> int | float | None:
+        if value is not None or text is None:
+            return value
+        folded = fold(text)
+        return None if folded is None else bankers_round(folded) + 0
+
     return next(
         (
             value
-            for value in (bounds.lower, bounds.upper)
+            for value in (read(bounds.lower, bounds.lower_text), read(bounds.upper, bounds.upper_text))
             if value is not None and (value < _LONG_MIN or value > _LONG_MAX)
         ),
         None,
@@ -1188,7 +1234,7 @@ def _bound_outside_long(source: str, span: Span, lookup: IntegerConstantLookup) 
 def _inspect_array_declaration(
     source: str,
     decl: VariableDeclNode | TypeFieldNode,
-    lookup: Callable[[], IntegerConstantLookup],
+    scope: _BoundScope,
     option_base: int,
     push: PushFn,
 ) -> None:
@@ -1214,7 +1260,16 @@ def _inspect_array_declaration(
         )
     for index, dim_tokens in enumerate(dims):
         span = _token_group_span(decl.span, dim_tokens)
-        bounds = _impossible_bounds(source, span, lookup(), option_base)
+        outside = _bound_outside_long(source, span, scope.lookup(), scope.fold)
+        if outside is not None:
+            push(
+                "arrayBoundOverflow",
+                f"Array '{decl.name}' bound {_fmt(outside)} for dimension {index + 1} is outside the range of a "
+                "Long; this is a VBE compile error: Overflow.",
+                span,
+            )
+            continue
+        bounds = _impossible_bounds(source, span, scope.lookup(), option_base)
         if bounds is None:
             continue
         lower_text, upper = bounds

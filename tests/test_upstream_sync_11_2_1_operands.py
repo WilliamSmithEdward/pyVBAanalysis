@@ -513,3 +513,86 @@ def test_redim_reads_each_variable_and_leaves_as_type_alone() -> None:
 
 def test_redim_in_if_arm_reports_through_operand_rules_only() -> None:
     assert _redim_main("    If n = 0 Then ReDim d(n Is Nothing)") == ["is-operator-non-object"]
+
+
+# -- b931a850: an array bound a Long cannot hold, read past whole numbers ----
+
+# A bound is made whole half to even, then must fit a Long: 2147483647.5 is
+# 2147483648 and overflows, 2147483647.4 and -2147483648.5 do not. A Double
+# Const, and an expression of Doubles, is folded with VBA's typing.
+
+_DIM_OVERFLOWS = [
+    "l_dim_double_overflow", "d_half_up", "d_low_past", "d_low_double", "d_const_double", "d_local_const_double",
+    "d_const_untyped", "d_const_plus", "d_double_plus", "d_divide", "d_single", "d_currency", "d_second_dim",
+    "d_module_level", "d_type_field", "d_long_sum",
+]
+
+
+@pytest.mark.parametrize("case_id", [c for name in _DIM_OVERFLOWS for c in _each_host(name, "compile")])
+def test_dim_bound_a_long_cannot_hold_is_array_bound_overflow(case_id: str) -> None:
+    case = _case(case_id)
+    assert case["expected"] == "rejected"
+    assert _codes_of(_errors_for(case)) == ["array-bound-overflow"]
+
+
+_REDIM_OVERFLOWS = [
+    "l_redim_const_overflow", "r_half_up", "r_low_past", "r_local_const", "r_const_plus", "r_double_plus",
+    "r_divide", "r_single", "r_currency",
+]
+
+
+@pytest.mark.parametrize("case_id", [c for name in _REDIM_OVERFLOWS for c in _each_host(name, "runtime")])
+def test_folded_redim_bound_a_long_cannot_hold_overflows(case_id: str) -> None:
+    case = _case(case_id)
+    assert case["expected"] == "rejected"
+    assert _codes_of(_errors_for(case)) == ["arithmetic-overflow"]
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    [
+        *(c for name in ("d_under_half_ok", "d_low_half_ok", "d_const_ok", "d_divide_ok") for c in _each_host(name, "compile")),
+        *(c for name in ("r_under_half_ok", "r_low_half_ok", "r_const_ok") for c in _each_host(name, "runtime")),
+    ],
+)
+def test_folded_bounds_a_long_holds_are_quiet(case_id: str) -> None:
+    case = _case(case_id)
+    assert case["expected"] == "accepted"
+    assert _errors_for(case) == []
+
+
+def _module_of(*lines: str) -> dict[str, Any]:
+    source = "\r\n".join(["Option Explicit", *lines, ""])
+    return {"modules": [{"name": "Module1", "type": "standard", "source": source}]}
+
+
+def test_array_bound_overflow_names_the_bound_and_underlines_the_dimension() -> None:
+    case = _module_of("Const N As Double = 2147483647#", "Sub Main()", "    Dim a(1, 0 To N + 1) As Long", "End Sub")
+    assert _errors_for(case) == ["array-bound-overflow: 0 To N + 1"]
+    source = case["modules"][0]["source"]
+    [message] = [d.message for d in analyze_module(source) if d.code == "array-bound-overflow"]
+    assert message == (
+        "Array 'a' bound 2147483648 for dimension 2 is outside the range of a Long; "
+        "this is a VBE compile error: Overflow."
+    )
+
+
+def test_bound_past_the_range_is_not_also_reversed_bounds() -> None:
+    case = _module_of("Sub Main()", "    Dim a(2147483648# To 1) As Long", "End Sub")
+    assert _errors_for(case) == ["array-bound-overflow: 2147483648# To 1"]
+
+
+def test_suffixed_dim_literal_out_of_range_is_the_literal_only() -> None:
+    case = _module_of("Sub Main()", "    Dim a(2147483648&) As Long", "End Sub")
+    assert _codes_of(_errors_for(case)) == ["suffixed-literal-overflow"]
+
+
+def test_bound_reads_another_modules_const_and_a_local_hides_it() -> None:
+    shared = {"name": "Limits", "type": "standard", "source": "Option Explicit\r\nPublic Const BIG As Double = 3E+09\r\n"}
+    user = {
+        "name": "Module1", "type": "standard",
+        "source": "Option Explicit\r\nSub Main()\r\n    Dim a(BIG) As Long\r\nEnd Sub\r\n",
+    }
+    assert _errors_for({"modules": [shared, user]}) == ["array-bound-overflow: BIG"]
+    hidden = _module_of("Const BIG As Double = 3E+09", "Sub Main()", "    Dim BIG As Long", "    Dim a(BIG) As Long", "End Sub")
+    assert "array-bound-overflow" not in _codes_of(_errors_for(hidden))
