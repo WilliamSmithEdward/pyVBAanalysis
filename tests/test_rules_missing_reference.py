@@ -98,7 +98,7 @@ def test_the_projects_own_host_needs_no_reference() -> None:
             id="the shared Office library",
         ),
         pytest.param(
-            "Public Sub S()\n    Dim o As Outlook.Application\nEnd Sub\n",
+            "Public Sub S()\n    Dim v As Visio.Application\nEnd Sub\n",
             id="a library the analyzer cannot add",
         ),
     ],

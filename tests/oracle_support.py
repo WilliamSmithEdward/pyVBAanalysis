@@ -5,16 +5,27 @@ Not a test module (no test_ prefix); imported by the rule test files.
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 
 from pyvbaanalysis import analyze_module_options_for
 from pyvbaanalysis.conditional import ConditionalCompilationEnvironment
 from pyvbaanalysis.diagnostics import analyze_module
-from pyvbaanalysis.evidence import OracleCase, load_audit, load_oracle_cases
+from pyvbaanalysis.evidence import DATA_DIR, OracleCase, load_audit, load_oracle_cases
+from pyvbaanalysis.host.host_libraries import host_token_for_libid
 from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
 
 AUDIT = {a.code: a for a in load_audit()}
 CASES = {c.id: c for c in load_oracle_cases()}
+
+# The libraries a case's `references` add before its modules (Outlook, by GUID), as
+# the host tokens the analysis takes: a case the oracle compiled with Outlook
+# referenced is analyzed against Outlook's model too (upstream oracleReferencedHosts).
+_REFERENCED_HOSTS: dict[str, list[str]] = {
+    raw["id"]: [token for ref in raw["references"] if (token := host_token_for_libid(ref["guid"])) is not None]
+    for raw in json.loads((DATA_DIR / "vbe_oracle_cases.json").read_text(encoding="utf-8"))["cases"]
+    if raw.get("references")
+}
 
 _KIND = {
     "standard": ModuleSymbolKind.STANDARD,
@@ -40,7 +51,7 @@ def case_codes(case: OracleCase) -> frozenset[str]:
 
     Every case was run in a default Excel workbook, so the host is named as Excel,
     and the reference list is known to name no other application's library rather
-    than unknown. The fresh projects also have known-empty Conditional Compilation
+    than unknown, except the libraries a case's `references` add. The fresh projects also have known-empty Conditional Compilation
     Arguments, so an undefined #If name is provably zero rather than unknown.
 
     Cases are immutable. Reuse their full findings across rule-specific assertions
@@ -52,7 +63,8 @@ def case_codes(case: OracleCase) -> frozenset[str]:
     out: set[str] = set()
     for module in case.modules:
         opts = analyze_module_options_for(
-            index, module.name, _kind(module.module_type), host="excel", referenced_hosts=[],
+            index, module.name, _kind(module.module_type), host="excel",
+            referenced_hosts=_REFERENCED_HOSTS.get(case.id, []),
             conditional_compilation=ConditionalCompilationEnvironment(project_constants={}),
         )
         for diag in analyze_module(module.source, opts):

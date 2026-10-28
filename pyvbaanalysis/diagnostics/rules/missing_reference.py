@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 
 from ...host.host_libraries import HOST_LIBRARY_NAMES
 from ...host.host_model import HostObjectModel
@@ -49,7 +50,7 @@ _MODEL_LIBRARIES = IdentityLru()
 # The libraries a project can be given a reference to: lowercased name -> as written.
 _ADDABLE = {
     HOST_LIBRARY_NAMES[token].lower(): HOST_LIBRARY_NAMES[token]
-    for token in ("excel", "word", "powerpoint", "access")
+    for token in ("excel", "word", "powerpoint", "access", "outlook")
 }
 
 
@@ -206,6 +207,44 @@ def check_missing_scripting_reference(
         return
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectNames:
+    """What the project knows of itself, for judging a qualifier no library XLIDE
+    can add spells."""
+
+    # The libraries the dir stream records; None where they were not read.
+    referenced_libraries: Sequence[str] | None = None
+    # The project's own name, `VBAProject` or `Project` or an Access database's.
+    project_name: str | None = None
+    # Every module of the project, lowercased; None without the project.
+    project_module_names: AbstractSet[str] | None = None
+
+
+def _known_qualifiers(
+    model: HostObjectModel, project_modules: AbstractSet[str], project: ProjectNames | None
+) -> frozenset[str] | None:
+    """The names that qualify a type in this project, lowercased, or None when the
+    project is not known well enough to say a name does not (XLIDE issue #1413,
+    measured in Excel, Word, PowerPoint and Access 16.0): every library the dir
+    stream records, which it records by the name the library gives itself; VBA and
+    the host's own library, which it never records; the project's name and its
+    modules. The Scripting Runtime is check_missing_scripting_reference's."""
+    if (
+        project is None
+        or project.referenced_libraries is None
+        or not project.project_name
+        or project.project_module_names is None
+    ):
+        return None
+    return frozenset(
+        name.lower()
+        for name in [
+            "vba", "scripting", project.project_name, model.get("hostName") or "Excel",
+            *project.referenced_libraries, *project.project_module_names, *project_modules,
+        ]
+    )
+
+
 def check_missing_library_reference(
     source: str,
     model: HostObjectModel,
@@ -214,6 +253,7 @@ def check_missing_library_reference(
     project_modules: AbstractSet[str] = frozenset(),
     symbols: ModuleSymbols | None = None,
     project_visible_symbols: Sequence[VbaSymbol] | None = None,
+    project: ProjectNames | None = None,
 ) -> None:
     """Module rule: a type or constant qualified with an Office library the project
     does not reference.
@@ -224,22 +264,44 @@ def check_missing_library_reference(
 
     `project_modules` is the project's module names, lowercased: a module named Word
     is called as Word.Hi (issue #357).
+
+    The port's `references_known` gate holds the libraries XLIDE can add; a library
+    it cannot add is judged under its own, stronger gate (`project` must carry the
+    references, the project's name and its modules), as upstream does.
     """
-    if not references_known:
-        return
     present = _libraries_in_model(model)
     # Nothing is known about any library, so nothing can be said about one being
     # absent. A model with no qualified types gets silence.
     if not present:
         return
     seen: set[str] = set()
+    qualifiers: frozenset[str] | None = None
+    judged = False
     explicit = any(tok.kind is TokenKind.KEYWORD and tok.raw_text.lower() == "explicit" for tok in tokenize_cached(source))
     for found_library, span, type_qualifier in _qualified_names_in(source, symbols, project_visible_symbols):
         if not type_qualifier and not explicit:
             continue
         lower = found_library.lower()
         library = _ADDABLE.get(lower)
-        if library is None or lower in present or lower in project_modules or lower in seen:
+        if library is None:
+            # A library XLIDE cannot add: judged only in a type position, and only
+            # where the project's references and modules are known.
+            if not judged:
+                qualifiers = _known_qualifiers(model, project_modules, project)
+                judged = True
+            if type_qualifier and qualifiers is not None and lower not in qualifiers and lower not in seen:
+                seen.add(lower)
+                push(
+                    "missingLibraryReference",
+                    f"'{found_library}' is no library this project references and none of its modules, "
+                    f"so {found_library}.* cannot be resolved. Add a reference to the library that "
+                    "defines it, or use late binding: "
+                    f'Dim x As Object: Set x = CreateObject("{found_library}.<class>"). This is a VBE '
+                    "compile error: User-defined type not defined.",
+                    span,
+                )
+            continue
+        if not references_known or lower in present or lower in project_modules or lower in seen:
             continue
         seen.add(lower)
         push(

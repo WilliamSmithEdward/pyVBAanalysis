@@ -241,6 +241,10 @@ class VbaProjectClassMembers:
     # The host class the module's designer makes it: an Access form's
     # `Access.Form`. None for a UserForm, which is always an MSForms.UserForm.
     designer_class: str | None = None
+    # Which host object a document module is, where the host said: a renamed
+    # ThisWorkbook is still a `workbook`. None for every other kind, and where only
+    # the code name can tell. An EventHandlerDocumentType value.
+    document_type: str | None = None
     # The names of the module's Private members, which `members` leaves out.
     # No reference through an object reaches one, `Me.` included: that is
     # "Method or data member not found" wherever the rest of the surface

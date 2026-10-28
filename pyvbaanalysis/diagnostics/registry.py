@@ -63,6 +63,7 @@ from .rules.control_flow import (
     check_statement_context,
     check_undefined_labels,
 )
+from .rules.base_class_members import check_base_class_member_clash
 from .rules.dead_code import (
     check_unreachable_code,
     check_unused_declarations,
@@ -141,7 +142,11 @@ from .rules.local_declaration_order import check_local_declaration_order
 from .rules.locked_arrays import check_locked_arrays
 from .rules.long_long_narrowing import check_long_long_narrowing
 from .rules.malformed_lines import check_malformed_lines
-from .rules.missing_reference import check_missing_library_reference, check_missing_scripting_reference
+from .rules.missing_reference import (
+    ProjectNames,
+    check_missing_library_reference,
+    check_missing_scripting_reference,
+)
 from .rules.module_kind import (
     check_declare_ptr_safe_for_win64,
     check_event_declaration_module_kind,
@@ -324,6 +329,11 @@ def _missing_library_reference(ctx: RulePassContext, push: PushFn) -> None:
         },
         ctx.symbols,
         ctx.opts.project_visible_symbols,
+        ProjectNames(
+            referenced_libraries=ctx.opts.referenced_libraries,
+            project_name=ctx.opts.project_name,
+            project_module_names=ctx.opts.project_module_names,
+        ),
     )
 
 
@@ -960,6 +970,10 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(
         name="invalidAsTypeNames",
         run=lambda ctx, push: check_invalid_as_type_names(ctx.source, ctx.mod, ctx.activity, ctx.opts, push),
+    ),
+    DiagnosticRuleEntry(
+        name="baseClassMemberClash",
+        run=lambda ctx, push: check_base_class_member_clash(ctx.mod, ctx.activity, ctx.opts, push),
     ),
     DiagnosticRuleEntry(
         name="callParens",

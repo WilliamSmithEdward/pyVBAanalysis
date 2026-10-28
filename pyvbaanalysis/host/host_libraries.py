@@ -32,6 +32,7 @@ _HOST_BY_LIBRARY_GUID: MappingProxyType[str, str] = MappingProxyType(
         "{4AFFC9A0-5F99-101B-AF4E-00AA003F0F07}": "access",
         "{420B2830-E718-11CF-893D-00A0C9054228}": "scripting",
         "{3F4DACA7-160D-11D2-A8E9-00104B365C9F}": "regexp",
+        "{00062FFF-0000-0000-C000-000000000046}": "outlook",
     }
 )
 

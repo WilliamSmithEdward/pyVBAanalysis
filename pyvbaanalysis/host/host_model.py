@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -103,6 +103,11 @@ class HostObjectModel(_HostObjectModelCore, total=False):
     # The library's hidden global interface (`Excel.Global`), whose members VBA
     # binds bare for anyone who references the library. Access has none.
     globalType: str | None
+    # The global objects of the libraries a project references, in reference
+    # order, whose members VBA binds bare after the host's own: Outlook's
+    # Application, so `Session` and `CreateItem` compile in a workbook that
+    # references Outlook. Set only on a merged model.
+    referencedGlobalTypes: Sequence[str]
     # Enumerations by name. In a merged model, a referenced library's entries
     # carry a `library` key naming where they came from.
     enums: Mapping[str, HostEnum]
@@ -132,6 +137,14 @@ def get_scripting_object_model() -> HostObjectModel:
 
 def get_regexp_object_model() -> HostObjectModel:
     return _load_host_model("regexp_host_model.json")
+
+
+def get_outlook_object_model() -> HostObjectModel:
+    """The vendored Outlook library (data/outlook_host_model.json), a reference an
+    Excel, Word, PowerPoint or Access project may add; not a host XLIDE opens.
+    Outlook's interfaces are dispatch-only and extensible, so its types offer and
+    describe, and never prove a member absent."""
+    return _load_host_model("outlook_host_model.json")
 
 
 def get_excel_object_model() -> HostObjectModel:
@@ -399,29 +412,44 @@ def is_host_member_name_anywhere(name: str, model: HostObjectModel | None = None
 def resolve_host_global_member(name: str, model: HostObjectModel | None = None) -> HostMember | None:
     """A bare identifier as a member of the host's hidden Global interface, the
     surface VBA calls unqualified: Word's InchesToPoints, Excel's Union (XLIDE issue
-    #34). Object-access members only, never an event; None when the model carries
-    no Global type or the name is not among its members."""
+    #34), then as a member of each referenced library's global object. Object-access
+    members only, never an event; None when no global owner has the name."""
     resolved = _default(model)
-    global_type = resolved.get("globalType")
     # A leading underscore marks a hidden dispatch name, never called by name.
-    if not global_type or name.startswith("_"):
+    if name.startswith("_"):
         return None
-    type_index = _host_model_index(resolved).members_by_type.get(global_type)
-    return type_index.by_lower_name.get(name.lower()) if type_index is not None else None
+    lower = name.lower()
+    members = _host_model_index(resolved).members_by_type
+    for owner in _global_owners(resolved):
+        type_index = members.get(owner)
+        found = type_index.by_lower_name.get(lower) if type_index is not None else None
+        if found is not None:
+            return found
+    return None
 
 
 def get_host_global_members(model: HostObjectModel | None = None) -> list[HostMember]:
-    """All object-access members of the host's hidden Global interface, without
-    the `_`-prefixed dispatch internals (XLIDE issue #41)."""
+    """All object-access members of the host's hidden Global interface, then each
+    referenced library's global object, without the `_`-prefixed dispatch internals
+    (XLIDE issue #41)."""
     resolved = _default(model)
-    global_type = resolved.get("globalType")
-    if not global_type:
-        return []
-    return [
-        member
-        for member in get_host_members(global_type, resolved)
-        if not member["name"].startswith("_")
-    ]
+    seen: set[str] = set()
+    out: list[HostMember] = []
+    for owner in _global_owners(resolved):
+        for member in get_host_members(owner, resolved):
+            lower = member["name"].lower()
+            if not member["name"].startswith("_") and lower not in seen:
+                seen.add(lower)
+                out.append(member)
+    return out
+
+
+def _global_owners(model: HostObjectModel) -> list[str]:
+    """The host's Global first, so it wins a name a referenced library's global
+    object shares."""
+    global_type = model.get("globalType")
+    referenced = list(model.get("referencedGlobalTypes") or [])
+    return [global_type, *referenced] if global_type else referenced
 
 
 def resolve_host_member_signature(

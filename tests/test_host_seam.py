@@ -76,7 +76,7 @@ def test_a_modelled_host_answers_its_own_model(token: str) -> None:
     assert len(model["types"]) > 100
 
 
-@pytest.mark.parametrize("token", ["outlook", "visio", "project", "other"])
+@pytest.mark.parametrize("token", ["visio", "project", "other"])
 def test_a_named_host_with_no_model_asserts_nothing(token: str) -> None:
     # Not Excel's model: an unmodelled host knows nothing rather than the wrong thing.
     assert host_object_model_for_token(token) is EMPTY_HOST_MODEL
@@ -106,20 +106,20 @@ def test_word_source_false_positives_under_excel() -> None:
     assert [d.code for d in analyze_project(modules)["Mod1"]]
 
 
-@pytest.mark.parametrize("host", ["word", "outlook"])
+@pytest.mark.parametrize("host", ["word", "visio"])
 def test_word_source_is_silent_off_the_excel_host(host: str) -> None:
     # Word's own model resolves the members; an unmodelled host asserts nothing.
     # Either way the false positive is gone.
     assert _codes(WORD_SOURCE, host=host) == []
 
 
-@pytest.mark.parametrize("host", ["outlook", "visio", "project", "other"])
+@pytest.mark.parametrize("host", ["visio", "project", "other"])
 def test_an_unmodelled_host_reports_nothing_it_cannot_know(host: str) -> None:
     """An empty model is not uniformly quieter, and this is the case that proves it.
 
     Member lookups go silent (no type resolves), but the rules that ask "is this
     bare name legal" would answer no for every host-injected global, turning an
-    Outlook project's own surface into a wall of undeclared-variable findings. A
+    Visio project's own surface into a wall of undeclared-variable findings. A
     named host with no model cannot answer the question, so those rules stay
     silent for the same reason they do on a partial project view.
     """
@@ -132,10 +132,10 @@ def test_the_host_gate_only_silences_the_rules_that_need_the_model() -> None:
     still reports under an unmodelled host."""
     source = "Sub S()\n    Dim x As Long\n    x = 1 / 0\nEnd Sub\n"
     modules = [ModuleInput("Mod1", ModuleSymbolKind.STANDARD, source)]
-    assert [d.code for d in analyze_project(modules, host="outlook")["Mod1"]] == [
+    assert [d.code for d in analyze_project(modules, host="visio")["Mod1"]] == [
         d.code for d in analyze_project(modules)["Mod1"]
     ]
-    assert analyze_project(modules, host="outlook")["Mod1"]
+    assert analyze_project(modules, host="visio")["Mod1"]
 
 
 # -- host isolation --------------------------------------------------------
