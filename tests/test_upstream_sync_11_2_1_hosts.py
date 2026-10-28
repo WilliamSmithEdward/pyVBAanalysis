@@ -548,3 +548,36 @@ def test_document_member_workbook_module_keeps_its_own_and_its_hosts_members() -
     body = "    Dim wb As ThisWorkbook\n    wb.Hello\n    Debug.Print wb.FullName\n    wb.DoesntExist"
     [message] = _caller_findings("excel", "ThisWorkbook", body)
     assert "ThisWorkbook.DoesntExist" in message
+
+
+_RENAMED_CALLER = (
+    "Option Explicit\n"
+    "Public Sub T()\n"
+    "    Dim w As BookCode\n"
+    "    Set w = Application.ActiveWorkbook\n"
+    "    Dim s As Sheet1\n"
+    "    Set s = Application.ActiveWorkbook\n"
+    "End Sub\n"
+)
+
+
+@pytest.mark.parametrize("document_type, lines", [("workbook", [6]), (None, [4, 6])])
+def test_a_renamed_workbook_module_variable_takes_a_workbook(
+    document_type: str | None, lines: list[int]
+) -> None:
+    # f6575c3b, typeInference: the document type comes before the code name.
+    modules = [
+        ("Module1", ModuleSymbolKind.STANDARD, _RENAMED_CALLER, None),
+        ("BookCode", ModuleSymbolKind.DOCUMENT, "", document_type),
+        ("Sheet1", ModuleSymbolKind.DOCUMENT, "", None),
+    ]
+    index = ProjectIndex()
+    for name, kind, text, doc_type in modules:
+        index.set_module(ModuleInput(name, kind, text, document_type=doc_type))
+    opts = analyze_module_options_for(index, "Module1", ModuleSymbolKind.STANDARD)
+    found = [
+        _RENAMED_CALLER.count("\n", 0, d.span.start) + 1
+        for d in analyze_module(_RENAMED_CALLER, opts)
+        if d.code == "assignment-object-type-mismatch"
+    ]
+    assert found == lines

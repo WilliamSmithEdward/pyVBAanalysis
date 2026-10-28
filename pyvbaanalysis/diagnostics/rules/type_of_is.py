@@ -307,7 +307,8 @@ _PROJECT_DOCUMENT_HOST_TYPES_CACHE = IdentityLru()
 def _project_document_host_types(member_ctx: MemberCompletionContext) -> dict[str, str]:
     """Each document module's host class, lowercased and qualified
     (`excel.workbook` for ThisWorkbook): its designer's class where the workbook
-    gave one, otherwise the class its code name implies."""
+    gave one, otherwise the class its document type or, failing that, its code
+    name implies."""
     members = member_ctx.project_class_members
     cached = _PROJECT_DOCUMENT_HOST_TYPES_CACHE.get(member_ctx, members)
     if cached is not None:
@@ -316,7 +317,9 @@ def _project_document_host_types(member_ctx: MemberCompletionContext) -> dict[st
     for candidate in members or []:
         if candidate.kind != "document":
             continue
-        document_type = event_handler_document_type_for_context(candidate.name, ModuleSymbolKind.DOCUMENT, None)
+        document_type = event_handler_document_type_for_context(
+            candidate.name, ModuleSymbolKind.DOCUMENT, candidate.document_type
+        )
         host_type = candidate.designer_class if candidate.designer_class is not None else (
             "Excel.Workbook" if document_type == "workbook"
             else "Excel.Chart" if document_type == "chart"
