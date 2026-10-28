@@ -13,6 +13,7 @@ import unicodedata
 from collections.abc import Sequence
 from typing import Literal, Protocol
 
+from ..identity_cache import IdentityLru
 from .token_kinds import TokenKind, VbaToken
 from .tokenize import tokenize, tokenize_cached
 
@@ -378,3 +379,57 @@ def top_level_equals_index(tokens: Sequence[VbaToken]) -> int:
         elif raw == "=" and depth == 0:
             return i
     return -1
+
+
+_REM_COMMENT_RE = re.compile(r"^rem\b", re.IGNORECASE | re.ASCII)
+_REM_RE = re.compile(r"rem", re.IGNORECASE)
+
+
+def directive_rem(tokens: Sequence[VbaToken], hash_index: int) -> VbaToken | None:
+    """The `Rem` on the compiler-directive statement whose `#` is
+    ``tokens[hash_index]``: the word itself (it stays one after `Then`) or the
+    comment the lexer starts with it, but not a member name (`x.Rem`). The VBE
+    does not read Rem as a comment on a directive line: an #If, #ElseIf, #Else
+    or #End If line holding one is no directive at all, and a #Const line
+    holding one is a syntax error (XLIDE issue #1321). The scan stops at the
+    statement's newline or colon, and an apostrophe comment ends it."""
+    for i in range(hash_index + 1, len(tokens)):
+        tok = tokens[i]
+        if tok.kind is TokenKind.NEWLINE or tok.kind is TokenKind.COLON:
+            return None
+        if tok.kind is TokenKind.COMMENT:
+            return tok if _REM_COMMENT_RE.match(tok.raw_text) else None
+        # `x.Rem` and `x!Rem` name a member: that line is still a directive.
+        if token_word(tok) == "rem" and tokens[i - 1].raw_text not in (".", "!"):
+            return tok
+    return None
+
+
+_BLOCK_DIRECTIVE_WORDS = frozenset({"if", "elseif", "else", "end", "endif"})
+_NO_STARTS: frozenset[int] = frozenset()
+# One scan per token array: the parser and malformed-statement each ask, and
+# malformed-statement asks once per line.
+_rem_directive_starts_by_tokens = IdentityLru()
+
+
+def rem_block_directive_starts(source: str) -> frozenset[int]:
+    """The start offsets of the `#` of every #If, #ElseIf, #Else or #End If
+    line holding a `Rem`, which the VBE does not read as that directive (XLIDE
+    issue #1321). Only a `#` that starts its physical line counts (the token
+    before it is a newline: a continued line has none)."""
+    if _REM_RE.search(source) is None:
+        return _NO_STARTS
+    tokens = tokenize_cached(source)
+    cached: frozenset[int] | None = _rem_directive_starts_by_tokens.get(tokens)
+    if cached is not None:
+        return cached
+    starts = frozenset(
+        tokens[i].start
+        for i in range(len(tokens))
+        if tokens[i].kind is TokenKind.DIRECTIVE
+        and (i == 0 or tokens[i - 1].kind is TokenKind.NEWLINE)
+        and token_word(tokens[i + 1] if i + 1 < len(tokens) else None) in _BLOCK_DIRECTIVE_WORDS
+        and directive_rem(tokens, i) is not None
+    )
+    _rem_directive_starts_by_tokens.put(starts, tokens)
+    return starts

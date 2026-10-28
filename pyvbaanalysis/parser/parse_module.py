@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 from ..lexer.token_helpers import (
     match_paren_from,
+    rem_block_directive_starts,
     split_top_level_token_groups,
     token_word,
     tokens_without_leading_line_number,
@@ -225,8 +226,19 @@ class _Parser:
     # (XLIDE issue #130): `End If` written in both arms closes one block, and
     # `If ... Then` written in both arms opens one.
     _directive_chains: list[_DirectiveChain]
+    # The #If, #ElseIf, #Else and #End If lines holding a Rem (XLIDE issue
+    # #1321), found once.
+    _rem_directive_starts: frozenset[int] | None
 
-    __slots__ = ("_source", "_cursor", "_diagnostics", "_open_stack", "_pending_next", "_directive_chains")
+    __slots__ = (
+        "_source",
+        "_cursor",
+        "_diagnostics",
+        "_open_stack",
+        "_pending_next",
+        "_directive_chains",
+        "_rem_directive_starts",
+    )
 
     def __init__(self, source: str, tokens: Sequence[VbaToken]) -> None:
         self._source = source
@@ -235,6 +247,7 @@ class _Parser:
         self._open_stack = []
         self._pending_next = None
         self._directive_chains = []
+        self._rem_directive_starts = None
 
     def parse(self) -> ModuleNode:
         members: list[ModuleMember] = []
@@ -463,7 +476,13 @@ class _Parser:
     def _parse_conditional_directive_node(
         self, stmt: LogicalStatement, tokens: Sequence[VbaToken]
     ) -> ConditionalDirectiveNode:
-        directive_word = token_word(_at(tokens, 1))
+        # An #If, #ElseIf, #Else or #End If line holding a Rem is no directive
+        # to the VBE (XLIDE issue #1321): it opens, continues and closes nothing.
+        if self._rem_directive_starts is None:
+            self._rem_directive_starts = rem_block_directive_starts(self._source)
+        directive_word = (
+            "" if stmt.start in self._rem_directive_starts else token_word(_at(tokens, 1))
+        )
         span = Span(stmt.start, stmt.end)
         if directive_word == "const":
             name_token = _at(tokens, 2)

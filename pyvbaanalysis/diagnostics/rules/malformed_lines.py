@@ -22,6 +22,17 @@ Measured in Excel 16.0 (build 20326, 2026-09-30) with a full compile.
 - statement-outside-procedure: a lone `:` after a procedure -> "Only
     comments may appear after End Sub, End Function, or End Property". It
     compiles above the first procedure.
+- malformed-statement, XLIDE issue #1321 (Excel 16.0, 2026-10-12): `Rem` on
+    a directive line, which the VBE does not read as a comment there.
+    `#If Win64 Then Rem note`, `#If True Rem note Then`, `#Else Rem note`
+    and `#End If Rem note` are no directives at all: a later #Else has no
+    #If, an #If is left open, and in a compiled arm the line is a "Syntax
+    error". `#Const A = True Rem note` -> "Expected: end of statement",
+    `#Const A = Rem note` -> "Expected: expression", `#Const Rem = 1` ->
+    "Expected: identifier". So is a reserved word as the name, as
+    `#Const Empty = 1`, `#Const Debug = 1` or `#Const String = 1`, while
+    `#Const Error = 1` and `#Const Win64 = 1` compile: the words are
+    is_reserved_identifier's, all 30 measured.
 
 None of it is judged in an inactive #If branch, which the VBE does not
 parse.
@@ -36,7 +47,12 @@ from typing import Literal, Protocol
 
 from ...conditional import ConditionalActivityTracker
 from ...js_compat import js_trim
-from ...lexer.token_helpers import first_token_at_or_after
+from ...lexer.keyword_table import is_reserved_identifier
+from ...lexer.token_helpers import (
+    directive_rem,
+    first_token_at_or_after,
+    rem_block_directive_starts,
+)
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import EnumNode, ModuleNode, ProcedureNode, Span, VariableGroupNode
@@ -126,6 +142,8 @@ def check_malformed_lines(
                     f"#Const are. This is a VBE compile error: {error}.",
                     Span(tok.start, word.end) if word is not None else span,
                 )
+            elif not _check_const_name(toks, i, push):
+                _check_directive_rem(source, toks, i, push)
         elif (
             tok.kind is TokenKind.BRACKETED_IDENTIFIER
             and not tok.raw_text.endswith("]")
@@ -711,3 +729,73 @@ def _check_enum_lines(
             "with = and a value if it has one. This is a VBE compile error: Invalid inside Enum.",
             Span(line.span.start + nxt.start, line.span.start + nxt.end),
         )
+
+
+_REM_DIRECTIVE_EFFECT: Mapping[str, str] = {
+    "if": "opens no #If block, so the #Else, #ElseIf or #End If after it has no #If",
+    "elseif": "starts no new arm: it belongs to the arm above it",
+    "else": "starts no new arm: it belongs to the arm above it",
+    "end": "closes no #If block",
+    "endif": "closes no #If block",
+}
+
+
+def _check_directive_rem(
+    source: str, toks: Sequence[VbaToken], hash_index: int, push: PushFn
+) -> None:
+    """`Rem` on a directive line: the VBE does not read it as a comment there
+    (XLIDE issue #1321)."""
+    rem = directive_rem(toks, hash_index)
+    if rem is None:
+        return
+    keyword = token_text(_at(toks, hash_index + 1))
+    span = Span(toks[hash_index].start, rem.start + len("Rem"))
+    effect = _REM_DIRECTIVE_EFFECT.get(keyword)
+    if effect is not None:
+        # The lines the parser reads as no directive; one after a colon is
+        # directive-trailing-statement's.
+        if toks[hash_index].start in rem_block_directive_starts(source):
+            push(
+                "malformedStatement",
+                "Rem does not start a comment on a compiler-directive line, so the VBE does not "
+                f"read this line as a directive at all: it {effect}. Start the comment with ' "
+                "instead. This is a VBE compile error.",
+                span,
+            )
+        return
+    at = toks.index(rem, hash_index)
+    if at == hash_index + 2:
+        error = "Expected: identifier"
+    else:
+        before = _at(toks, at - 1)
+        error = (
+            "Expected: expression"
+            if before is not None and before.raw_text == "="
+            else "Expected: end of statement"
+        )
+    push(
+        "malformedStatement",
+        "Rem does not start a comment on a #Const line: the VBE reads it as a word. Start the "
+        f"comment with ' instead. This is a VBE compile error: {error}.",
+        span,
+    )
+
+
+def _check_const_name(toks: Sequence[VbaToken], hash_index: int, push: PushFn) -> bool:
+    """`#Const Empty = 1`: a reserved word cannot name a #Const (XLIDE issue
+    #1321). True when reported, which is then the line's one error."""
+    name = _at(toks, hash_index + 2)
+    if (
+        token_text(_at(toks, hash_index + 1)) != "const"
+        or name is None
+        or name.kind is not TokenKind.KEYWORD
+        or not is_reserved_identifier(name.raw_text)
+    ):
+        return False
+    push(
+        "malformedStatement",
+        f"'{name.raw_text}' is a reserved word, so it cannot name a #Const. This is a VBE "
+        "compile error: Expected: identifier.",
+        Span(name.start, name.end),
+    )
+    return True
