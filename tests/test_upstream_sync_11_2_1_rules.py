@@ -142,3 +142,49 @@ def test_shadowed_err_is_not_the_runtime_object() -> None:
 ])
 def test_host_scalar_setter_in_with_and_single_line_if(line: str) -> None:
     assert len(_hits(_runtime_source(line), "assignment-type-mismatch")) == 1
+
+
+# -- e937c742, 31ff586f: reserved words as Type member names -----------------
+
+_RESERVED_MEMBER_WORDS = [
+    "Next", "Loop", "Wend", "For", "Do", "With", "Sub", "Function", "Select", "If",
+    "End", "Else", "Case", "Set", "Dim", "Private", "Len", "True", "Date", "String",
+    "Long", "Variant", "Local", "Attribute", "New",
+]
+
+
+def _reserved_member_type(words: list[str]) -> str:
+    return (
+        "Private Type Rec\n"
+        + "".join(f"    {word} As Long\n" for word in words)
+        + "    While _\n        As Long\n"
+        + "    Loop As Long ' comment\n"
+        + "    Next As [Long]\n"
+        + "    Next As New Collection\n"
+        + "    With As New [Collection]\n"
+        + "#If Win64 Then\n    Next As LongLong\n#Else\n    Next As Long\n#End If\n"
+        + "    Type As [Long]\n"
+        + "    Type(1 To 2) As Long\n"
+        + "End Type\n"
+    )
+
+
+def test_reserved_word_type_member_with_as_clause_is_accepted() -> None:
+    findings = analyze_module(_reserved_member_type(_RESERVED_MEMBER_WORDS))
+    for code in ("invalid-declaration-name", "unexpected-declaration-token", "type-member-without-type"):
+        assert [d for d in findings if d.code == code] == []
+
+
+def test_reserved_array_suffixed_and_incomplete_type_members_still_rejected() -> None:
+    source = (
+        "Private Type Rec\n    For(1 To 3) As Long\n    With As\n    Loop As ' comment\n"
+        "    Next&\n    Next& As Long\n    Set As New\n    Set As New []\n    Set As []\n"
+        "    Set As 123\n    Me As Long\n    Next\nEnd Type\n"
+    )
+    hits = _hits(source, "invalid-declaration-name")
+    assert [source[d.span.start:d.span.end] for d in hits] == [
+        "For", "With", "Loop", "Next", "Next", "Set", "Set", "Set", "Set", "Me", "Next",
+    ]
+    enum_source = "Private Enum Mode\n    Next\n    Loop = 2\nEnd Enum\n"
+    hits = _hits(enum_source, "invalid-declaration-name")
+    assert [enum_source[d.span.start:d.span.end] for d in hits] == ["Next", "Loop"]

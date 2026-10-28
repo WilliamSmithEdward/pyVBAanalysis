@@ -14,6 +14,7 @@ non-constant Const/Enum values, and parameter order.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -31,7 +32,7 @@ from ...conditional import (
     collect_conditional_directives,
 )
 from ...host.library_type_names import library_type_names
-from ...js_compat import js_trim
+from ...js_compat import JS_WHITESPACE, js_trim
 from ...lexer.keyword_table import OPERATOR_IDENTIFIERS, is_reserved_identifier
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize
@@ -459,6 +460,27 @@ def check_module_name(
     )
 
 
+_NEW_PREFIX_RE = re.compile(f"new[{JS_WHITESPACE}]+", re.IGNORECASE)
+_BARE_NEW_RE = re.compile(f"new(?:[{JS_WHITESPACE}]|$)", re.IGNORECASE)
+
+
+def _names_as_type(as_type: str | None) -> bool:
+    """True when the text after `As` names a type: `Long`, `[Long]`, `New Collection`.
+    (XLIDE's `/^(?:New\\s+|(?!New(?:\\s|$)))(?:[\\p{L}_]|\\[[^\\]])/iu`, by category.)"""
+    text = as_type or ""
+    new_prefix = _NEW_PREFIX_RE.match(text)
+    if new_prefix is not None:
+        text = text[new_prefix.end():]
+    elif _BARE_NEW_RE.match(text) is not None:
+        return False
+    if not text:
+        return False
+    first = text[0]
+    if first == "_" or unicodedata.category(first).startswith("L"):
+        return True
+    return first == "[" and len(text) > 1 and text[1] != "]"
+
+
 def check_reserved_declaration_names(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
     def report(kind: str, hit: NameTokenHit | None) -> None:
         if hit is None or hit.bracketed or not is_reserved_identifier(hit.name):
@@ -481,6 +503,19 @@ def check_reserved_declaration_names(source: str, mod: ModuleNode, activity: Con
         elif isinstance(member, TypeNode):
             report("user-defined type", _type_or_enum_name_hit(source, member.span, "type"))
             for field_node in member.fields:
+                # A reserved word names a Type member when an As clause with a type
+                # follows: `Next As Long`, `Long As Long`, `Loop As New Collection`
+                # (VBE oracle reserved_member_name_*). An array clause, a type
+                # suffix or an As with no type is still a syntax error, and so is
+                # `Me As Long` (Expected: =).
+                if (
+                    field_node.name.lower() != "me"
+                    and field_node.has_as_clause
+                    and not field_node.type_suffix
+                    and not field_node.is_array
+                    and _names_as_type(field_node.as_type)
+                ):
+                    continue
                 report("type field", declaration_name_hit(source, field_node.span, field_node.name))
         elif isinstance(member, EnumNode):
             report("enum", _type_or_enum_name_hit(source, member.span, "enum"))
