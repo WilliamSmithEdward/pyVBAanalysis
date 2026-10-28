@@ -474,7 +474,8 @@ _HOST_PREFIXES = ("", "word_", "powerpoint_", "access_")
 def _case_errors(case_id: str) -> list[str]:
     """Each error finding as `code: spanned text`, analyzed in the case's host."""
     case = CASES[case_id]
-    host = next((h.rstrip("_") for h in _HOST_PREFIXES[1:] if case_id.startswith(f"issue1411_{h}")), "excel")
+    issue = case_id.split("_", 1)[0]
+    host = next((h.rstrip("_") for h in _HOST_PREFIXES[1:] if case_id.startswith(f"{issue}_{h}")), "excel")
     index = ProjectIndex()
     for module in case.modules:
         index.set_module(ModuleInput(module.name, _ORACLE_KIND.get(module.module_type, ModuleSymbolKind.STANDARD), module.source))
@@ -499,8 +500,8 @@ _ORACLE_KIND = {
 }
 
 
-def _each_host(names: list[str], phase: str) -> list[str]:
-    return [f"issue1411_{host}{name}_{phase}" for name in names for host in _HOST_PREFIXES]
+def _each_host(names: list[str], phase: str, issue: str = "issue1411") -> list[str]:
+    return [f"{issue}_{host}{name}_{phase}" for name in names for host in _HOST_PREFIXES]
 
 
 _SHADOWED_1411 = [
@@ -604,3 +605,46 @@ def test_is_and_typeof_accept_object_operands(case_id: str) -> None:
 @pytest.mark.parametrize("case_id", _each_host(["g_is_deflng_shadowed_qualifier"], "compile"))
 def test_is_leaves_a_late_bound_call_alone(case_id: str) -> None:
     assert [f for f in _case_errors(case_id) if f.startswith("is-operator-non-object:")] == []
+
+
+# -- ce1cc692: which error a call gets (the oracle cases issue1414_*) ----------
+
+def _each_1414(names: list[str]) -> list[str]:
+    return _each_host(names, "compile", "issue1414")
+
+
+def _expect_only_codes(case_id: str, expected: str, codes: list[str]) -> None:
+    assert CASES[case_id].expected == expected
+    assert [finding.split(":", 1)[0] for finding in _case_errors(case_id)] == codes
+
+
+_STATEMENTS_1414 = [
+    "savesetting", "deletesetting", "sendkeys", "chdir", "chdrive", "mkdir", "rmdir", "kill", "setattr",
+    "filecopy", "appactivate",
+]
+_CALLS_1414 = ["clng_none", "cint_none", "left_dollar_none", "len_none", "clng_extra", "instr_five"]
+
+
+@pytest.mark.parametrize("case_id, expected, codes", [
+    *[(c, "rejected", ["assignment-to-procedure-name"]) for c in _each_1414(
+        ["t_paren", "t_let", "t_qualified", "t_let_qualified", "t_with_argument", "t_optional", "t_bare"]
+    )],
+    *[(c, "rejected", ["argument-count"]) for c in _each_1414(["t_variant_missing_argument"])],
+    *[(c, "accepted", []) for c in _each_1414(["t_variant_with_argument"])],
+    *[(c, "rejected", ["argument-count"]) for c in _each_1414(
+        [f"q_{form}_{call}" for call in _CALLS_1414 for form in ("bare", "vba")]
+    )],
+    *[(c, "accepted", []) for c in _each_1414(
+        ["q_vba_clng_ok", "q_vba_left_dollar_ok", "q_vba_len_ok", "q_vba_instr_four_ok"]
+    )],
+    *[(c, "rejected", ["argument-count"]) for c in _each_1414(
+        [f"s2_{name}_{form}" for name in _STATEMENTS_1414 for form in ("missing", "extra")]
+        + ["s2_savesetting_duplicate_named", "s_appactivate_omitted_title", "s_appactivate_duplicate_named",
+           "s_filecopy_omitted_source"]
+    )],
+    *[(c, "accepted", []) for c in _each_1414(
+        [f"s2_{name}_valid" for name in _STATEMENTS_1414] + ["s_appactivate_ok", "s_appactivate_named_ok", "s_filecopy_ok"]
+    )],
+])
+def test_which_error_a_call_gets(case_id: str, expected: str, codes: list[str]) -> None:
+    _expect_only_codes(case_id, expected, codes)

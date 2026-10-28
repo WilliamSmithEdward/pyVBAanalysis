@@ -93,6 +93,7 @@ from ..call_extraction import (
     InferredArgumentType,
     extract_call,
     extract_qualified_call,
+    module_qualifier_shadowed,
     CallableParamType,
     split_arg_slots,
     validate_arity,
@@ -218,6 +219,9 @@ def check_const_assignment(
             if hit is None:
                 hit = set_assignment_target(source, span)
             if hit is None:
+                call = scalar_function_call_target(source, span, symbols, member, project_visible_symbols)
+                if call is not None:
+                    push("assignmentToProcedureName", call[1], call[0])
                 return
             name, name_span, _value = hit
             binding = source_identifier_binding(
@@ -269,6 +273,69 @@ def _read_only_project_default(type_name: str, member_ctx: MemberCompletionConte
         and not member.let_accessor
         and member.writable is not True
         else None
+    )
+
+
+def scalar_function_call_target(
+    source: str,
+    span: Span,
+    symbols: ModuleSymbols,
+    member: ProcedureNode,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+) -> tuple[Span, str] | None:
+    """`F() = 2`, `Let F(1) = 2`, `Module2.F() = 2`: a call to a Function that
+    returns a type of VBA's own, on the left of an assignment, as (name span,
+    message). That is the error, "Function call on left-hand side of assignment
+    must return Variant or Object", whether the call's arguments would fit or
+    not; a Variant result is assignable, and its arguments are then what is
+    wrong (XLIDE issue #1414, measured in Excel, Word, PowerPoint and Access
+    16.0). A module name a variable takes is that variable."""
+    toks = statement_tokens(source, span)
+    i = first_executable_token_index(toks)
+    if token_text(_at(toks, i)) == "let":
+        i += 1
+    qualifier: str | None = None
+    if token_name(_at(toks, i)) and _raw_at(toks, i + 1) == "." and token_name(_at(toks, i + 2)):
+        qualifier = token_name(_at(toks, i))
+        i += 2
+    name = token_name(_at(toks, i))
+    if not name or _raw_at(toks, i + 1) != "(":
+        return None
+    close = match_paren_from(toks, i + 1)
+    if close < 0 or _raw_at(toks, close + 1) != "=":
+        return None
+    proc_sym = procedure_symbol_for(symbols, member)
+    lower = name.lower()
+    definitions: Sequence[VbaSymbol]
+    if qualifier:
+        if module_qualifier_shadowed(qualifier, source_name_scope_for(symbols, member, project_visible_symbols)):
+            return None
+        module = qualifier.lower()
+        definitions = (
+            [child for child in symbols.root.children or [] if child.name.lower() == lower]
+            if module == symbols.module_name.lower()
+            else [
+                symbol
+                for symbol in project_visible_symbols or []
+                if symbol.module_name.lower() == module and symbol.name.lower() == lower
+            ]
+        )
+    else:
+        binding = source_identifier_binding(
+            symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.ASSIGNMENT_TARGET
+        )
+        if binding.scope in (BareIdentifierResolutionScope.AMBIGUOUS, BareIdentifierResolutionScope.UNRESOLVED):
+            return None
+        definitions = binding.definitions
+    # A Sub given arguments on the left was not measured.
+    if len(definitions) != 1 or definitions[0].kind is VbaSymbolKind.SUB:
+        return None
+    target = _procedure_assignment_target(definitions, proc_sym)
+    if target is None:
+        return None
+    return (
+        Span(span.start + toks[i].start, span.start + toks[i].end),
+        target(f"{qualifier}.{name}" if qualifier else name),
     )
 
 

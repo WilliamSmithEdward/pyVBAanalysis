@@ -127,6 +127,8 @@ class CallArguments:
     slots: list[list[VbaToken]]
     slice_start: int
     qualifier: str | None = None
+    # `VBA.Len(...)`: the qualifier is VBA's own library, and only its function is meant.
+    vba_library: bool = False
     lookup_key: str | None = None
     # None for a call inside an expression: only a statement's call sets it.
     explicit_call: bool | None = None
@@ -307,6 +309,34 @@ def extract_call(source: str, span: Span) -> CallArguments | None:
         slots=split.slots,
         slot_spans=split.spans,
         slice_start=slice_start,
+    )
+
+
+_LINE_LABEL_COLON_RE = re.compile(r"[ \t]*:")
+
+
+def argument_list_statement_call(source: str, span: Span, names: AbstractSet[str]) -> CallArguments | None:
+    """`Kill "a", "b"`: one of the statements the call extractor leaves to rules of
+    their own, read as the call it also is, for its argument count."""
+    toks = statement_tokens(source, span)
+    at = first_executable_token_index(toks)
+    name = token_name(toks[at]) if at < len(toks) else None
+    following = toks[at + 1].raw_text if at + 1 < len(toks) else None
+    if not name or name.lower() not in names or following in ("=", ".", "(", ":"):
+        return None
+    # `Kill:` is a line label of that name (XLIDE issue #272); the colon ends the
+    # statement's span, so look past it in the source.
+    name_end = span.start + toks[at].end
+    if _LINE_LABEL_COLON_RE.match(source[name_end : name_end + 64]) is not None:
+        return None
+    arg_toks = toks[at + 1 :]
+    split = empty_arg_split() if not arg_toks else split_arg_slots(arg_toks, span.start)
+    return CallArguments(
+        name=name,
+        name_span=Span(span.start + toks[at].start, span.start + toks[at].end),
+        slots=split.slots,
+        slot_spans=split.spans,
+        slice_start=span.start,
     )
 
 

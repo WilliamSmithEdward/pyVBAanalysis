@@ -29,6 +29,7 @@ from ...types.type_names import normalize_type
 from ..call_extraction import (
     CallableTypeSignature,
     CallArguments,
+    argument_list_statement_call,
     extract_call,
     extract_qualified_call,
     validate_arity,
@@ -55,6 +56,12 @@ from ..walker import (
     statement_and_branch_spans,
     token_name,
 )
+from .assignments import scalar_function_call_target
+
+# The statements the call extractor leaves to the file rules, whose argument
+# count is still checked here (XLIDE issue #1414, measured in Excel, Word,
+# PowerPoint and Access 16.0).
+_OWN_RULE_STATEMENTS = frozenset({"chdir", "chdrive", "kill", "mkdir", "rmdir"})
 
 
 def check_argument_count(
@@ -77,8 +84,16 @@ def check_argument_count(
             for span in statement_and_branch_spans(stmt):
                 _check_unmodelled_arity(source, span, env, source_names, member_ctx, push)
             setter_names = {setter.name_span.start for span in statement_and_branch_spans(stmt) if (setter := source_setter_assignment(source, span, symbols, procedure_symbol_for(symbols, member), project_visible_symbols, member_ctx)) is not None}
+            # `F() = 2` for a Function returning Long is the assignment's error,
+            # not its arguments' (XLIDE issue #1414).
+            for span in statement_and_branch_spans(stmt):
+                target = scalar_function_call_target(source, span, symbols, member, project_visible_symbols)
+                if target is not None:
+                    setter_names.add(target[0].start)
             project_qualified_call_spans: set[tuple[int, int]] = set()
-            statement_call = extract_call(source, stmt.span)
+            statement_call = extract_call(source, stmt.span) or argument_list_statement_call(
+                source, stmt.span, _OWN_RULE_STATEMENTS
+            )
             qualified_statement_call = (
                 None if statement_call else extract_qualified_call(source, stmt.span, module_signatures, source_names)
             )
@@ -88,7 +103,9 @@ def check_argument_count(
                     source, effective, same_module_signatures, project_signatures, source_names, push
                 )
                 _record_project_qualified_call_span(effective, project_qualified_call_spans)
-            for call in expression_calls(source, stmt.span, module_signatures, source_names):
+            for call in expression_calls(
+                source, stmt.span, module_signatures, source_names, include_vba_library=True
+            ):
                 if call.name_span.start in setter_names or _same_call_target(call, effective):
                     continue
                 _validate_callable_arity(
@@ -112,8 +129,10 @@ def check_argument_count(
             # scans above already cover the whole line, and running them again would
             # report the same call twice.
             for branch in statement_and_branch_spans(stmt)[1:]:
-                branch_call = extract_call(source, branch) or extract_qualified_call(
-                    source, branch, module_signatures, source_names
+                branch_call = (
+                    extract_call(source, branch)
+                    or argument_list_statement_call(source, branch, _OWN_RULE_STATEMENTS)
+                    or extract_qualified_call(source, branch, module_signatures, source_names)
                 )
                 if (
                     branch_call is not None
@@ -291,6 +310,14 @@ def _validate_callable_arity(
     push: PushFn,
 ) -> None:
     lower = call.lookup_key or call.name.lower()
+    # `VBA.CLng()`: VBA's function, measured to take the arguments its bare
+    # name does in Excel, Word, PowerPoint and Access 16.0 (XLIDE issue #1414).
+    if call.vba_library:
+        runtime = resolve_runtime_function(call.name)
+        runtime_signature = runtime_arity_signature(runtime) if runtime is not None else None
+        if runtime_signature is not None:
+            validate_arity(source, runtime_signature, call, push)
+        return
     if not call.qualifier and bare_callable_source_shadowed(call.name, source_names):
         return
     candidates = None if call.qualifier else same_module_signatures.get(call.name.lower())
