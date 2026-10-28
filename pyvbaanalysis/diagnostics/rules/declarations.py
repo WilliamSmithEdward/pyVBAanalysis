@@ -2326,9 +2326,26 @@ def check_module_declarations_after_procedures(source: str, mod: ModuleNode, act
         )
 
 
+_PROCEDURE_CLOSER_RE = re.compile(r"^\s*End\s+(?:Sub|Function|Property)(?![A-Za-z0-9_])", re.IGNORECASE)
+
+
 def check_module_level_statements_outside_procedures(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
-    for member in active_module_members(mod, activity):
-        if not isinstance(member, StatementNode):
+    active = {id(member) for member in active_module_members(mod, activity)}
+    procedure_end: Span | None = None
+    for member in mod.members:
+        if isinstance(member, ProcedureNode):
+            procedure_end = Span(max(member.span.start, member.span.end - 1), member.span.end)
+        if not isinstance(member, StatementNode) or id(member) not in active:
+            continue
+        # `End Function` in both arms of an #If: the procedure ended at the
+        # first one, in another arm, and this one closes it in the build that
+        # compiles this arm (XLIDE issue #1315, measured in Excel 16.0).
+        if (
+            procedure_end is not None
+            and activity is not None
+            and activity.mutually_exclusive(procedure_end, member.span)
+            and _PROCEDURE_CLOSER_RE.match(source[member.span.start:member.span.end])
+        ):
             continue
         toks = statement_tokens_after_leading_label(source, member.span)
         first = toks[0] if toks else None

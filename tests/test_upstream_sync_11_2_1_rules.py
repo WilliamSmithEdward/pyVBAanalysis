@@ -230,3 +230,21 @@ def test_type_members_named_as_and_implements_implement_nothing() -> None:
     assert index.implemented_interface_names() == frozenset(
         name.lower() for name in ("As_Foo", "Asx", _AS_E, _AS_BETA)
     )
+
+
+# -- b7c597c3: a procedure closer in each arm of an #If ----------------------
+
+@pytest.mark.parametrize("source", [
+    "Option Explicit\n#Const FLAG = 0\nSub T()\n#If FLAG Then\nEnd Sub\n#Else\nEnd Sub\n#End If\n",
+    "Option Explicit\n#Const FLAG = 0\nFunction Main() As Variant\n    Main = 5\n"
+    "#If FLAG Then\nEnd Function\n#Else\nEnd Function\n#End If\n",
+    "Option Explicit\n#Const FLAG = 1\nFunction Main() As Variant\n    Main = 5\n"
+    "#If FLAG Then\nEnd Function\n#Else\nEnd Function\n#End If\n",
+])
+def test_procedure_closer_in_each_arm_of_an_if(source: str) -> None:
+    assert [d for d in analyze_module(source) if d.severity == "error"] == []
+
+
+def test_other_statement_in_the_other_arm_is_still_outside_a_procedure() -> None:
+    source = "Option Explicit\n#Const FLAG = 0\nSub T()\n#If FLAG Then\nEnd Sub\n#Else\nx = 1\n#End If\n"
+    assert len(_hits(source, "statement-outside-procedure")) == 1
