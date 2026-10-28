@@ -735,6 +735,28 @@
     "specReference": "MS-VBAL 3.4 conditional compilation; VBE \"Invalid use of Null\" (issue #208, Excel 16.0)",
     "confidence": "high"
   },
+  "directiveTypeMismatch": {
+    "code": "directive-type-mismatch",
+    "title": "Compiler directive with a string VBA cannot convert",
+    "defaultSeverity": "error",
+    "category": "semantic",
+    "vbeCompileEquivalent": true,
+    "diagnosticKind": "compile-error",
+    "source": "XLIDE",
+    "specReference": "MS-VBAL 3.4 conditional compilation; VBE \"Type mismatch\" (issue #1339, Excel 16.0)",
+    "confidence": "high"
+  },
+  "nothingDirectiveCondition": {
+    "code": "nothing-directive-condition",
+    "title": "#If condition is Nothing",
+    "defaultSeverity": "error",
+    "category": "semantic",
+    "vbeCompileEquivalent": true,
+    "diagnosticKind": "compile-error",
+    "source": "XLIDE",
+    "specReference": "MS-VBAL 3.4 conditional compilation; VBE \"Invalid use of object\" (issue #1351, Excel 16.0)",
+    "confidence": "high"
+  },
   "directiveTrailingStatement": {
     "code": "directive-trailing-statement",
     "title": "Code after a compiler directive on its line",
@@ -1306,6 +1328,17 @@
     "specReference": "MS-VBAL 5.2.3.1 (array declaration bounds)",
     "confidence": "high"
   },
+  "arrayBoundOverflow": {
+    "code": "array-bound-overflow",
+    "title": "Dim bound a Long cannot hold",
+    "defaultSeverity": "error",
+    "category": "semantic",
+    "vbeCompileEquivalent": true,
+    "diagnosticKind": "compile-error",
+    "source": "XLIDE",
+    "specReference": "MS-VBAL 5.2.3.1 (array declaration bounds); VBE compile error: Overflow (issue #1412, Excel, Word, PowerPoint and Access 16.0)",
+    "confidence": "high"
+  },
   "arrayTemporarilyLocked": {
     "code": "array-temporarily-locked",
     "title": "Array is locked while it is resized or erased",
@@ -1528,6 +1561,17 @@
     "diagnosticKind": "compile-error",
     "source": "XLIDE",
     "specReference": "MS-VBAL 3.3.5.2 / 5.2.3.1",
+    "confidence": "high"
+  },
+  "memberExistsInBaseClass": {
+    "code": "member-exists-in-base-class",
+    "title": "Declaration takes a name the module's host class already has",
+    "defaultSeverity": "error",
+    "category": "declaration",
+    "vbeCompileEquivalent": true,
+    "diagnosticKind": "compile-error",
+    "source": "XLIDE",
+    "specReference": "VBE \"Member already exists in an object module from which this object module derives\" (measured in Excel, Word, PowerPoint and Access 16.0)",
     "confidence": "high"
   },
   "invalidNewTypeName": {
@@ -1935,6 +1979,28 @@
     "diagnosticKind": "compile-error",
     "source": "XLIDE",
     "specReference": "MS-VBAL 5.4.2.3; VBE \"Type mismatch\" (issue #213, Excel 16.0)",
+    "confidence": "high"
+  },
+  "redimBoundArray": {
+    "code": "redim-bound-array",
+    "title": "Array as a ReDim bound",
+    "defaultSeverity": "error",
+    "category": "semantic",
+    "vbeCompileEquivalent": true,
+    "diagnosticKind": "compile-error",
+    "source": "XLIDE",
+    "specReference": "MS-VBAL 5.4.3.3; VBE \"Type mismatch\" (issue #1412, Excel, Word, PowerPoint and Access 16.0)",
+    "confidence": "high"
+  },
+  "forBoundArray": {
+    "code": "for-bound-array",
+    "title": "Array as a For start, end or Step value",
+    "defaultSeverity": "error",
+    "category": "semantic",
+    "vbeCompileEquivalent": true,
+    "diagnosticKind": "compile-error",
+    "source": "XLIDE",
+    "specReference": "MS-VBAL 5.4.2.3; VBE \"Type mismatch\" (issue #1417, Excel, Word, PowerPoint and Access 16.0)",
     "confidence": "high"
   },
   "statementBeforeFirstCase": {
