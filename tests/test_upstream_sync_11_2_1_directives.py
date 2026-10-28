@@ -320,6 +320,84 @@ def test_rem_const_after_colon_is_directive_trailing_statements() -> None:
     assert _malformed(skipped) == []
 
 
+# -- A directive that does not start its logical line (XLIDE issue #1331,
+#    commit bd5eccec) ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        _plain_fn("    x = 1: #If True Then", "    Main = 1", "#End If"),
+        _plain_fn("    x = 1: _", "#If True Then", "    Main = 1", "#End If"),
+        _plain_fn("L1: #If True Then", "    Main = 1", "#End If"),
+        _plain_fn("10 #If True Then", "    Main = 1", "#End If"),
+        _plain_fn("#If True Then", "    Main = 1", "    x = 1: #End If"),
+        _plain_fn("#If True Then", "    Main = 1", "10 #End If"),
+        _plain_fn("#If True Then", "    Main = 1", "    x = 1: #Else", "    Main = 2", "#End If"),
+        _plain_fn("#If True Then", "    Main = 1", "10 #Else", "    Main = 2", "#End If"),
+        _plain_fn("    x = 1: #Const A = 1", "    Main = 1"),
+        _plain_fn("10 #Const A = 1", "    Main = 1"),
+        "#Const B = 1: #If False Then\n#End If\n" + _plain_fn("    Main = 1"),
+    ],
+)
+def test_misplaced_directive_refused_where_compiled(source: str) -> None:
+    assert _errors(source) != []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        _plain_fn("    Main = 1", "    #If True Then", "    Main = 2", "    #End If"),
+        _plain_fn("    Main = 1", "\t#If True Then", "    Main = 2", "\t#End If"),
+        _plain_fn("    Main = 1", " _", "#If True Then", "    Main = 2", "#End If"),
+        _plain_fn("    Main = 1", "#If False Then", "    x = 1: #Else", _ZERO, "#End If"),
+    ],
+)
+def test_misplaced_directive_quiet_where_excel_compiles(source: str) -> None:
+    assert _errors(source) == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Private y As Long: #Const A = 1",
+        "Private y As Long: _\n#Const A = 1",
+        "L1: #Const A = 1",
+        "10 #Const A = 1",
+        "#Const B = 1: #Const A = 1",
+        "#Else: #Const A = 1",
+    ],
+)
+def test_misplaced_const_defines_nothing_even_in_skipped_arm(line: str) -> None:
+    later = _plain_fn("    Main = 1", "#If A = 1 Then", _ZERO, "#End If")
+    assert _errors(f"#If False Then\n{line}\n#End If\n{later}") == []
+
+
+def test_misplaced_directive_reported_once() -> None:
+    def once(source: str) -> list[Diagnostic]:
+        return [
+            d
+            for d in analyze_module(source)
+            if d.code in ("malformed-statement", "directive-trailing-statement")
+        ]
+
+    assert len(once(_plain_fn("    x = 1: #Const A = 1", "    Main = 1"))) == 1
+    assert len(once("#Const B = 1: #Const A = 1\n" + _plain_fn("    Main = 1"))) == 1
+
+
+def test_misplaced_directive_messages() -> None:
+    source = _plain_fn("10 #If True Then", "    Main = 1", "#End If")
+    found = _malformed(source)
+    assert [_span_text(source, d) for d in found] == ["#If"]
+    assert "after a line number" in found[0].message
+    assert found[0].message.endswith("Syntax error.")
+    top = "Private y As Long: #Const A = 1\n" + _plain_fn("    Main = 1")
+    found = _malformed(top)
+    assert [_span_text(top, d) for d in found] == ["#Const"]
+    assert "after a ':'" in found[0].message
+    assert "Expected: line number or label or statement or end of statement" in found[0].message
+
+
 @pytest.mark.parametrize("eol", ["\n", "\r\n", "\r"])
 def test_colon_directive_findings_keep_their_lines(eol: str) -> None:
     source = eol.join(

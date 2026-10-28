@@ -49,8 +49,10 @@ from ...conditional import ConditionalActivityTracker
 from ...js_compat import js_trim
 from ...lexer.keyword_table import is_reserved_identifier
 from ...lexer.token_helpers import (
+    colon_directive_starts,
     directive_rem,
     first_token_at_or_after,
+    misplaced_directive_starts,
     rem_directive_starts,
 )
 from ...lexer.token_kinds import TokenKind, VbaToken
@@ -119,9 +121,28 @@ def check_malformed_lines(
         return not (activity is not None and activity.is_inactive(span))
 
     toks = tokenize_cached(source)
+    misplaced = misplaced_directive_starts(source)
+    colon_lines = colon_directive_starts(source) if len(misplaced) > 0 else misplaced
 
     for i, tok in enumerate(toks):
         span = Span(tok.start, tok.end)
+        if tok.start in misplaced:
+            # After a directive's colon the line is directive-trailing-statement's.
+            if active(span) and _logical_line_start(toks, i) not in colon_lines:
+                where = "a line number" if tok.kind is TokenKind.OPERATOR else "a ':'"
+                error = (
+                    "Expected: line number or label or statement or end of statement"
+                    if place(tok.start) == "top"
+                    else "Syntax error"
+                )
+                push(
+                    "malformedStatement",
+                    f"A compiler directive must start its line: after {where} the VBE reads no "
+                    f"#{toks[i + 1].raw_text} here, so it opens, divides, closes and defines "
+                    f"nothing. This is a VBE compile error: {error}.",
+                    Span(tok.start, toks[i + 1].end),
+                )
+            continue
         if tok.kind is TokenKind.DIRECTIVE and active(span):
             following = toks[i + 1] if i + 1 < len(toks) else None
             word = (
@@ -801,3 +822,12 @@ def _check_const_name(toks: Sequence[VbaToken], hash_index: int, push: PushFn) -
         Span(name.start, name.end),
     )
     return True
+
+
+def _logical_line_start(tokens: Sequence[VbaToken], i: int) -> int:
+    """The start of the first token of the logical line holding ``tokens[i]``:
+    a continuation leaves no newline."""
+    first = i
+    while first > 0 and tokens[first - 1].kind is not TokenKind.NEWLINE:
+        first -= 1
+    return tokens[first].start

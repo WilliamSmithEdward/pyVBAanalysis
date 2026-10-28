@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from ..lexer.token_helpers import (
     colon_directive_starts,
     match_paren_from,
+    misplaced_directive_starts,
     rem_directive_starts,
     split_top_level_token_groups,
     token_word,
@@ -231,6 +232,8 @@ class _Parser:
     _rem_directive_starts: frozenset[int] | None
     # The directive lines a statement colon follows (XLIDE issue #1323), found once.
     _colon_directive_starts: frozenset[int] | None
+    # The directives that do not start their logical line (XLIDE issue #1331), found once.
+    _misplaced_directive_starts: frozenset[int] | None
 
     __slots__ = (
         "_source",
@@ -241,6 +244,7 @@ class _Parser:
         "_directive_chains",
         "_rem_directive_starts",
         "_colon_directive_starts",
+        "_misplaced_directive_starts",
     )
 
     def __init__(self, source: str, tokens: Sequence[VbaToken]) -> None:
@@ -252,6 +256,7 @@ class _Parser:
         self._directive_chains = []
         self._rem_directive_starts = None
         self._colon_directive_starts = None
+        self._misplaced_directive_starts = None
 
     def parse(self) -> ModuleNode:
         members: list[ModuleMember] = []
@@ -484,14 +489,19 @@ class _Parser:
         # #1321): an #If, #ElseIf, #Else or #End If one opens, continues and
         # closes nothing, and a #Const one defines nothing, even in a skipped
         # arm. So is any directive line a statement colon follows (XLIDE issue
-        # #1323).
+        # #1323), and a directive that does not start its logical line (XLIDE
+        # issue #1331).
         if self._rem_directive_starts is None:
             self._rem_directive_starts = rem_directive_starts(self._source)
         if self._colon_directive_starts is None:
             self._colon_directive_starts = colon_directive_starts(self._source)
+        if self._misplaced_directive_starts is None:
+            self._misplaced_directive_starts = misplaced_directive_starts(self._source)
         directive_word = (
             ""
-            if stmt.start in self._rem_directive_starts or stmt.start in self._colon_directive_starts
+            if stmt.start in self._rem_directive_starts
+            or stmt.start in self._colon_directive_starts
+            or stmt.start in self._misplaced_directive_starts
             else token_word(_at(tokens, 1))
         )
         span = Span(stmt.start, stmt.end)

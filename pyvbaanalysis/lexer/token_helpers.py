@@ -475,3 +475,40 @@ def colon_directive_starts(source: str) -> frozenset[int]:
     )
     _colon_directive_starts_by_tokens.put(starts, tokens)
     return starts
+
+
+_misplaced_directive_starts_by_tokens = IdentityLru()
+
+
+def misplaced_directive_starts(source: str) -> frozenset[int]:
+    """The start offsets of the `#` of every #If, #ElseIf, #Else, #End If or
+    #Const that does not start its logical line: after a statement's or a
+    label's colon, another directive's colon, or a line number. The VBE reads
+    a directive only where it starts its logical line, after nothing but
+    blanks and line continuations; elsewhere it opens, divides, closes and
+    defines nothing, and is an error where it is compiled (XLIDE issue #1331,
+    measured in Excel 16.0). The lexer makes a directive token after a colon,
+    and an operator after a line number; both are listed."""
+    if "#" not in source:
+        return _NO_STARTS
+    tokens = tokenize_cached(source)
+    cached: frozenset[int] | None = _misplaced_directive_starts_by_tokens.get(tokens)
+    if cached is not None:
+        return cached
+    found: list[int] = []
+    for i in range(1, len(tokens)):
+        tok = tokens[i]
+        following = tokens[i + 1] if i + 1 < len(tokens) else None
+        if tok.raw_text != "#" or token_word(following) not in _DIRECTIVE_WORDS:
+            continue
+        after_colon = tok.kind is TokenKind.DIRECTIVE and tokens[i - 1].kind is not TokenKind.NEWLINE
+        after_line_number = (
+            tok.kind is TokenKind.OPERATOR
+            and is_decimal_line_number(tokens[i - 1])
+            and (i == 1 or tokens[i - 2].kind is TokenKind.NEWLINE)
+        )
+        if after_colon or after_line_number:
+            found.append(tok.start)
+    starts = frozenset(found)
+    _misplaced_directive_starts_by_tokens.put(starts, tokens)
+    return starts
