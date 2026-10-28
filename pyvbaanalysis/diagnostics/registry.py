@@ -32,6 +32,7 @@ from .rules.arrays import (
     check_erase_targets,
     check_fixed_array_subscript_bounds,
     check_invalid_redim_targets,
+    check_indexed_next_counters,
     check_redim_impossible_bounds,
     check_redim_preserve_dimensions,
     check_redim_type_change,
@@ -802,6 +803,10 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
             push,
             ctx.opts.host_model,
         ),
+    ),
+    DiagnosticRuleEntry(
+        name="indexedNextCounters",
+        run=lambda ctx, push: check_indexed_next_counters(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push),
     ),
     DiagnosticRuleEntry(
         name="arrayDeclarationImpossibleBounds",

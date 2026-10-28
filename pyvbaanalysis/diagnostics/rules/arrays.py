@@ -59,6 +59,7 @@ from ...parser.nodes import (
     VariableGroupNode,
     WhileBlockNode,
     is_leaf_statement,
+    iter_body_nodes,
     iter_body_nodes_in_context,
 )
 from ...symbols.name_resolution import BareIdentifierContext, BareIdentifierResolutionScope
@@ -110,6 +111,7 @@ from ..walker import (
     absolute_span,
     active_module_members,
     bare_assignment_target,
+    block_footer_line_span,
     for_each_statement,
     for_each_statement_with_headers,
     for_each_variable_group,
@@ -237,6 +239,76 @@ def check_array_bound_intrinsic_arguments(
         return visitor
 
     return factory
+
+
+def check_indexed_next_counters(
+    source: str,
+    mod: ModuleNode,
+    symbols: ModuleSymbols,
+    activity: ConditionalActivityTracker | None,
+    push: PushFn,
+) -> None:
+    """`For i = 1 To 2 ... Next i(1)`: a Next given a subscript. On a counter of
+    a numeric or Date type it is Expected array, and on a Variant one Invalid
+    Next control variable reference; a Boolean or String counter is
+    for-counter-type's first (XLIDE issue #1417, measured in Excel, Word,
+    PowerPoint and Access 16.0). A type character on the name, `Next i&(1)`,
+    changes nothing."""
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode):
+            continue
+        shapes: Mapping[str, DeclaredValueShape] | None = None
+        # An If block's flat body holds every arm's statements.
+        for node in iter_body_nodes(member.body, inactive_node_skip(activity)):
+            # The parser drops a Next variable a subscript follows, so read the footer.
+            indexed = (
+                _indexed_next_variable(source, node.span)
+                if isinstance(node, ForBlockNode) and not node.each and node.closed
+                else None
+            )
+            if indexed is None:
+                continue
+            name, span = indexed
+            if shapes is None:
+                shapes = declaration_shape_environment_for(symbols, member)
+            shape = shapes.get(name.lower())
+            type_ = (
+                normalize_type(shape.as_type if shape.as_type is not None else "Variant")
+                if shape is not None and not shape.is_array
+                else None
+            )
+            if type_ == "variant":
+                push(
+                    "nextVariableMismatch",
+                    f"Next names its counter '{name}' with a subscript, and a Next takes the counter "
+                    "alone. This is a VBE compile error: Invalid Next control variable reference.",
+                    span,
+                )
+            elif type_ and is_known_scalar_type(type_) and type_ not in ("boolean", "string"):
+                assert shape is not None
+                push(
+                    "scalarIndexed",
+                    f"'{name}' is declared As {shape.as_type}, which is no array to index. "
+                    "This is a VBE compile error: Expected array.",
+                    span,
+                )
+
+
+_TYPE_CHARACTER_RE = re.compile(r"\A[%&^@!#$]\Z")
+
+
+def _indexed_next_variable(source: str, span: Span) -> tuple[str, Span] | None:
+    """`Next i(1)` or `Next i&(1)` on a For block's last line: the name and its span."""
+    footer = block_footer_line_span(source, span)
+    toks = statement_tokens_after_leading_label(source, footer)
+    name = token_name(_at(toks, 1)) if token_text(_at(toks, 0)) == "next" else None
+    if not name:
+        return None
+    third = _at(toks, 2)
+    suffix = 1 if third is not None and third.start == toks[1].end and _TYPE_CHARACTER_RE.match(third.raw_text) else 0
+    if _raw_at(toks, 2 + suffix) != "(":
+        return None
+    return (name, Span(footer.start + toks[1].start, footer.start + toks[1].end))
 
 
 _SCALAR_INDEXED_SKIPPED_LEADS = frozenset(

@@ -94,7 +94,7 @@ def statement_operand_roots(node: StatementNode) -> tuple[ExprNode, ...]:
             in_arm = [tok for tok in toks if tok.start >= arm.start and tok.end <= arm.end]
             if in_arm:
                 add_in_arm = add(toks.index(in_arm[0]))
-                for operand in _operand_ranges(in_arm):
+                for operand in _arm_operand_ranges(in_arm):
                     add_in_arm(operand)
     else:
         body = tokens_without_leading_line_number(toks)
@@ -149,6 +149,42 @@ def _word_at(toks: Sequence[VbaToken], i: int) -> str:
 def _file_number(toks: Sequence[VbaToken], from_: int, to: int) -> _OperandRange:
     """`#n` or `n` at `from_`: the number's range, without its `#`."""
     return (from_ + 1, to, None) if _raw_at(toks, from_) == "#" else (from_, to, None)
+
+
+def _arm_operand_ranges(toks: Sequence[VbaToken]) -> list[_OperandRange]:
+    """The operand ranges of a single-line If arm. An arm can be an If of its own,
+    `Else If s Is Nothing Then ...`, whose condition no other rule reads, so it
+    is read here with its own arms (XLIDE issue #1417, measured in all four
+    hosts). Upstream recurses once per nested If; an explicit stack of (arm
+    start, arm tokens) does the same here, its ranges kept in upstream's order."""
+    out: list[_OperandRange] = []
+    # Each entry is an arm still to read, (its start, its tokens), or a range
+    # already placed, (None, the range).
+    pending: list[tuple[int, Sequence[VbaToken]] | tuple[None, _OperandRange]] = [(0, toks)]
+    while pending:
+        item = pending.pop()
+        if item[0] is None:
+            out.append(item[1])
+            continue
+        base, arm = item
+        if _word_at(arm, 0) != "if":
+            out.extend((start + base, stop + base, comparison) for start, stop, comparison in _operand_ranges(arm))
+            continue
+        then_at = _top_level(arm, 1, len(arm), lambda tok: token_word(tok) == "then")
+        if not then_at:
+            continue
+        then = then_at[0]
+        later: list[tuple[int, Sequence[VbaToken]] | tuple[None, _OperandRange]] = [
+            (None, (base + 1, base + then, None))
+        ]
+        elses = _top_level(arm, then + 1, len(arm), lambda tok: token_word(tok) == "else")
+        from_ = then + 1
+        for to in [*elses, len(arm)]:
+            if from_ < to:
+                later.append((base + from_, arm[from_:to]))
+            from_ = to + 1
+        pending.extend(reversed(later))
+    return [operand for operand in out if operand[0] < operand[1]]
 
 
 def _operand_ranges(toks: Sequence[VbaToken]) -> list[_OperandRange]:

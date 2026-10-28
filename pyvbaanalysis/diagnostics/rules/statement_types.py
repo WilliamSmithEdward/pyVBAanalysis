@@ -43,6 +43,14 @@ Issue #253, measured the same way:
   members, and two values of one Type, take it.
 - udt-variant-coercion: a user-defined type passed to a method of a
   Collection, an Object or a Variant, `c.Add t`, `o.Add t`.
+
+Issue #1417, measured in Excel, Word, PowerPoint and Access 16.0 (build
+20430, 2026-10-22):
+
+- for-bound-array: an array variable, fixed or dynamic and in parentheses
+  or not, as a For start, end or Step value, "Type mismatch", whatever the
+  counter's type. An element, UBound(a) and a Variant that is not declared
+  as an array take.
 """
 
 from __future__ import annotations
@@ -67,8 +75,10 @@ from ...parser.nodes import (
     DeclareNode,
     EnumNode,
     ForBlockNode,
+    IdentifierExpr,
     IfBlockNode,
     ModuleNode,
+    ParenExpr,
     ProcedureNode,
     SelectBlockNode,
     Span,
@@ -354,6 +364,19 @@ def _check_for(
             node.control_variable_span,
         )
     variable = _variable_named(ctx, proc_sym, name)
+    for bound in node.bound_expressions or []:
+        value = bound
+        while isinstance(value, ParenExpr):
+            value = value.inner
+        if isinstance(value, IdentifierExpr):
+            bound_variable = _variable_named(ctx, proc_sym, value.name)
+            if bound_variable is not None and bound_variable.is_array:
+                ctx.push(
+                    "forBoundArray",
+                    f"'{value.name}' is an array, and a For start, end or Step value must be a single "
+                    "value. This is a VBE compile error: Type mismatch.",
+                    bound.span,
+                )
     if not node.each:
         kind = _category(ctx, variable)
         if kind in ("string", "boolean", "object", "udt", "class") and variable is not None:

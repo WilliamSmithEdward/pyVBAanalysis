@@ -261,3 +261,76 @@ def test_like_and_parentheses_judge_the_array() -> None:
     assert _non_scalar("    Dim a(3) As Long\n    Dim v As Variant\n    v = (a(0)) + 1") == 0
     assert _non_scalar("    Dim a(3) As Long\n    Dim v As Variant\n    v = (a) ^ 1") == 0
     assert _non_scalar("    Dim a(3) As Long\n    If (a Is Nothing) Then\n    End If") == 0
+
+
+# -- 0abb4c64: For bounds, subscripted Next counters and nested inline Ifs ----
+
+
+def _ids1417(*names: str) -> list[str]:
+    return [f"issue1417_{host}{name}_compile" for name in names for host in _HOSTS]
+
+
+def _expect_1417(case_id: str, expected: str, codes: list[str]) -> None:
+    case = _case(case_id)
+    assert case["expected"] == expected
+    assert _codes_of(_errors_for(case)) == codes
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    _ids1417(
+        "n_next_index_long", "n_next_index_integer", "n_next_index_byte", "n_next_index_date",
+        "n_next_index_single", "n_next_index_double", "n_next_index_currency", "n_next_index_longlong",
+        "n_next_index_longptr", "n_next_index_long_suffix", "n_next_index_integer_suffix",
+    ),
+)
+def test_subscripted_next_counter_is_expected_array(case_id: str) -> None:
+    _expect_1417(case_id, "rejected", ["scalar-indexed"])
+
+
+@pytest.mark.parametrize("case_id", _ids1417("n_next_index_variant"))
+def test_subscripted_variant_next_counter_is_invalid_next(case_id: str) -> None:
+    _expect_1417(case_id, "rejected", ["next-variable-mismatch"])
+
+
+@pytest.mark.parametrize("case_id", _ids1417("n_next_index_boolean"))
+def test_subscripted_boolean_next_counter_is_the_counter_type_first(case_id: str) -> None:
+    _expect_1417(case_id, "rejected", ["for-counter-type"])
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    _ids1417(
+        "n_next_ok", "n_next_suffix_ok",
+        "f_lineno_ok", "f2_variant_holding_ok", "f2_element_ok", "f2_ubound_ok",
+        "e_else_if_ok", "e2_nested_else_if_ok",
+    ),
+)
+def test_for_and_next_shapes_that_compile_are_quiet(case_id: str) -> None:
+    _expect_1417(case_id, "accepted", [])
+
+
+def test_subscripted_next_inside_if_block_reports_once() -> None:
+    source = "\r\n".join(
+        ["Option Explicit", "Sub Main()", "    Dim i As Long", "    If True Then", "        For i = 1 To 2",
+         "        Next i(1)", "    End If", "End Sub", ""]
+    )
+    case = {"modules": [{"name": "Module1", "type": "standard", "source": source}]}
+    assert _codes_of(_errors_for(case)) == ["scalar-indexed"]
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    _ids1417(
+        "f_lineno_array_start", "f_lineno_array_end", "f_lineno_array_step", "f_array_start",
+        "f2_dynamic_array_end", "f2_variant_array_start", "f2_variant_counter_end", "f2_paren_array_end",
+        "f2_string_array_end",
+    ),
+)
+def test_array_as_for_bound_is_type_mismatch(case_id: str) -> None:
+    _expect_1417(case_id, "rejected", ["for-bound-array"])
+
+
+@pytest.mark.parametrize("case_id", _ids1417("e_else_if_is", "e_if_is", "e2_then_if_is"))
+def test_is_in_nested_single_line_if_is_judged(case_id: str) -> None:
+    _expect_1417(case_id, "rejected", ["is-operator-non-object"])

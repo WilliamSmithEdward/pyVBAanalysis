@@ -1334,12 +1334,15 @@ class _Parser:
         if opener == "for" or opener == "foreach":
             control = self._for_control_variable(opener, head)
             source = self._for_each_source_expression(head) if opener == "foreach" else None
+            bounds = _for_bound_expressions(head) if opener == "for" and control is not None else []
             nxt = next_override if next_override is not None else self._next_control_variable(end_stmt)
             for_node = ForBlockNode(span=span, each=(opener == "foreach"), closed=closed, body=body)
             if control is not None:
                 for_node.control_variable, for_node.control_variable_span = control
             if source is not None:
                 for_node.source_expression, for_node.source_expression_span = source
+            if bounds:
+                for_node.bound_expressions = bounds
             if nxt is not None:
                 for_node.next_variable, for_node.next_variable_span = nxt
             return for_node
@@ -1792,6 +1795,29 @@ def _is_mid_statement_target(tokens: Sequence[VbaToken], start: int) -> bool:
         return True
     two = _at(tokens, start + 2)
     return after is not None and after.raw_text == "$" and two is not None and two.raw_text == "("
+
+
+def _for_bound_expressions(stmt: LogicalStatement) -> list[ExprNode]:
+    """The start, end and Step values of `For i = start To end [Step step]`, each
+    that parses whole. `To` and `Step` are read at parenthesis depth 0 only."""
+    tokens = _code_tokens_after_line_number(stmt)
+    cuts: list[int] = []
+    depth = 0
+    for i in range(3, len(tokens)):
+        raw = tokens[i].raw_text
+        depth += 1 if raw == "(" else -1 if raw == ")" else 0
+        if depth == 0 and token_word(tokens[i]) == ("to" if not cuts else "step"):
+            cuts.append(i)
+            if len(cuts) == 2:
+                break
+    bounds: list[ExprNode] = []
+    from_ = 3
+    for to in [*cuts, len(tokens)]:
+        result = parse_expression(tokens, from_, to)
+        if from_ < to and _fully_consumed(result, to) and result.expr is not None:
+            bounds.append(result.expr)
+        from_ = to + 1
+    return bounds
 
 
 def _fully_consumed(result: ExprParseResult, to: int) -> bool:
