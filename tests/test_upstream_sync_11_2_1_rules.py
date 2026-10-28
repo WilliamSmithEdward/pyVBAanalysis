@@ -5,8 +5,15 @@ Each section names the upstream commit whose own tests it follows.
 
 import pytest
 
-from pyvbaanalysis import analyze_module
+from pyvbaanalysis import analyze_module, analyze_project
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions
+from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind
+
+
+def _project(source: str, *others: tuple[str, ModuleSymbolKind, str], name: str = "Caller") -> list:
+    modules = [ModuleInput(name, ModuleSymbolKind.STANDARD, source)]
+    modules += [ModuleInput(other, kind, text) for other, kind, text in others]
+    return analyze_project(modules)[name]
 
 
 def _hits(source: str, code: str, options: AnalyzeModuleOptions | None = None) -> list:
@@ -73,3 +80,65 @@ def test_stray_else_after_colon_is_still_reported(source: str, marker: str) -> N
 def test_block_if_with_two_else_clauses_still_reported() -> None:
     source = "Sub T()\n    If x Then\n        a = 1\n    Else\n        b = 2\n    Else\n        c = 3\n    End If\nEnd Sub\n"
     assert len(_hits(source, "else-branch-order")) == 1
+
+
+# -- a2321dcf: runtime readonly properties, host scalar array assignments ----
+
+_FLAGS_FN = "Function MakeFlags() As Boolean()\nDim flags(1) As Boolean\nMakeFlags = flags\nEnd Function\n"
+
+
+def _runtime_source(line: str) -> str:
+    return (
+        "Option Explicit\n" + _FLAGS_FN
+        + "Function Main() As Variant\nDim values(1) As Boolean\n" + line + "\nMain = 1\nEnd Function"
+    )
+
+
+@pytest.mark.parametrize("target", ["Err.LastDllError", "VBA.Err.LastDllError"])
+def test_runtime_readonly_property_is_reported(target: str) -> None:
+    source = _runtime_source(target + " = 5")
+    for findings in (analyze_module(source), _project(source)):
+        found = [d for d in findings if d.code == "readonly-member-assignment"]
+        assert len(found) == 1
+        assert "Can't assign to read-only property" in found[0].message
+        assert source[found[0].span.start:found[0].span.end] == "LastDllError"
+
+
+@pytest.mark.parametrize("value", ["values", "[values]", "(values)", "MakeFlags()", "(MakeFlags())"])
+def test_whole_array_into_host_scalar_setter(value: str) -> None:
+    source = _runtime_source("ThisWorkbook.Worksheets(1).EnableCalculation = " + value)
+    for findings in (analyze_module(source), _project(source)):
+        errors = [d for d in findings if d.code == "assignment-type-mismatch"]
+        assert len(errors) == 1
+        assert "Run-time error '13'" in errors[0].message
+        assert "compile error" not in errors[0].message
+
+
+@pytest.mark.parametrize("line", [
+    "Err.Number = 5", "VBA.Err.Number = 5", "Main = Err.LastDllError",
+    "ThisWorkbook.Worksheets(1).EnableCalculation = True",
+    "ThisWorkbook.Worksheets(1).EnableCalculation = values(0)",
+    'ThisWorkbook.Worksheets(1).EnableCalculation = "True"',
+])
+def test_valid_runtime_and_host_scalar_use_is_quiet(line: str) -> None:
+    assert [d for d in analyze_module(_runtime_source(line)) if d.severity == "error"] == []
+
+
+@pytest.mark.parametrize("receiver", ["ThisWorkbook.Sheets(1)", "unknown"])
+def test_ambiguous_receiver_assumes_no_scalar_setter(receiver: str) -> None:
+    source = _runtime_source(receiver + ".EnableCalculation = values").replace(
+        "Dim values(1) As Boolean", "Dim values(1) As Boolean\nDim unknown As Object"
+    )
+    assert _hits(source, "assignment-type-mismatch") == []
+
+
+def test_shadowed_err_is_not_the_runtime_object() -> None:
+    assert _hits("Sub T(ByVal Err As Object)\nErr.LastDllError = 5\nEnd Sub", "readonly-member-assignment") == []
+
+
+@pytest.mark.parametrize("line", [
+    "With ThisWorkbook.Worksheets(1)\n.EnableCalculation = values\nEnd With",
+    "If True Then ThisWorkbook.Worksheets(1).EnableCalculation = MakeFlags()",
+])
+def test_host_scalar_setter_in_with_and_single_line_if(line: str) -> None:
+    assert len(_hits(_runtime_source(line), "assignment-type-mismatch")) == 1

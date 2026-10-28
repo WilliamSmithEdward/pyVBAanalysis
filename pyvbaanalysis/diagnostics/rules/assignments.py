@@ -28,7 +28,7 @@ from ...completion.member_access import (
     is_known_object_assignment_type as is_known_object_assignment_type_ctx,
 )
 from ...conditional import ConditionalActivityTracker, inactive_node_skip
-from ...host.host_model import is_dispatch_only_host_type, resolve_host_enum
+from ...host.host_model import get_host_type, is_dispatch_only_host_type, resolve_host_enum
 from ...js_compat import JS_WHITESPACE, js_number, js_number_to_string, js_trim
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
 from ...lexer.token_kinds import TokenKind, VbaToken
@@ -44,7 +44,7 @@ from ...parser.nodes import (
     StatementNode,
     iter_body_nodes,
 )
-from ...runtime.vba_runtime import resolve_runtime_function
+from ...runtime.vba_runtime import resolve_runtime_function, resolve_runtime_object
 from ...symbols.name_resolution import BareIdentifierContext, BareIdentifierResolutionScope
 from ...symbols.symbol_model import (
     ModuleSymbols,
@@ -2064,6 +2064,17 @@ def _late_bound_receiver(source: str, offset: int, member_ctx: MemberCompletionC
     return receiver is None or is_late_bound_type_key(receiver)
 
 
+def _known_scalar_setter_receiver(source: str, offset: int, member_ctx: MemberCompletionContext) -> bool:
+    """A late-bound host chain with one known runtime class still has that scalar setter contract."""
+    receiver = resolve_receiver_type_at(source, offset, member_ctx)
+    if receiver is None:
+        return False
+    if not is_late_bound_type_key(receiver):
+        return True
+    alternatives = receiver[len("union:"):].split("|")
+    return len(alternatives) == 1 and get_host_type(alternatives[0], member_ctx.model) is not None
+
+
 def _push_object_assignment_mismatch(
     push: PushFn,
     label: str,
@@ -2246,7 +2257,7 @@ def check_member_assignment_types(
                 push("hostPropertyValueOutOfRange", problem, value_span)
                 return
         # `ActiveSheet.Visible = "abc"`: a receiver of several host types, each
-        if target and target.kind == "property" and target.access == "read/write" and target.writable is None and not assignment.uses_set and not assignment.with_arguments and target.declared_type and (is_known_scalar_type(normalize_type(target.declared_type) or "") or resolve_host_enum(target.declared_type, member_ctx.model)) and not _late_bound_receiver(source, assignment.member_span.end, member_ctx):
+        if target and target.kind == "property" and target.access == "read/write" and target.writable is None and not assignment.uses_set and not assignment.with_arguments and target.declared_type and (is_known_scalar_type(normalize_type(target.declared_type) or "") or resolve_host_enum(target.declared_type, member_ctx.model)) and _known_scalar_setter_receiver(source, assignment.member_span.end, member_ctx):
             actual = infer(assignment.value_tokens, span.start)
             host_expected = "Long" if resolve_host_enum(target.declared_type, member_ctx.model) else target.declared_type
             host_array_problem = _array_assignment_problem(assignment.label, assignment.member_span, assignment.value_tokens, span.start, DeclaredValueShape(host_expected, False, False), lambda name: declared_shape_for_source_binding(symbols, procedure_symbol_for(symbols, member), project_visible_symbols, name, BareIdentifierContext.EXPRESSION).shape if symbols else None, lambda name: array_value_at(stmt, name), lambda _: actual, source_names, member_ctx=member_ctx, source=source, array_failure_phase="runtime")
@@ -2301,8 +2312,12 @@ def check_member_assignment_types(
         # array field takes an array, or a String As Byte: typeMembers.ts
         # judges it (XLIDE issue #417).
         indexed_accessor = target is not None and (target.set_accessor if assignment.uses_set else (target.let_accessor or (target.writable is False and target.signature is not None and (signature_declares_parameters(target.signature) or normalize_type(target.returns or target.declared_type) != "string"))))
+        runtime_owner = resolve_runtime_object(target.owner) if target is not None else None
+        runtime_target = runtime_owner is not None and target is not None and any(
+            member["name"].lower() == target.name.lower() for member in runtime_owner.get("members", [])
+        )
         if (
-            not project_classes
+            (not project_classes and not runtime_target)
             or (assignment.with_arguments and not indexed_accessor)
             or target is None
             or target.writable is None
@@ -2325,7 +2340,8 @@ def check_member_assignment_types(
                 return
             push(
                 "readonlyMemberAssignment",
-                f"Cannot assign to read-only property '{assignment.label}'.",
+                f"Cannot assign to read-only property '{assignment.label}'."
+                + (" This is a VBE compile error: Can't assign to read-only property." if runtime_target else ""),
                 assignment.member_span,
             )
             return
