@@ -51,7 +51,10 @@ class _IdentityTable(Generic[_K, _V]):
             del self._entries[next(iter(self._entries))]
 
 
-_ROOTS: _IdentityTable[StatementNode, tuple[str, tuple[ExprNode, ...]]] = _IdentityTable(4096)
+# A statement's text, its roots, and the Case items among them with their operators.
+_ROOTS: _IdentityTable[
+    StatementNode, tuple[str, tuple[ExprNode, ...], tuple[tuple[ExprNode, str], ...]]
+] = _IdentityTable(4096)
 
 # The Case items, each compared with the Select value as by `=` or its `Is` operator.
 _CASE_COMPARANDS: _IdentityTable[ExprNode, str] = _IdentityTable(4096)
@@ -70,6 +73,10 @@ def statement_operand_roots(node: StatementNode) -> tuple[ExprNode, ...]:
     """The operand expressions of a statement, each a root for the expression walk."""
     cached = _ROOTS.get(node)
     if cached is not None and cached[0] == node.raw:
+        # Upstream's WeakMap keeps a Case item's operator while the item lives;
+        # the bounded table here may have dropped it, so it is set again.
+        for expr, comparison in cached[2]:
+            _CASE_COMPARANDS.set(expr, comparison)
         return cached[1]
     toks = [tok for tok in tokenize(node.raw) if tok.kind not in (TokenKind.COMMENT, TokenKind.NEWLINE)]
     # The tokens are this call's own, so they are moved to source offsets in place.
@@ -77,6 +84,7 @@ def statement_operand_roots(node: StatementNode) -> tuple[ExprNode, ...]:
         tok.start += node.span.start
         tok.end += node.span.start
     roots: list[ExprNode] = []
+    comparands: list[tuple[ExprNode, str]] = []
 
     def add(offset: int) -> Callable[[_OperandRange], None]:
         def add_range(operand: _OperandRange) -> None:
@@ -86,6 +94,7 @@ def statement_operand_roots(node: StatementNode) -> tuple[ExprNode, ...]:
                 roots.append(expr)
                 if comparison is not None:
                     _CASE_COMPARANDS.set(expr, comparison)
+                    comparands.append((expr, comparison))
 
         return add_range
 
@@ -102,7 +111,7 @@ def statement_operand_roots(node: StatementNode) -> tuple[ExprNode, ...]:
         for operand in _operand_ranges(body):
             add_in_body(operand)
     result = tuple(roots)
-    _ROOTS.set(node, (node.raw, result))
+    _ROOTS.set(node, (node.raw, result, tuple(comparands)))
     return result
 
 
