@@ -20,7 +20,6 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Literal, Union, cast
 
-from ...completion.member_access import MemberCompletionContext
 from ...completion.type_completion import (
     TypeCompletionKind,
     is_creatable_type_completion,
@@ -97,9 +96,6 @@ from .shared import (
     report_repeated_keys,
     scan_conditional_compilation_branch_order,
 )
-# resolveKnownObjectAssignmentType lives in XLIDE's typeInference.ts; the port
-# keeps it with the member-access resolver, whose project and host lookups it uses.
-from ...completion.member_access import resolve_known_object_assignment_type
 
 # Access/storage modifiers that may lead a procedure declaration.
 _PROC_MODIFIERS: frozenset[str] = frozenset({"public", "private", "friend", "global", "static"})
@@ -151,6 +147,17 @@ def check_procedure_header(source: str, mod: ModuleNode, activity: ConditionalAc
         i = 0
         while i < len(toks) and toks[i].raw_text.lower() in _PROC_MODIFIERS:
             i += 1
+        # `Static Public Sub` compiles, `Static Global Sub` is "Expected:
+        # identifier" at Global (measured in Excel 16.0). The block matcher
+        # still reads the header, so its End Sub does not report as well.
+        if len(toks) > 1 and toks[0].raw_text.lower() == "static" and toks[1].raw_text.lower() == "global":
+            push(
+                "invalidProcedureHeader",
+                "'Global' cannot follow 'Static' in a procedure header. This is a VBE compile error: "
+                "Expected: identifier.",
+                Span(header_start + toks[1].start, header_start + toks[1].end),
+            )
+            continue
         kw_tok = _at(toks, i)
         kw = kw_tok.raw_text.lower() if kw_tok is not None else None
         allow_as = False
@@ -1974,22 +1981,18 @@ def check_non_constant_parameter_defaults(
     source: str,
     mod: ModuleNode,
     activity: ConditionalActivityTracker | None,
-    member_ctx: MemberCompletionContext,
     push: PushFn,
 ) -> None:
     """An Optional parameter default must be a constant expression (no call/New/AddressOf).
 
-    Object-typed parameters, host and project classes included, are skipped: their
-    defaults are owned by the parameter-default-type-mismatch rule ("must be
-    Nothing"), which avoids a double diagnostic.
+    An object parameter's default is held to the same: any constant compiles
+    there (measured in Excel 16.0), a call does not.
     """
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
         for param in member.params:
             if not param.default_raw:
-                continue
-            if resolve_known_object_assignment_type(param.as_type, member_ctx) is not None:
                 continue
             value_tokens = _value_tokens_after_equals(source, param.span)
             if value_tokens is None:

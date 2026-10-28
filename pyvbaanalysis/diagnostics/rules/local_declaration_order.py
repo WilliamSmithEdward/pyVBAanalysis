@@ -200,9 +200,21 @@ def _is_value_use(tokens: Sequence[VbaToken], i: int) -> bool:
         return False
     if after is not None and after.raw_text == ":=":
         return False
-    # `Label:` at the start of a line.
+    # `Label:` at the start of a line, and `Label$:` with a type character
+    # (measured in Excel 16.0).
     at_line_start = before is None or before.kind is TokenKind.NEWLINE
-    return not (at_line_start and after is not None and after.kind is TokenKind.COLON)
+    suffixed = after is not None and after.start == tokens[i].end and _TYPE_CHARACTER_RE.match(after.raw_text) is not None
+    after_suffix = tokens[i + 2] if i + 2 < len(tokens) else None
+    return not (
+        at_line_start
+        and (
+            (after is not None and after.kind is TokenKind.COLON)
+            or (suffixed and after_suffix is not None and after_suffix.kind is TokenKind.COLON)
+        )
+    )
+
+
+_TYPE_CHARACTER_RE = re.compile(r"^[%&!#@$^]$")
 
 
 def _const_statement_end(source: str, start: int) -> int:

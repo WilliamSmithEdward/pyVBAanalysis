@@ -8,6 +8,7 @@ import pytest
 from pyvbaanalysis import analyze_module, analyze_project
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions
 from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind
+from oracle_support import CASES, case_codes  # type: ignore[attr-defined]
 
 
 def _project(source: str, *others: tuple[str, ModuleSymbolKind, str], name: str = "Caller") -> list:
@@ -248,3 +249,185 @@ def test_procedure_closer_in_each_arm_of_an_if(source: str) -> None:
 def test_other_statement_in_the_other_arm_is_still_outside_a_procedure() -> None:
     source = "Option Explicit\n#Const FLAG = 0\nSub T()\n#If FLAG Then\nEnd Sub\n#Else\nx = 1\n#End If\n"
     assert len(_hits(source, "statement-outside-procedure")) == 1
+
+
+# -- a102b93f: false positives Excel 16.0 compiles or runs -------------------
+# Each case is in the vendored vbe_oracle_cases.json (upstream's
+# excelMeasuredFalsePositives.test.ts). The structural block-balance codes
+# upstream also names are not the port's (it has no structural pass).
+
+_A102_COMPILED_OR_RAN = [
+    ("print_udt_len_argument_runtime", ("udt-value-mismatch",)),
+    ("print_udt_lenb_argument_runtime", ("udt-value-mismatch",)),
+    ("print_udt_len_second_argument_runtime", ("udt-value-mismatch",)),
+    ("print_udt_user_function_argument_runtime", ("udt-value-mismatch",)),
+    ("print_udt_varptr_argument_runtime", ("udt-value-mismatch",)),
+    ("print_udt_len_plus_runtime", ("udt-value-mismatch",)),
+    ("print_udt_grouped_len_runtime", ("udt-value-mismatch",)),
+    ("print_udt_len_of_grouped_runtime", ("udt-value-mismatch",)),
+    ("optional_collection_default_number_runtime", ("parameter-default-type-mismatch",)),
+    ("optional_object_default_number_runtime", ("parameter-default-type-mismatch",)),
+    ("optional_object_default_string_runtime", ("parameter-default-type-mismatch",)),
+    ("optional_range_default_zero_runtime", ("parameter-default-type-mismatch",)),
+    ("optional_collection_default_true_runtime", ("parameter-default-type-mismatch",)),
+    ("optional_collection_default_date_runtime", ("parameter-default-type-mismatch",)),
+    ("optional_collection_default_null_runtime", ("parameter-default-type-mismatch",)),
+    ("optional_class_default_number_runtime", ("parameter-default-type-mismatch",)),
+    ("type_named_range_shadows_excel_runtime", ("object-variable-not-set",)),
+    ("type_named_worksheet_shadows_excel_runtime", ("object-variable-not-set",)),
+    ("public_type_named_range_other_module_runtime", ("object-variable-not-set",)),
+    ("enum_named_range_shadows_excel_runtime", ("object-variable-not-set",)),
+    ("thisworkbook_type_set_activeworkbook_runtime", ("assignment-object-type-mismatch",)),
+    ("thisworkbook_type_member_runtime", ("assignment-object-type-mismatch",)),
+    ("thisworkbook_type_parameter_runtime", ("argument-type-mismatch",)),
+    ("dim_shared_local_runtime", ("invalid-declaration-name", "undeclared-variable", "unexpected-declaration-token",)),
+    ("dim_shared_two_names_runtime", ("invalid-declaration-name", "unexpected-declaration-token",)),
+    ("dim_shared_module_runtime", ("invalid-declaration-name", "undeclared-variable", "unexpected-declaration-token",)),
+    ("private_shared_module_runtime", ("invalid-declaration-name", "unexpected-declaration-token",)),
+    ("dim_shared_array_runtime", ("invalid-declaration-name", "undeclared-variable", "unexpected-declaration-token",)),
+    ("dim_shared_new_runtime", ("invalid-declaration-name", "undeclared-variable", "unexpected-declaration-token",)),
+    ("public_shared_module_runtime", ("invalid-declaration-name", "undeclared-variable", "unexpected-declaration-token",)),
+    ("global_shared_module_runtime", ("invalid-declaration-name", "undeclared-variable", "unexpected-declaration-token",)),
+    ("dim_shared_dynamic_array_runtime", ("invalid-declaration-name", "unexpected-declaration-token",)),
+    ("erase_two_arrays_empty_parentheses_runtime", ("unallocated-dynamic-array-access",)),
+    ("label_dollar_goto_runtime", ("undeclared-variable", "undefined-label",)),
+    ("label_dollar_goto_dollar_runtime", ("undeclared-variable",)),
+    ("label_percent_runtime", ("undeclared-variable",)),
+    ("label_hash_runtime", ("undeclared-variable",)),
+    ("label_dollar_then_long_variable_runtime", ("type-suffix-mismatch", "undeclared-variable",)),
+    ("label_ampersand_runtime", ("undeclared-variable", "undefined-label",)),
+    ("label_bang_runtime", ("undeclared-variable", "undefined-label",)),
+    ("label_at_runtime", ("undeclared-variable", "undefined-label",)),
+    ("label_caret_runtime", ("invalid-expression-syntax", "undeclared-variable", "undefined-label",)),
+    ("label_dollar_then_statement_runtime", ("undeclared-variable",)),
+    ("label_dollar_resume_runtime", ("undeclared-variable", "undefined-label",)),
+    ("resume_double_zero_runtime", ("undefined-label",)),
+    ("resume_zero_handler_runtime", ("undefined-label",)),
+    ("err_unknown_member_assign_compile", ("member-not-found",)),
+    ("err_unknown_member_read_compile", ("member-not-found",)),
+    ("err_unknown_member_call_compile", ("member-not-found",)),
+    ("me_let_document_module_compile", ("undeclared-variable",)),
+    ("me_let_class_module_compile", ("undeclared-variable",)),
+    ("me_let_keyword_class_compile", ("undeclared-variable",)),
+    ("now_indexed_result_compile", ("argument-count",)),
+    ("time_indexed_result_compile", ("argument-count",)),
+    ("command_indexed_result_compile", ("argument-count",)),
+    ("now_indexed_two_compile", ("argument-count",)),
+    ("now_indexed_print_compile", ("argument-count",)),
+    ("str_null_runtime", ("argument-type-mismatch",)),
+    ("static_public_sub_runtime", ("unmatched-block-closer",)),
+    ("static_friend_sub_runtime", ("unmatched-block-closer",)),
+    ("byref_qualified_parenthesized_copy_runtime", ("byref-argument-type-mismatch",)),
+    ("byref_qualified_parenthesized_byte_runtime", ("byref-argument-type-mismatch",)),
+    ("byref_qualified_parenthesized_single_runtime", ("byref-argument-type-mismatch",)),
+    ("byref_qualified_parenthesized_double_runtime", ("byref-argument-type-mismatch",)),
+    ("byref_qualified_parenthesized_currency_runtime", ("byref-argument-type-mismatch",)),
+    ("byref_qualified_parenthesized_string_runtime", ("byref-argument-type-mismatch",)),
+    ("byref_qualified_parenthesized_date_runtime", ("byref-argument-type-mismatch",)),
+    ("byref_qualified_parenthesized_boolean_runtime", ("byref-argument-type-mismatch",)),
+    ("lset_string_number_runtime", ("string-arithmetic-coercion",)),
+    ("rset_string_number_runtime", ("string-arithmetic-coercion",)),
+    ("lset_string_long_variable_runtime", ("string-arithmetic-coercion",)),
+    ("udt_power_compile", ("non-scalar-binary-operand", "udt-value-mismatch",)),
+    ("udt_power_right_compile", ("non-scalar-binary-operand", "udt-value-mismatch",)),
+    ("udt_not_runtime", ("udt-value-mismatch",)),
+    ("array_power_runtime", ("non-scalar-binary-operand",)),
+    ("udt_field_power_compile", ("non-scalar-binary-operand",)),
+    ("label_line_number_and_dollar_runtime", ("undeclared-variable", "undefined-label",)),
+    ("document_type_sheet_worksheet_runtime", ("assignment-object-type-mismatch",)),
+    ("str_null_into_variant_runtime", ("assignment-type-mismatch",)),
+    ("optional_object_default_string_expression_runtime", ("parameter-default-not-constant", "parameter-default-type-mismatch",)),
+    ("line_number_then_label_caret_compile", ("invalid-expression-syntax", "undefined-label",)),
+    ("line_number_then_label_hash_compile", ("invalid-expression-syntax", "undefined-label",)),
+    ("label_caret_before_statement_runtime", ("invalid-expression-syntax", "undefined-label",)),
+    ("label_at_before_statement_runtime", ("invalid-expression-syntax", "undefined-label",)),
+    ("let_me_document_module_runtime", ("invalid-assignment-target",)),
+    ("me_assign_document_module_runtime", ("invalid-assignment-target",)),
+    ("project_time_variant_function_index_runtime", ("argument-count",)),
+    ("static_private_function_compile", ("unmatched-block-closer",)),
+    ("static_public_property_compile", ("unmatched-block-closer",)),
+]
+
+_A102_STILL_REPORTED = [
+    ("print_udt_grouped_compile", ("udt-value-mismatch",)),
+    ("print_udt_bare_compile", ("udt-value-mismatch",)),
+    ("print_udt_as_array_index_compile", ("udt-value-mismatch",)),
+    ("type_named_range_set_compile", ("set-requires-object",)),
+    ("static_shared_compile", ("invalid-declaration-name", "unexpected-declaration-token",)),
+    ("dim_shared_as_type_compile", ("invalid-declaration-name",)),
+    ("goto_zero_compile", ("undefined-label",)),
+    ("resume_one_undefined_compile", ("undefined-label",)),
+    ("resume_zero_without_error_runtime", ("resume-without-error",)),
+    ("err_raise_too_many_arguments_compile", ("argument-count",)),
+    ("set_me_class_compile", ("invalid-assignment-target",)),
+    ("set_me_document_module_compile", ("invalid-assignment-target",)),
+    ("timer_with_argument_compile", ("argument-count",)),
+    ("erl_with_argument_compile", ("argument-count",)),
+    ("doevents_with_argument_compile", ("argument-count",)),
+    ("str_dollar_null_runtime", ("argument-type-mismatch",)),
+    ("oct_dollar_null_runtime", ("argument-type-mismatch",)),
+    ("byref_qualified_no_parentheses_compile", ("byref-argument-type-mismatch",)),
+    ("byref_qualified_call_compile", ("byref-argument-type-mismatch",)),
+    ("byref_qualified_function_compile", ("byref-argument-type-mismatch",)),
+    ("udt_plus_compile", ("non-scalar-binary-operand", "udt-value-mismatch",)),
+    ("collection_power_compile", ("collection-operand",)),
+    ("longlong_parenthesized_byref_long_compile", ("longlong-narrowing",)),
+    ("longlong_qualified_parenthesized_byref_long_compile", ("longlong-narrowing",)),
+    ("longlong_call_double_parentheses_compile", ("longlong-narrowing",)),
+    ("longlong_named_parenthesized_compile", ("longlong-narrowing",)),
+    ("longlong_qualified_byval_long_compile", ("longlong-narrowing",)),
+    ("longlong_qualified_named_byval_long_compile", ("longlong-narrowing",)),
+    ("longlong_named_byval_long_compile", ("longlong-narrowing",)),
+    ("erase_empty_parentheses_long_compile", ("erase-requires-array",)),
+    ("array_unary_minus_compile", ("non-scalar-binary-operand",)),
+    ("document_type_sheet_workbook_runtime", ("assignment-object-type-mismatch",)),
+    ("document_type_thisworkbook_application_runtime", ("assignment-object-type-mismatch",)),
+    ("print_udt_array_index_in_call_compile", ("udt-value-mismatch",)),
+    ("print_udt_array_index_single_line_if_compile", ("udt-value-mismatch",)),
+    ("print_udt_field_array_index_compile", ("udt-value-mismatch",)),
+    ("print_udt_collection_item_argument_compile", ("udt-value-mismatch",)),
+    ("project_now_function_index_compile", ("argument-count",)),
+    ("now_statement_parenthesized_compile", ("argument-count",)),
+    ("time_dollar_argument_compile", ("argument-count",)),
+    ("command_dollar_argument_compile", ("argument-count",)),
+    ("str_null_into_string_runtime", ("assignment-type-mismatch",)),
+    ("optional_object_default_array_call_compile", ("parameter-default-not-constant",)),
+    ("set_me_standard_module_compile", ("me-outside-object-module",)),
+    ("static_global_sub_header_compile", ("invalid-proc-header",)),
+    ("print_udt_cstr_compile", ("udt-value-mismatch",)),
+    ("byref_class_method_no_parentheses_compile", ("byref-argument-type-mismatch",)),
+    ("private_shared_withevents_compile", ("unexpected-declaration-token",)),
+]
+
+
+@pytest.mark.parametrize("case_id, codes", _A102_COMPILED_OR_RAN)
+def test_excel_measured_false_positive_is_quiet(case_id: str, codes: tuple[str, ...]) -> None:
+    reported = case_codes(CASES[case_id])
+    assert [code for code in codes if code in reported] == []
+
+
+@pytest.mark.parametrize("case_id, codes", _A102_STILL_REPORTED)
+def test_excel_measured_control_is_still_reported(case_id: str, codes: tuple[str, ...]) -> None:
+    reported = case_codes(CASES[case_id])
+    assert [code for code in codes if code not in reported] == []
+
+
+def _single_line_if_errors(line: str) -> list[str]:
+    source = (
+        "Option Explicit\nType T\n    a As Long\nEnd Type\nSub Main()\n"
+        f"    Dim t As T, v As Variant, a(1) As Long\n    {line}\nEnd Sub\n"
+    )
+    return [f"{d.code}@{d.span.start}" for d in analyze_module(source) if d.severity == "error"]
+
+
+@pytest.mark.parametrize("line, count", [
+    ("If True Then v = t + 2", 1),
+    ("If True Then v = t + 2 Else v = t * 2", 2),
+    ("If True Then Debug.Print t", 1),
+    ("If True Then Debug.Print Len(a(t))", 1),
+    ("If t + 1 Then v = 1", 1),
+])
+def test_single_line_if_reports_each_type_once(line: str, count: int) -> None:
+    codes = _single_line_if_errors(line)
+    assert len(codes) == count
+    assert len(set(codes)) == len(codes)

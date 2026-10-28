@@ -125,7 +125,16 @@ def _label_references_in(
             continue
         if word == "resume":
             next_tok = _at(toks, i + 1)
-            if next_tok is None or token_word(next_tok) == "next":
+            # `Resume 0` (and `Resume 00`) is `Resume`: it runs the statement
+            # that failed again, and names no label (measured in Excel 16.0).
+            if (
+                next_tok is None
+                or token_word(next_tok) == "next"
+                or (
+                    next_tok.kind is TokenKind.INTEGER_LITERAL
+                    and _normalized_decimal_label(next_tok.raw_text) == "0"
+                )
+            ):
                 continue
             ref = _label_reference_after(toks, span, i + 1, "resume")
             if ref is not None:
@@ -286,12 +295,40 @@ def statement_label_declarations(source: str, span: Span) -> list[VbaProcedureLa
     return _label_declarations_in(source, span, cached_statement_tokens(source, span.start, span.end))
 
 
+_LABEL_TYPE_CHARACTER_RE = re.compile(r"^[%&!#@$^]$")
+
+
+def _is_label_type_suffix(name: VbaToken, suffix: VbaToken | None, colon_raw: str | None) -> bool:
+    """A type character right after a label's name, before its colon: `L1$:`,
+    `L1%:` and `L1#:` are the labels L1 (measured in Excel 16.0)."""
+    return (
+        suffix is not None
+        and suffix.start == name.end
+        and _LABEL_TYPE_CHARACTER_RE.match(suffix.raw_text) is not None
+        and colon_raw == ":"
+    )
+
+
 def _label_declarations_in(
-    source: str, span: Span, toks: Sequence[VbaToken]
+    source: str, span: Span, tokens: Sequence[VbaToken]
 ) -> list[VbaProcedureLabel]:
-    first = _at(toks, 0)
+    first = _at(tokens, 0)
     if first is None:
         return []
+    second_raw = _at(tokens, 2)
+    suffixed = (
+        first.kind is not TokenKind.INTEGER_LITERAL
+        and token_name(first) is not None
+        and (
+            _is_label_type_suffix(first, _at(tokens, 1), second_raw.raw_text if second_raw is not None else None)
+            or (
+                len(tokens) == 2
+                and _is_label_type_suffix(first, tokens[1], ":")
+                and _has_source_colon_after_token(source, span, tokens[1])
+            )
+        )
+    )
+    toks = [first, *tokens[2:]] if suffixed else tokens
     if first.kind is not TokenKind.INTEGER_LITERAL and len(toks) >= 2 and toks[1].raw_text != ":":
         return []
     label = _label_from_token(first, span)
@@ -300,11 +337,20 @@ def _label_declarations_in(
     if first.kind is TokenKind.INTEGER_LITERAL:
         # A leading decimal integer is a line-label declaration whether or not a
         # statement follows it on the same line.
+        suffixed_name = (
+            len(toks) == 3
+            and toks[1].kind is not TokenKind.INTEGER_LITERAL
+            and _is_label_type_suffix(toks[1], toks[2], ":")
+            and _has_source_colon_after_token(source, span, toks[2])
+        )
         named = (
             _label_from_token(toks[1], span)
-            if len(toks) == 2
-            and toks[1].kind is not TokenKind.INTEGER_LITERAL
-            and _has_source_colon_after_token(source, span, toks[1])
+            if (
+                len(toks) == 2
+                and toks[1].kind is not TokenKind.INTEGER_LITERAL
+                and _has_source_colon_after_token(source, span, toks[1])
+            )
+            or suffixed_name
             else None
         )
         return [label, named] if named is not None else [label]
@@ -313,7 +359,7 @@ def _label_declarations_in(
     second = _at(toks, 1)
     if second is not None and second.raw_text == ":":
         return [label]
-    if len(toks) == 1 and _has_source_colon_after_token(source, span, first):
+    if len(toks) == 1 and (suffixed or _has_source_colon_after_token(source, span, first)):
         return [label]
     return []
 

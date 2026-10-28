@@ -35,10 +35,12 @@ from ..context import PushFn
 from ..exprwalk import ProcedureExpressionVisitor
 
 # Binary operators that require scalar operands. Excludes Is (object operands,
-# owned by is-operator-non-object) and Like (operands coerced to String).
+# owned by is-operator-non-object), Like (operands coerced to String) and `^`:
+# the VBE compiles `a ^ 2` on an array or a Type, which runs or raises 51
+# (measured in Excel 16.0).
 _SCALAR_OPERAND_OPERATORS = frozenset(
     {
-        "&", "+", "-", "*", "/", "\\", "^", "Mod",
+        "&", "+", "-", "*", "/", "\\", "Mod",
         "=", "<>", "<", ">", "<=", ">=",
         "And", "Or", "Xor", "Eqv", "Imp",
     }
@@ -69,6 +71,18 @@ def check_binary_operand_scalar(symbols: ModuleSymbols, push: PushFn) -> Procedu
                     operation[1].span,
                 )
                 return
+            # A unary minus negates one value, and an array is none: `-a` is
+            # Type mismatch, where `Not a` compiles (measured in Excel 16.0).
+            if isinstance(expr, UnaryExpr) and expr.operator == "-" and isinstance(expr.operand, IdentifierExpr):
+                operand_shape = shapes.get(expr.operand.name.lower())
+                if operand_shape is not None and operand_shape.is_array is True:
+                    push(
+                        "nonScalarBinaryOperand",
+                        f"The '-' operator requires a scalar operand, but '{expr.operand.name}' is declared "
+                        "As an array. This will fail to compile with 'Type mismatch'.",
+                        expr.operand.span,
+                    )
+                    return
             if not isinstance(expr, BinaryExpr) or expr.operator not in _SCALAR_OPERAND_OPERATORS:
                 return
             offender = _non_scalar_operand(expr.left, shapes, udt_names) or _non_scalar_operand(

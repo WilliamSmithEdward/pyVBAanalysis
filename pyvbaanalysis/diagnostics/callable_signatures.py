@@ -330,8 +330,8 @@ def runtime_type_signature(runtime: VbaRuntimeFunction) -> CallableTypeSignature
             )
             for p in runtime.params
         ]
-        return CallableTypeSignature(name=runtime.name, params=params, return_type=runtime.returns)
-    return parse_runtime_display_signature(runtime.name, runtime.signature, runtime.returns)
+        return CallableTypeSignature(name=runtime.name, params=params, return_type=runtime.returns, runtime=True)
+    return replace(parse_runtime_display_signature(runtime.name, runtime.signature, runtime.returns), runtime=True)
 
 
 def runtime_arity_signature(runtime: VbaRuntimeFunction) -> CallableTypeSignature | None:
@@ -409,9 +409,18 @@ def expression_calls(
         # `Take (i)` as a statement passes `(i)` as its one argument: the space
         # makes the parentheses part of the argument, which is then a copy (XLIDE
         # issue #111). `Take(i)` glued, and `x = Take (i)` inside an expression,
-        # are calls with a list.
+        # are calls with a list. A qualified statement reads the same:
+        # `Module1.Take (i)` passes a copy (measured in Excel 16.0).
+        chain_start = i
+        while (
+            chain_start - 2 >= first_executable
+            and toks[chain_start - 1].raw_text == "."
+            and token_name(toks[chain_start - 2])
+        ):
+            chain_start -= 2
         arguments_parenthesized = (
-            i == first_executable and toks[call_name.paren_index].start > toks[call_name.name_end_index].end
+            chain_start == first_executable
+            and toks[call_name.paren_index].start > toks[call_name.name_end_index].end
         )
         # `ReDim Three(2)` inside Function Three sizes the return array, and a
         # ReDim target anywhere is a variable, never a call (XLIDE issue #115).

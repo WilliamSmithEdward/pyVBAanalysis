@@ -392,6 +392,20 @@ def statement_and_branch_spans(stmt: LeafStatementNode) -> list[Span]:
     return [stmt.span, *branches] if branches else [stmt.span]
 
 
+def condition_and_branch_spans(source: str, stmt: LeafStatementNode) -> list[Span]:
+    """Like statement_and_branch_spans, with a single-line If's own span cut at its
+    Then, so a rule that reads the whole span does not read a branch twice."""
+    spans = statement_and_branch_spans(stmt)
+    if len(spans) == 1:
+        return spans
+    whole, *branches = spans
+    toks = statement_tokens(source, whole)
+    then = next(
+        (i for i, tok in enumerate(toks) if tok.kind is TokenKind.KEYWORD and tok.raw_text.lower() == "then"), -1
+    )
+    return spans if then < 0 else [Span(whole.start, whole.start + toks[then].start), *branches]
+
+
 def bare_assignment_target(
     source: str, span: Span
 ) -> tuple[str, Span, list[VbaToken]] | None:

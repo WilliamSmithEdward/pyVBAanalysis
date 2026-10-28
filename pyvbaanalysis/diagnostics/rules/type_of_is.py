@@ -25,6 +25,7 @@ from __future__ import annotations
 import dataclasses
 import re
 from collections.abc import Callable
+from typing import cast
 
 from ...completion.member_access import (
     KnownObjectAssignmentType,
@@ -32,6 +33,7 @@ from ...completion.member_access import (
     resolve_known_object_assignment_type,
     simple_type_name_for_assignment,
 )
+from ...completion.event_handlers import event_handler_document_type_for_context
 from ...conditional import ConditionalActivityTracker
 from ...host.host_default_members import HOST_DEFAULT_MEMBERS
 from ...host.host_model import HostMember, get_host_members, get_host_type, resolve_host_alias
@@ -55,7 +57,8 @@ from ...parser.nodes import (
     iter_body_nodes,
 )
 from ...parser.parse_expression import parse_expression
-from ...symbols.symbol_model import ModuleSymbols
+from ...identity_cache import IdentityLru
+from ...symbols.symbol_model import ModuleSymbolKind, ModuleSymbols
 from ...types.type_inference import SCALAR_OBJECT_ASSIGNMENT_REASON, type_environment_for
 from ...types.type_names import is_known_scalar_type, normalize_type
 from ..call_extraction import InferredArgumentType
@@ -222,6 +225,32 @@ def check_is_operands_in_conditions(
 # -- checkTypeOfIsCompatibility (always-False) ------------------------------
 
 
+_PROJECT_DOCUMENT_HOST_TYPES_CACHE = IdentityLru()
+
+
+def _project_document_host_types(member_ctx: MemberCompletionContext) -> dict[str, str]:
+    """Each document module's host class, lowercased and qualified
+    (`excel.workbook` for ThisWorkbook): its designer's class where the workbook
+    gave one, otherwise the class its code name implies."""
+    members = member_ctx.project_class_members
+    cached = _PROJECT_DOCUMENT_HOST_TYPES_CACHE.get(member_ctx, members)
+    if cached is not None:
+        return cast(dict[str, str], cached)
+    types: dict[str, str] = {}
+    for candidate in members or []:
+        if candidate.kind != "document":
+            continue
+        document_type = event_handler_document_type_for_context(candidate.name, ModuleSymbolKind.DOCUMENT, None)
+        host_type = candidate.designer_class if candidate.designer_class is not None else (
+            "Excel.Workbook" if document_type == "workbook"
+            else "Excel.Chart" if document_type == "chart"
+            else "Word.Document" if document_type == "document"
+            else "Excel.Worksheet"
+        )
+        types[candidate.name.lower()] = host_type.lower()
+    return cast(dict[str, str], _PROJECT_DOCUMENT_HOST_TYPES_CACHE.put(types, member_ctx, members))
+
+
 def _implements_object_type(
     actual: KnownObjectAssignmentType, expected: KnownObjectAssignmentType
 ) -> bool:
@@ -310,6 +339,17 @@ def object_assignment_incompatibility_reason(
             return None
         return f"This object type is not compatible with {expected.display}."
     if actual_object.kind == "host" and _HOST_VALUES_ALSO_OF_TYPE.get(actual_object.key) == expected.key:
+        return None
+    # A document module is the host's own object: the workbook ThisWorkbook
+    # names is a Workbook, so `Set a = ActiveWorkbook` into `a As ThisWorkbook`
+    # runs while that workbook is the active one (measured in Excel 16.0).
+    # Which workbook the host value holds is not known here, but a value of
+    # another host class is never the document.
+    if (
+        expected.kind == "project"
+        and actual_object.kind == "host"
+        and _project_document_host_types(member_ctx).get(expected.key) == actual_object.key
+    ):
         return None
     if actual_object.kind == "project" and _implements_object_type(actual_object, expected):
         return None

@@ -57,7 +57,7 @@ from typing import Literal
 
 from ...completion.type_completion import ProjectTypeName
 from ...conditional import ConditionalActivityTracker
-from ...js_compat import js_trim
+from ...js_compat import JS_WHITESPACE, js_trim
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import (
     AssignmentNode,
@@ -81,6 +81,7 @@ from ...parser.nodes import (
 from ...runtime import resolve_runtime_function
 from ...symbols.name_resolution import BareIdentifierContext, BareIdentifierResolutionScope
 from ...symbols.symbol_model import (
+    ModuleSymbolKind,
     ModuleSymbols,
     VbaProjectTypeKind,
     VbaSymbol,
@@ -100,7 +101,9 @@ from ..walker import (
     statement_tokens_after_leading_label,
     token_name,
     token_text,
+    condition_and_branch_spans,
 )
+from .type_members import unchecked_aggregate_operators
 
 # What a variable holds, as far as these rules care.
 _Category = Literal["variant", "number", "date", "string", "boolean", "object", "udt", "class"]
@@ -120,6 +123,7 @@ _DEFTYPE_LINE_RE = re.compile(
     re.IGNORECASE | re.MULTILINE | re.ASCII,
 )
 _LINE_BREAK_RE = re.compile(r"\r|\n")
+_LEADING_COLON_RE = re.compile(f"[{JS_WHITESPACE}]*:")
 
 
 @dataclass(slots=True)
@@ -135,6 +139,8 @@ class _Context:
     untyped_is_variant: bool
     # The Types this module declares, with their fields.
     types: ModuleTypes
+    # The project's class, document and UserForm names.
+    classes: AbstractSet[str]
 
 
 def check_statement_types(
@@ -153,11 +159,14 @@ def check_statement_types(
             udts.add(member.name.lower())
         elif isinstance(member, EnumNode):
             enums.add(member.name.lower())
+    classes: set[str] = set()
     for type_ in project_types or []:
         if type_.kind is VbaProjectTypeKind.USER_TYPE:
             udts.add(type_.name.lower())
         elif type_.kind is VbaProjectTypeKind.ENUM:
             enums.add(type_.name.lower())
+        else:
+            classes.add(type_.name.lower())
     ctx = _Context(
         source=source,
         symbols=symbols,
@@ -168,6 +177,7 @@ def check_statement_types(
         enums=enums,
         untyped_is_variant=_DEFTYPE_LINE_RE.search(source) is None,
         types=module_types(source, mod, activity),
+        classes=classes,
     )
     for member in active_module_members(mod, activity):
         if isinstance(member, VariableGroupNode):
@@ -305,7 +315,10 @@ def _walk_body(
             for branch in node.branches:
                 _check_condition(ctx, proc_sym, branch.condition_raw, branch.header_span)
         elif isinstance(node, (StatementNode, AssignmentNode, CallNode)):
-            _check_statement(ctx, proc_sym, node.span)
+            # A single-line If's branches are statements of their own, and its
+            # condition is read up to Then.
+            for statement_span in condition_and_branch_spans(ctx.source, node):
+                _check_statement(ctx, proc_sym, statement_span)
         entered[0] = inner
 
 
@@ -551,6 +564,21 @@ def _check_statement(ctx: _Context, proc_sym: VbaSymbol | None, span: Span) -> N
         return absolute_span(span, toks[i])
 
     if first == "set":
+        # Me always names this object: it can be a value, and a Let reaches its
+        # default member, but nothing can Set it (measured in Excel 16.0). A
+        # standard module has no Me, which me-outside-object-module reports.
+        if (
+            token_text(_at(toks, 1)) == "me"
+            and _raw_at(toks, 2) == "="
+            and ctx.symbols.module_kind is not ModuleSymbolKind.STANDARD
+        ):
+            ctx.push(
+                "invalidAssignmentTarget",
+                "'Me' always refers to this object and cannot be Set to another. This is a VBE "
+                "compile error: Invalid use of Me keyword.",
+                at(1),
+            )
+            return
         name = udt_at(1)
         if name and _raw_at(toks, 2) == "=":
             ctx.push(
@@ -561,10 +589,56 @@ def _check_statement(ctx: _Context, proc_sym: VbaSymbol | None, span: Span) -> N
             )
         return
     if first == "debug" and _raw_at(toks, 1) == "." and token_text(_at(toks, 2)) == "print":
+        # The open parentheses around each token, by whether they hold the
+        # arguments of a call. A Type is a value to Print, and so inside
+        # grouping parentheses and as an array index, but an argument passes
+        # by reference: `Debug.Print Len(t)`, `LenB(t)` and a user Function
+        # taking the Type compile (measured in Excel 16.0). The innermost call
+        # or index decides, with grouping between them transparent: in
+        # `Len(a(t))` the Type is an index, `Len((t))` compiles. Through a
+        # variable, `rec.a(t)` indexes a field and `c.Item(t)` coerces the Type
+        # to a Variant, each refused; a module name or a project class's
+        # variable before the dot may name a procedure that takes the Type.
+        def through_value(dot: int) -> bool:
+            qualifier_tok = _at(toks, dot - 1)
+            qualifier = token_name(qualifier_tok) if qualifier_tok is not None else None
+            variable = (
+                _variable_named(ctx, proc_sym, qualifier)
+                if qualifier is not None and _raw_at(toks, dot - 2) != "."
+                else None
+            )
+            return variable is not None and re.sub(
+                r"^.*\.", "", normalize_type(variable.as_type) or ""
+            ) not in ctx.classes
+
+        opens: list[str] = []
         for i in range(3, len(toks)):
+            raw = toks[i].raw_text
+            if raw == "(":
+                before_tok = _at(toks, i - 1)
+                callee = token_name(before_tok) if i - 1 > 2 and before_tok is not None else None
+                qualified = _raw_at(toks, i - 2) == "."
+                if before_tok is not None and before_tok.raw_text == ")":
+                    opens.append("call")
+                elif callee is None:
+                    opens.append("group")
+                else:
+                    if qualified:
+                        indexes = through_value(i - 2)
+                    else:
+                        callee_variable = _variable_named(ctx, proc_sym, callee)
+                        indexes = callee_variable is not None and callee_variable.is_array is True
+                    opens.append("index" if indexes else "call")
+                continue
+            if raw == ")":
+                if opens:
+                    opens.pop()
+                continue
             name = udt_at(i)
+            innermost = next((open_ for open_ in reversed(opens) if open_ != "group"), None)
             if (
                 name
+                and innermost != "call"
                 and _is_argument_boundary(_at(toks, i - 1))
                 and _is_argument_boundary(_at(toks, i + 1))
             ):
@@ -642,7 +716,9 @@ def _check_statement(ctx: _Context, proc_sym: VbaSymbol | None, span: Span) -> N
         after = _at(toks, i + 1)
         operator_before = before is not None and i - 1 != assignment_eq and _is_operator(before)
         operator_after = after is not None and i + 1 != assignment_eq and _is_operator(after)
-        if operator_before or operator_after:
+        if (operator_before or operator_after) and not unchecked_aggregate_operators(
+            toks, i - 1, operator_before, i + 1, operator_after
+        ):
             _udt_mismatch(ctx, name, at(i))
 
 
@@ -957,6 +1033,13 @@ def _check_type_suffixes(
             after is not None
             and after.start == suffix_tok.end
             and (token_name(after) or after.kind is TokenKind.INTEGER_LITERAL)
+        ):
+            continue
+        # `L1$:` alone at the start of its statement is a label, not the variable.
+        if (
+            i == 0
+            and (len(toks) == 2 or (after is not None and after.kind is TokenKind.COLON))
+            and _LEADING_COLON_RE.match(ctx.source, span.start + suffix_tok.end) is not None
         ):
             continue
         variable = _variable_named(ctx, proc_sym, name)

@@ -44,6 +44,8 @@ class CallableTypeSignature:
     return_type: str | None = None
     # A Function or Property Get, which gives a value; None where unknown.
     valued: bool | None = None
+    # VBA's own function, not a project procedure of the same name.
+    runtime: bool | None = None
 
 
 _SCALAR_RESULT_TYPES = frozenset(
@@ -72,6 +74,22 @@ def call_then_index(sig: CallableTypeSignature, call: CallArguments) -> bool:
     compiles it and indexes the result, as a statement too, `Arr 1` and
     `Call Arr(1)` (XLIDE issue #609, measured in Excel 16.0). A scalar or a typed
     array result refuses the argument at compile."""
+    # VBA's own Now, Time and Command give a Variant, which `v = Now(1)`
+    # indexes: it compiles, and raises 13 when it runs. Date is a keyword
+    # there, and Timer, Time$, Command$, Erl and DoEvents refuse the
+    # argument; so does a project Function Now, and the statement `Now (1)`
+    # is refused too (measured in Excel 16.0). Only an expression's call
+    # leaves explicit_call unset.
+    if (
+        sig.runtime
+        and not call.qualifier
+        and call.explicit_call is None
+        and not call.arguments_parenthesized
+        and len(sig.params) == 0
+        and len(call.slots) > 0
+        and sig.name.lower() in _INDEXED_PARAMETERLESS_BUILT_INS
+    ):
+        return True
     if sig.valued is not True or len(sig.params) > 0 or len(call.slots) == 0:
         return False
     type_ = js_trim(sig.return_type).lower() if sig.return_type is not None else None
@@ -108,7 +126,8 @@ class CallArguments:
     slice_start: int
     qualifier: str | None = None
     lookup_key: str | None = None
-    explicit_call: bool = False
+    # None for a call inside an expression: only a statement's call sets it.
+    explicit_call: bool | None = None
     # True for `Take (i)` as a statement: the space makes the parentheses part of
     # the one argument, which is then passed as a copy, so ByRef exactness does
     # not apply to it (XLIDE issue #111).
@@ -533,6 +552,9 @@ def validate_arity(
             call.name_span,
         )
 
+
+# VBA's parameterless functions whose result `Now(1)` indexes (measured in Excel 16.0).
+_INDEXED_PARAMETERLESS_BUILT_INS = frozenset({"now", "time", "command"})
 
 # VBA functions a parameterless project Function does not hide, by the argument
 # counts that reach them (XLIDE issue #645).

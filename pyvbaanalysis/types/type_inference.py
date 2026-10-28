@@ -35,6 +35,7 @@ from ..completion.member_access import (
     is_explicit_element_accessor,
     library_object_type,
     member_takes_own_arguments,
+    project_value_type_names,
     resolve_known_object_assignment_type,
     simple_type_name_for_assignment,
 )
@@ -1605,7 +1606,9 @@ def create_object_assignment_type_resolver(
     ) -> KnownObjectAssignmentType | None:
         # Raw keys preserve the display spelling used for generic and host types.
         if type_name not in queries:
-            queries[type_name] = resolve_known_object_assignment_type(type_name, member_ctx, lookup)
+            queries[type_name] = resolve_known_object_assignment_type(
+                type_name, member_ctx, lookup, lambda: project_value_type_names(member_ctx)
+            )
         return queries[type_name]
 
     return resolve

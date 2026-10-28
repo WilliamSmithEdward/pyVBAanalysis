@@ -1336,13 +1336,14 @@ def _null_from_choice(
     """A Choose, Switch or IIf whose literal arguments make it return Null
     (XLIDE issue #243, measured in Excel 16.0): `Choose(5, 1, 2)` and
     `Choose(0, "a")` name no choice, `Switch(False, 1)` finds no True
-    condition, and `IIf(False, 1, Null)` takes its Null. A module procedure of
-    the same name is the module's."""
+    condition, and `IIf(False, 1, Null)` takes its Null. `Str(Null)` gives
+    its Null back, which a String refuses with 94 (measured in Excel 16.0). A
+    module procedure of the same name is the module's."""
     toks = _non_comment(value_tokens)
     start = 2 if token_text(_at(toks, 0)) == "vba" and _raw_at(toks, 1) == "." else 0
     fn = token_text(_at(toks, start))
     if (
-        fn not in ("choose", "switch", "iif")
+        fn not in ("choose", "switch", "iif", "str")
         or _raw_at(toks, start + 1) != "("
         or match_paren_from(toks, start + 1) != len(toks) - 1
     ):
@@ -1368,6 +1369,12 @@ def _null_from_choice(
 
     shown = "".join(tok.raw_text for tok in toks[start:]).replace(",", ", ")
     first, last = toks[0], toks[-1]
+    if fn == "str":
+        return (
+            _NullChoice(f"{shown} gives its Null argument back", first, last)
+            if len(args) == 1 and len(args[0]) == 1 and token_text(args[0][0]) == "null"
+            else None
+        )
     if fn == "choose":
         index = literal(args[0]) if len(args) > 1 else None
         choices = len(args) - 1

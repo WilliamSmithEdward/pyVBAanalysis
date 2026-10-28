@@ -720,9 +720,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     ),
     DiagnosticRuleEntry(
         name="parameterDefaultNotConstant",
-        run=lambda ctx, push: check_non_constant_parameter_defaults(
-            ctx.source, ctx.mod, ctx.activity, ctx.member_ctx, push
-        ),
+        run=lambda ctx, push: check_non_constant_parameter_defaults(ctx.source, ctx.mod, ctx.activity, push),
     ),
     DiagnosticRuleEntry(
         name="constValueNotConstant",
