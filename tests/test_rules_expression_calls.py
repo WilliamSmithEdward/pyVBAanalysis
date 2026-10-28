@@ -220,10 +220,20 @@ def test_valid_calls_silent() -> None:
     assert not (_codes(src) & set(_CODES))
 
 
+# A value that ends at an operator, `n = 1 +`, is a Syntax error the VBE
+# reports, and also the line someone is typing: upstream keeps it quiet on
+# purpose and asserts that it stays quiet (XLIDE issue #1415).
+_TYPED_LINE_CASES = frozenset(
+    f"issue1415_{host}{name}_compile"
+    for name in ("g6_inline_else_dangling_plus", "h_trailing_plus", "h_inline_trailing_plus")
+    for host in ("", "word_", "powerpoint_", "access_")
+)
+
+
 def test_oracle_asserted_cases() -> None:
     for code in _CODES:
         if asserted_cases(code):
-            assert assert_oracle_behavior(code) > 0
+            assert assert_oracle_behavior(code, _TYPED_LINE_CASES) > 0
 
 
 def test_no_false_positives_on_accepted_cases() -> None:

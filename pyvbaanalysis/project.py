@@ -43,6 +43,7 @@ def analyze_module_options_for(
     host: str | None = None,
     referenced_hosts: Sequence[str] | None = None,
     referenced_libraries: Sequence[str] | None = None,
+    project_name: str | None = None,
     workbook_sheets: Sequence[WorkbookSheetInfo] | None = None,
 ) -> AnalyzeModuleOptions:
     """Build the AnalyzeModuleOptions for one module from a populated ProjectIndex.
@@ -62,6 +63,8 @@ def analyze_module_options_for(
     the reference list is unknown, [] that it is known to name nothing else.
     ``referenced_libraries`` names every library the project references as its dir
     stream records them (`Scripting`, `MSForms`); None means unknown.
+    ``project_name`` is the project's own name as its dir stream records it
+    (`VBAProject`), read with the references; None means unknown.
     ``workbook_sheets`` lists the sheets of the workbook the project lives in, in
     tab order, for an Excel file.
     """
@@ -69,6 +72,7 @@ def analyze_module_options_for(
         host=host,
         referenced_hosts=referenced_hosts,
         referenced_libraries=referenced_libraries,
+        project_name=project_name,
         workbook_sheets=workbook_sheets,
         module_name=module_name,
         module_kind=module_kind,
@@ -90,6 +94,7 @@ def analyze_module_options_for(
         implemented_interfaces=index.implemented_interface_names(),
         project_string_literal_words=index.string_literal_words(),
         project_runnable_procedures=index.runnable_procedure_names(),
+        project_module_names=frozenset(name.lower() for name in index.module_names()),
         project_written_names=index.written_names(),
         project_name_mentions=index.name_mentions(),
         project_sheet_changes=index.sheet_changes(),
@@ -151,6 +156,7 @@ def analyze_project(
     host: str | None = None,
     referenced_hosts: Sequence[str] | None = None,
     referenced_libraries: Sequence[str] | None = None,
+    project_name: str | None = None,
     workbook_sheets: Sequence[WorkbookSheetInfo] | None = None,
 ) -> dict[str, list[VbaDiagnostic]]:
     """Analyze a whole VBA project with full cross-module context.
@@ -206,6 +212,7 @@ def analyze_project(
             host=host,
             referenced_hosts=referenced_hosts,
             referenced_libraries=referenced_libraries,
+            project_name=project_name,
             workbook_sheets=workbook_sheets,
         )
         results[module.module_name] = analyze_module(module.source, opts)

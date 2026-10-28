@@ -12,7 +12,9 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from ..call.call_context import bare_call_statement_target
 from ..js_compat import js_trim
@@ -44,6 +46,8 @@ class CallableTypeSignature:
     return_type: str | None = None
     # A Function or Property Get, which gives a value; None where unknown.
     valued: bool | None = None
+    # VBA's own function, not a project procedure of the same name.
+    runtime: bool | None = None
 
 
 _SCALAR_RESULT_TYPES = frozenset(
@@ -72,6 +76,22 @@ def call_then_index(sig: CallableTypeSignature, call: CallArguments) -> bool:
     compiles it and indexes the result, as a statement too, `Arr 1` and
     `Call Arr(1)` (XLIDE issue #609, measured in Excel 16.0). A scalar or a typed
     array result refuses the argument at compile."""
+    # VBA's own Now, Time and Command give a Variant, which `v = Now(1)`
+    # indexes: it compiles, and raises 13 when it runs. Date is a keyword
+    # there, and Timer, Time$, Command$, Erl and DoEvents refuse the
+    # argument; so does a project Function Now, and the statement `Now (1)`
+    # is refused too (measured in Excel 16.0). Only an expression's call
+    # leaves explicit_call unset.
+    if (
+        sig.runtime
+        and not call.qualifier
+        and call.explicit_call is None
+        and not call.arguments_parenthesized
+        and len(sig.params) == 0
+        and len(call.slots) > 0
+        and sig.name.lower() in _INDEXED_PARAMETERLESS_BUILT_INS
+    ):
+        return True
     if sig.valued is not True or len(sig.params) > 0 or len(call.slots) == 0:
         return False
     type_ = js_trim(sig.return_type).lower() if sig.return_type is not None else None
@@ -107,8 +127,11 @@ class CallArguments:
     slots: list[list[VbaToken]]
     slice_start: int
     qualifier: str | None = None
+    # `VBA.Len(...)`: the qualifier is VBA's own library, and only its function is meant.
+    vba_library: bool = False
     lookup_key: str | None = None
-    explicit_call: bool = False
+    # None for a call inside an expression: only a statement's call sets it.
+    explicit_call: bool | None = None
     # True for `Take (i)` as a statement: the space makes the parentheses part of
     # the one argument, which is then passed as a copy, so ByRef exactness does
     # not apply to it (XLIDE issue #111).
@@ -289,11 +312,60 @@ def extract_call(source: str, span: Span) -> CallArguments | None:
     )
 
 
+_LINE_LABEL_COLON_RE = re.compile(r"[ \t]*:")
+
+
+def argument_list_statement_call(source: str, span: Span, names: AbstractSet[str]) -> CallArguments | None:
+    """`Kill "a", "b"`: one of the statements the call extractor leaves to rules of
+    their own, read as the call it also is, for its argument count."""
+    toks = statement_tokens(source, span)
+    at = first_executable_token_index(toks)
+    name = token_name(toks[at]) if at < len(toks) else None
+    following = toks[at + 1].raw_text if at + 1 < len(toks) else None
+    if not name or name.lower() not in names or following in ("=", ".", "(", ":"):
+        return None
+    # `Kill:` is a line label of that name (XLIDE issue #272); the colon ends the
+    # statement's span, so look past it in the source.
+    name_end = span.start + toks[at].end
+    if _LINE_LABEL_COLON_RE.match(source[name_end : name_end + 64]) is not None:
+        return None
+    arg_toks = toks[at + 1 :]
+    split = empty_arg_split() if not arg_toks else split_arg_slots(arg_toks, span.start)
+    return CallArguments(
+        name=name,
+        name_span=Span(span.start + toks[at].start, span.start + toks[at].end),
+        slots=split.slots,
+        slot_spans=split.spans,
+        slice_start=span.start,
+    )
+
+
+class VariableShadows(Protocol):
+    """What module_qualifier_shadowed reads of a SourceNameScope."""
+
+    @property
+    def variable_shadows(self) -> AbstractSet[str]: ...
+
+
+def module_qualifier_shadowed(qualifier: str, source_names: VariableShadows | None) -> bool:
+    """Whether `Qualifier.Member` reaches a variable rather than the standard
+    module named Qualifier. A local, a parameter or a variable of the current
+    module takes the name, even in that module itself, so `Other.Foo()` is a
+    member call on the variable and Other's Foo is never checked against it. A
+    Public variable of a third module does not take it. Both measured in Excel,
+    Word, PowerPoint and Access 16.0 (XLIDE issue #1411)."""
+    return source_names is not None and qualifier.lower() in source_names.variable_shadows
+
+
 def extract_qualified_call(
-    source: str, span: Span, module_signatures: Mapping[str, CallableTypeSignature]
+    source: str,
+    span: Span,
+    module_signatures: Mapping[str, CallableTypeSignature],
+    source_names: VariableShadows | None = None,
 ) -> CallArguments | None:
     """A module-qualified call statement (`ModuleName.Procedure ...`), proven by the
-    project signature map; host/object member calls stay out of the validator."""
+    project signature map, and no variable in `source_names` takes the module's
+    name; host/object member calls stay out of the validator."""
     slice_start = span.start
     toks = _significant_slice_tokens(source, span)
     if not toks:
@@ -310,7 +382,7 @@ def extract_qualified_call(
     if not qualifier or dot is None or dot.raw_text != "." or not name or callee is None:
         return None
     lookup_key = qualified_procedure_key(qualifier, name)
-    if lookup_key not in module_signatures:
+    if lookup_key not in module_signatures or module_qualifier_shadowed(qualifier, source_names):
         return None
 
     next_tok = toks[qualifier_idx + 3] if qualifier_idx + 3 < len(toks) else None
@@ -533,6 +605,9 @@ def validate_arity(
             call.name_span,
         )
 
+
+# VBA's parameterless functions whose result `Now(1)` indexes (measured in Excel 16.0).
+_INDEXED_PARAMETERLESS_BUILT_INS = frozenset({"now", "time", "command"})
 
 # VBA functions a parameterless project Function does not hide, by the argument
 # counts that reach them (XLIDE issue #645).

@@ -5,6 +5,37 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 3.0.2 - 2026-10-28
+
+Sync the analyzer and evidence data to XLIDE 11.2.1 (commit 4f728e9). The
+oracle corpus grows from 9,273 to 14,868 cases measured in Excel, Word,
+PowerPoint and Access, and the catalogue to 226 rules and 229 codes.
+
+* Read compiler directives as the VBE does: a `Rem` or a colon on a directive
+  line, a reserved `#Const` name, a directive that does not start its logical
+  line, string conditions converted as VBA converts them, and a `#Const` that
+  reads an unknown name. New codes `directive-type-mismatch` and
+  `nothing-directive-condition`; Null conditions are reported in skipped arms.
+* Report a module member that clashes with its document's base class
+  (`member-exists-in-base-class`) and a type no referenced library holds, in
+  every Office host.
+* Add the Outlook object library as a project reference, with its Application
+  members bound bare after the host's own, and report a type qualified by a
+  library the project does not reference. Office files now pass their project
+  name to the analysis.
+* Keep a renamed workbook or document module's host type, and check a document
+  module reached from another module against its host class.
+* Judge expression shapes the same in every statement, including For bounds,
+  ReDim bounds, subscripted Next counters and nested one-line Ifs. New codes
+  `for-bound-array`, `redim-bound-array` and `array-bound-overflow`; ReDim
+  element types are compared by identity.
+* Let `Is` and `TypeOf` judge the results of VBA's own functions, and read
+  designer controls and attributes for UserForms and document modules.
+* Clear false positives Excel 16.0 compiles or runs: reserved words as Type
+  member names, an Else after a colon in a one-line If, a procedure closer in
+  each arm of an `#If`, module names a variable takes, a default member that
+  returns an object, and a procedure's DefType taken from its own module.
+
 ## 3.0.1 - 2026-10-06
 
 Sync the analyzer and evidence data to XLIDE 11.1.0 (commit 8f64c2c).

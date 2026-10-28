@@ -1671,6 +1671,98 @@ def _const_value_tokens(raw: str) -> tuple[VbaToken, ...]:
     return tuple(_without_comments(raw_expression_tokens(raw)))
 
 
+@dataclass(slots=True)
+class _FolderScope:
+    children: Sequence[VbaSymbol]
+    names: _NameLookup | None = None
+
+
+def constant_number_folder(
+    symbols: ModuleSymbols,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+) -> Callable[[str, ProcedureNode | None], float | None]:
+    """The number a constant expression comes to, typed as VBA types it:
+    literals, and the Consts and Enum members of the project, the module and,
+    given one, the procedure, where a local or parameter hides a Const of its
+    name. None where it does not fold or overflows on the way. An array bound
+    reads it, for a Double Const or `2147483647# + 1` (XLIDE issue #1412).
+
+    Text with no float literal, no `/` or `^` and no Const or Enum name is
+    whole-number arithmetic at most, or names a variable: it is not folded, and
+    the Consts are folded only for text that may need them. `ReDim a(n)` costs a
+    name check."""
+    module_symbols: list[Sequence[VbaSymbol]] = []
+    module_names: list[frozenset[str]] = []
+    module_constants: list[Mapping[str, _Typed]] = []
+    # By the procedure's identity, the procedure kept alive beside its scope.
+    procedures: dict[int, tuple[ProcedureNode | None, _FolderScope]] = {}
+
+    def module_symbols_of() -> Sequence[VbaSymbol]:
+        if not module_symbols:
+            module_symbols.append([*(project_visible_symbols or []), *(symbols.root.children or [])])
+        return module_symbols[0]
+
+    def scope_of(member: ProcedureNode | None) -> _FolderScope:
+        entry = procedures.get(id(member))
+        if entry is None or entry[0] is not member:
+            children: Sequence[VbaSymbol] = []
+            if member is not None:
+                proc_sym = procedure_symbol_for(symbols, member)
+                children = (proc_sym.children or []) if proc_sym is not None else []
+            entry = (member, _FolderScope(children))
+            procedures[id(member)] = entry
+        return entry[1]
+
+    def may_need_folding(toks: Sequence[VbaToken], children: Sequence[VbaSymbol]) -> bool:
+        if not module_names:
+            module_names.append(_constant_names(module_symbols_of()))
+        names = module_names[0]
+        for tok in toks:
+            if tok.kind is TokenKind.FLOAT_LITERAL or tok.raw_text in ("/", "^"):
+                return True
+            if tok.kind is TokenKind.IDENTIFIER:
+                lower = tok.raw_text.lower()
+                if lower in names or any(
+                    child.kind in (VbaSymbolKind.CONSTANT, VbaSymbolKind.ENUM) and child.name.lower() == lower
+                    for child in children
+                ):
+                    return True
+        return False
+
+    def fold(text: str, member: ProcedureNode | None = None) -> float | None:
+        toks = raw_expression_tokens(text)
+        scope = scope_of(member)
+        if not may_need_folding(toks, scope.children):
+            return None
+        if scope.names is None:
+            if not module_constants:
+                module_constants.append(_constant_lookup({}, module_symbols_of()))
+            constants = _constant_lookup(module_constants[0], scope.children)
+            hidden = frozenset(
+                child.name.lower()
+                for child in scope.children
+                if child.kind in (VbaSymbolKind.LOCAL_VARIABLE, VbaSymbolKind.PARAMETER)
+            )
+            scope.names = _NameLookup(lambda lower: None if lower in hidden else constants.get(lower))
+        folded = _fold(toks, 0, scope.names)
+        return None if folded is None or isinstance(folded, _Overflow) else folded.value
+
+    return fold
+
+
+def _constant_names(candidates: Sequence[VbaSymbol]) -> frozenset[str]:
+    """The names of the Consts and Enums among `candidates`, an Enum's members too."""
+    names: set[str] = set()
+    for symbol in candidates:
+        if symbol.kind is VbaSymbolKind.CONSTANT:
+            names.add(symbol.name.lower())
+        elif symbol.kind is VbaSymbolKind.ENUM:
+            names.add(symbol.name.lower())
+            for member in symbol.children or []:
+                names.add(member.name.lower())
+    return frozenset(names)
+
+
 _SHEET_ROWS = 1048576
 _SHEET_COLUMNS = 16384
 

@@ -34,6 +34,7 @@ from ...constants.integer_constant_expression import (
 from ...flow.procedure_labels import jump_target_label_declaration
 from ...flow.procedure_unstructured import procedure_has_unstructured_flow
 from ...host.host_model import HostObjectModel
+from ...host.library_type_names import library_type_names
 from ...identity_cache import IdentityLru
 from ...js_compat import JS_WHITESPACE, js_number, js_number_to_string, js_trim, utf16_length
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups, top_level_equals_index
@@ -58,10 +59,17 @@ from ...parser.nodes import (
     VariableGroupNode,
     WhileBlockNode,
     is_leaf_statement,
+    iter_body_nodes,
     iter_body_nodes_in_context,
 )
 from ...symbols.name_resolution import BareIdentifierContext, BareIdentifierResolutionScope
-from ...symbols.symbol_model import ModuleSymbols, SymbolVisibility, VbaSymbol, VbaSymbolKind
+from ...symbols.symbol_model import (
+    ModuleSymbols,
+    SymbolVisibility,
+    VbaProjectTypeName,
+    VbaSymbol,
+    VbaSymbolKind,
+)
 from ...types.type_inference import (
     DeclaredValueShape,
     SourceDeclaredShape,
@@ -103,6 +111,7 @@ from ..walker import (
     absolute_span,
     active_module_members,
     bare_assignment_target,
+    block_footer_line_span,
     for_each_statement,
     for_each_statement_with_headers,
     for_each_variable_group,
@@ -115,6 +124,7 @@ from ..walker import (
     token_name,
     token_text,
 )
+from .overflow import constant_number_folder
 from .shared import is_bare_or_vba_qualified_intrinsic_call, source_expression_syntax_problem
 
 # -- node-keyed lookups ----------------------------------------------------
@@ -230,6 +240,76 @@ def check_array_bound_intrinsic_arguments(
         return visitor
 
     return factory
+
+
+def check_indexed_next_counters(
+    source: str,
+    mod: ModuleNode,
+    symbols: ModuleSymbols,
+    activity: ConditionalActivityTracker | None,
+    push: PushFn,
+) -> None:
+    """`For i = 1 To 2 ... Next i(1)`: a Next given a subscript. On a counter of
+    a numeric or Date type it is Expected array, and on a Variant one Invalid
+    Next control variable reference; a Boolean or String counter is
+    for-counter-type's first (XLIDE issue #1417, measured in Excel, Word,
+    PowerPoint and Access 16.0). A type character on the name, `Next i&(1)`,
+    changes nothing."""
+    for member in active_module_members(mod, activity):
+        if not isinstance(member, ProcedureNode):
+            continue
+        shapes: Mapping[str, DeclaredValueShape] | None = None
+        # An If block's flat body holds every arm's statements.
+        for node in iter_body_nodes(member.body, inactive_node_skip(activity)):
+            # The parser drops a Next variable a subscript follows, so read the footer.
+            indexed = (
+                _indexed_next_variable(source, node.span)
+                if isinstance(node, ForBlockNode) and not node.each and node.closed
+                else None
+            )
+            if indexed is None:
+                continue
+            name, span = indexed
+            if shapes is None:
+                shapes = declaration_shape_environment_for(symbols, member)
+            shape = shapes.get(name.lower())
+            type_ = (
+                normalize_type(shape.as_type if shape.as_type is not None else "Variant")
+                if shape is not None and not shape.is_array
+                else None
+            )
+            if type_ == "variant":
+                push(
+                    "nextVariableMismatch",
+                    f"Next names its counter '{name}' with a subscript, and a Next takes the counter "
+                    "alone. This is a VBE compile error: Invalid Next control variable reference.",
+                    span,
+                )
+            elif type_ and is_known_scalar_type(type_) and type_ not in ("boolean", "string"):
+                assert shape is not None
+                push(
+                    "scalarIndexed",
+                    f"'{name}' is declared As {shape.as_type}, which is no array to index. "
+                    "This is a VBE compile error: Expected array.",
+                    span,
+                )
+
+
+_TYPE_CHARACTER_RE = re.compile(r"\A[%&^@!#$]\Z")
+
+
+def _indexed_next_variable(source: str, span: Span) -> tuple[str, Span] | None:
+    """`Next i(1)` or `Next i&(1)` on a For block's last line: the name and its span."""
+    footer = block_footer_line_span(source, span)
+    toks = statement_tokens_after_leading_label(source, footer)
+    name = token_name(_at(toks, 1)) if token_text(_at(toks, 0)) == "next" else None
+    if not name:
+        return None
+    third = _at(toks, 2)
+    suffix = 1 if third is not None and third.start == toks[1].end and _TYPE_CHARACTER_RE.match(third.raw_text) else 0
+    if _raw_at(toks, 2 + suffix) != "(":
+        return None
+    return (name, Span(footer.start + toks[1].start, footer.start + toks[1].end))
 
 
 _SCALAR_INDEXED_SKIPPED_LEADS = frozenset(
@@ -652,12 +732,16 @@ def check_redim_type_change(
     mod: ModuleNode,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    symbols: ModuleSymbols | None = None,
+    project_types: Sequence[VbaProjectTypeName] | None = None,
+    model: HostObjectModel | None = None,
 ) -> ProcedureStatementVisitor:
     """Rule: a ReDim may not give a dynamic array another element type. `Dim x()
     As String` then `ReDim x(1) As Long` is "Can't change data types of array
     elements" in the VBE, and so is `Dim v()` then `ReDim v(1) As Long`, with
     Preserve or without; a Variant that is not an array takes any ReDim (issue
     #212, measured in Excel 16.0)."""
+    identity = _element_type_identity_resolver(symbols, project_types, model)
     module_arrays: dict[str, str | None] = {}
     for member in active_module_members(mod, activity):
         if isinstance(member, VariableGroupNode) and not member.is_const:
@@ -684,7 +768,13 @@ def check_redim_type_change(
                 if key in params:
                     continue
                 declared = local_arrays.get(key) if key in local_arrays else module_arrays.get(key)
-                if declared is None or declared == target.as_type.name.lower():
+                if declared is None:
+                    continue
+                # The same type spelled two ways, `Collection` and
+                # `VBA.Collection`, is no change (issue #1412).
+                before = identity(declared)
+                after = identity(target.as_type.name)
+                if before is None or after is None or before == after:
                     continue
                 push(
                     "redimTypeChange",
@@ -697,6 +787,59 @@ def check_redim_type_change(
         return visitor
 
     return factory
+
+
+# The intrinsic types a ReDim can name, lowercased.
+_INTRINSIC_ELEMENT_TYPES = frozenset(
+    {
+        "byte", "boolean", "integer", "long", "longlong", "longptr", "currency",
+        "single", "double", "date", "string", "object", "variant", "decimal",
+    }
+)
+
+
+def _element_type_identity_resolver(
+    symbols: ModuleSymbols | None,
+    project_types: Sequence[VbaProjectTypeName] | None,
+    model: HostObjectModel | None,
+) -> Callable[[str], str | None]:
+    """Which type an element type names, as a key two spellings of one type
+    share: a project's own Collection is not VBA.Collection, and an unqualified
+    Collection is the project's when the project has one, VBA's otherwise
+    (issue #1412, measured in Excel, Word, PowerPoint and Access 16.0). An
+    unqualified name resolves the way VBA does: the project's types, then its
+    intrinsic ones, then VBA's library, the host's, DAO in Access, Office and
+    stdole. A name qualified by anything else gives None, and the comparison
+    is not made; a name none of those knows keys on its spelling."""
+    own: set[str] = set()
+    for project_type in project_types or []:
+        own.add(project_type.name.lower())
+    for child in (symbols.root.children or []) if symbols is not None else []:
+        if child.kind in (VbaSymbolKind.TYPE, VbaSymbolKind.ENUM):
+            own.add(child.name.lower())
+    host_name = model.get("hostName") if model is not None else None
+    host = (host_name if host_name is not None else "Excel").lower()
+    libraries = ["vba", host, *(["dao"] if host == "access" else []), "office", "stdole"]
+
+    def resolve(type_name: str) -> str | None:
+        lower = _JS_WHITESPACE_RUN_RE.sub("", type_name).lower()
+        dot = lower.rfind(".")
+        if dot >= 0:
+            library = lower[:dot]
+            name = lower[dot + 1 :]
+            names = library_type_names(library) if library in libraries else None
+            return f"{library}.{name}" if names is not None and name in names else None
+        if lower in own:
+            return f"project.{lower}"
+        if lower in _INTRINSIC_ELEMENT_TYPES:
+            return lower
+        for candidate in libraries:
+            names = library_type_names(candidate)
+            if names is not None and lower in names:
+                return f"{candidate}.{lower}"
+        return f"unresolved.{lower}"
+
+    return resolve
 
 
 # -- comparable literal-bound folding ---------------------------------------
@@ -786,6 +929,7 @@ def check_redim_impossible_bounds(
     module_declarations = _redim_blocked_declarations_for_module(mod, activity)
     option_base = module_option_base(mod, activity)
     module_constants = _module_integer_constants(mod, project_integer_constants, activity)
+    folder = constant_number_folder(symbols, project_visible_symbols)
 
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
         local_declarations = _redim_blocked_declarations_for_body(member.body, activity)
@@ -802,6 +946,9 @@ def check_redim_impossible_bounds(
             return constants[0]
 
         values_at = known_local_literal_values_at(source, member, symbols, activity)
+
+        def fold(text: str) -> float | None:
+            return folder(text, member)
 
         def visitor(stmt: LeafStatementNode) -> None:
             # `zz = -1` then `ReDim a(zz)` (issue #238).
@@ -823,6 +970,15 @@ def check_redim_impossible_bounds(
                 if blocked is not None:
                     continue
                 for index, dimension in enumerate(target.dimensions):
+                    outside = _bound_outside_long(source, dimension.span, lookup(), fold)
+                    if outside is not None:
+                        push(
+                            "arithmeticOverflow",
+                            f"ReDim bound {_fmt(outside)} for dimension {index + 1} of '{target.name}' is "
+                            "outside the range of a Long; this will raise Run-time error '6': Overflow.",
+                            dimension.span,
+                        )
+                        continue
                     # `ReDim a(-1)`: the lower bound is Option Base, 0 by default,
                     # and an upper bound below it is the same impossibility as
                     # `ReDim a(5 To 1)` (issue #120, measured in Excel 16.0).
@@ -863,6 +1019,9 @@ def check_array_declaration_bounds(
        literal or a constant expression the module, the procedure, another
        module's Public Const, an Enum or the host defines (issue #209). A bound
        that names a variable stays quiet.
+     - `array-bound-overflow`: a bound a Long cannot hold, "Overflow" in the
+       VBE: `Dim a(2147483648#)`, `Dim a(N)` with N a Double Const past the
+       range (issue #1412). The dimension is not also judged for its order.
      - `too-many-array-dimensions`: more than 60 dimensions, in a Type member too.
     ReDim is covered separately by check_redim_impossible_bounds."""
     option_base = module_option_base(mod, activity)
@@ -878,23 +1037,36 @@ def check_array_declaration_bounds(
             )
         return module_lookup[0]
 
-    def inspect_group(group: VariableGroupNode, lookup: Callable[[], IntegerConstantLookup]) -> None:
+    # Read only for a bound that whole-number folding cannot read.
+    folder = constant_number_folder(symbols, project_visible_symbols)
+    module_bounds = _BoundScope(module_scope, lambda text: folder(text, None))
+
+    def inspect_group(group: VariableGroupNode, scope: _BoundScope) -> None:
         for decl in group.declarations:
             if not decl.is_array or decl.array_bounds is None or is_inactive_node(activity, decl):
                 continue
-            _inspect_array_declaration(source, decl, lookup, option_base, push)
+            _inspect_array_declaration(source, decl, scope, option_base, push)
 
     for member in active_module_members(mod, activity):
         if isinstance(member, VariableGroupNode):
-            inspect_group(member, module_scope)
+            inspect_group(member, module_bounds)
         elif isinstance(member, TypeNode):
             for type_field in member.fields:
                 if type_field.is_array and not is_inactive_node(activity, type_field):
-                    _inspect_array_declaration(source, type_field, module_scope, option_base, push)
+                    _inspect_array_declaration(source, type_field, module_bounds, option_base, push)
         elif isinstance(member, ProcedureNode):
             _inspect_procedure_declarations(
-                member, module_constants, symbols, project_visible_symbols, activity, host_model, inspect_group
+                member, module_constants, symbols, project_visible_symbols, activity, host_model, inspect_group,
+                folder,
             )
+
+
+@dataclass(frozen=True)
+class _BoundScope:
+    """How a declaration's bounds are read: whole-number Consts first, then VBA's typed folding."""
+
+    lookup: Callable[[], IntegerConstantLookup]
+    fold: Callable[[str], int | float | None]
 
 
 def _inspect_procedure_declarations(
@@ -904,7 +1076,8 @@ def _inspect_procedure_declarations(
     project_visible_symbols: Sequence[VbaSymbol] | None,
     activity: ConditionalActivityTracker | None,
     host_model: HostObjectModel | None,
-    inspect_group: Callable[[VariableGroupNode, Callable[[], IntegerConstantLookup]], None],
+    inspect_group: Callable[[VariableGroupNode, _BoundScope], None],
+    folder: Callable[[str, ProcedureNode | None], float | None],
 ) -> None:
     constants: list[IntegerConstantLookup] = []
 
@@ -917,7 +1090,8 @@ def _inspect_procedure_declarations(
             )
         return constants[0]
 
-    for_each_variable_group(member.body, lambda group: inspect_group(group, procedure_scope), activity)
+    scope = _BoundScope(procedure_scope, lambda text: folder(text, member))
+    for_each_variable_group(member.body, lambda group: inspect_group(group, scope), activity)
 
 
 def _module_integer_constants(
@@ -934,14 +1108,24 @@ _FLOAT_TYPE_SUFFIX_RE = re.compile(r"[!#@]\Z")
 _DOUBLE_EXPONENT_RE = re.compile(r"[dD]")
 
 
-def _impossible_bounds(
-    source: str, span: Span, lookup: IntegerConstantLookup, option_base: int
-) -> tuple[str, int | float] | None:
-    """A dimension's bounds when the lower is above the upper, folded through
-    constants. With no `To`, the lower bound is Option Base. A bound that is a
-    lone float literal is rounded half to even, as VBA rounds it: `1.5 To 1` is
-    refused and `2.5 To 2` is not (issue #209). None when either bound is
-    unknown or the bounds are fine. Returns (lower text, upper)."""
+@dataclass(frozen=True)
+class _DimensionBounds:
+    """One dimension's bounds where they are known: the lower one only when it is written."""
+
+    lower: int | float | None
+    upper: int | float | None
+    explicit_lower: bool
+    # A bound holds a type-suffixed literal its type cannot hold, a compile error of its own.
+    malformed_literal: bool
+    # Each written bound's text, for a reading past whole numbers.
+    lower_text: str | None = None
+    upper_text: str | None = None
+
+
+def _dimension_bounds(source: str, span: Span, lookup: IntegerConstantLookup) -> _DimensionBounds:
+    """A dimension's bounds, folded through constants. A bound that is a lone
+    float literal is rounded half to even, as VBA rounds it: `1.5 To 1` is
+    refused and `2.5 To 2` is not (issue #209)."""
     text = source[span.start : span.end]
     toks = [tok for tok in tokenize(text) if tok.kind not in (TokenKind.COMMENT, TokenKind.NEWLINE)]
     depth = 0
@@ -968,18 +1152,89 @@ def _impossible_bounds(
             return rounded + 0
         return evaluate_integer_constant_expression(text[part[0].start : part[-1].end], lookup)
 
-    upper = side(toks if to < 0 else toks[to + 1 :])
-    lower = option_base if to < 0 else side(toks[:to])
+    upper_part = toks if to < 0 else toks[to + 1 :]
+    lower_part = [] if to < 0 else toks[:to]
+    return _DimensionBounds(
+        lower=side(lower_part),
+        upper=side(upper_part),
+        explicit_lower=to >= 0,
+        malformed_literal=any(_suffixed_literal_out_of_range(tok) for tok in toks),
+        lower_text=text[lower_part[0].start : lower_part[-1].end] if lower_part else None,
+        upper_text=text[upper_part[0].start : upper_part[-1].end] if upper_part else None,
+    )
+
+
+def _impossible_bounds(
+    source: str, span: Span, lookup: IntegerConstantLookup, option_base: int
+) -> tuple[str, int | float] | None:
+    """A dimension's bounds when the lower is above the upper. With no `To`, the
+    lower bound is Option Base. None when either bound is unknown or the bounds
+    are fine. Returns (lower text, upper)."""
+    bounds = _dimension_bounds(source, span, lookup)
+    upper = bounds.upper
+    lower = bounds.lower if bounds.explicit_lower else option_base
     if upper is None or lower is None or lower <= upper:
         return None
-    lower_text = f"{_fmt(lower)} (Option Base {_fmt(lower)})" if to < 0 else _fmt(lower)
+    lower_text = _fmt(lower) if bounds.explicit_lower else f"{_fmt(lower)} (Option Base {_fmt(lower)})"
     return (lower_text, upper)
+
+
+_LONG_MIN = -2147483648
+_LONG_MAX = 2147483647
+_SUFFIX_RANGES: dict[str, tuple[int, int]] = {
+    "%": (-32768, 32767),
+    "&": (_LONG_MIN, _LONG_MAX),
+}
+_RADIX_PREFIX_RE = re.compile(r"\A&[hHoO]")
+
+
+def _suffixed_literal_out_of_range(tok: VbaToken) -> bool:
+    """`2147483648&`: an Integer or Long literal its type cannot hold, which the VBE refuses to parse."""
+    limits = _SUFFIX_RANGES.get(tok.raw_text[-1:]) if tok.kind is TokenKind.INTEGER_LITERAL else None
+    if limits is None or _RADIX_PREFIX_RE.match(tok.raw_text):
+        return False
+    value = js_number(tok.raw_text[:-1])
+    return math.isfinite(value) and (value < limits[0] or value > limits[1])
+
+
+def _bound_outside_long(
+    source: str,
+    span: Span,
+    lookup: IntegerConstantLookup,
+    fold: Callable[[str], int | float | None],
+) -> int | float | None:
+    """A bound a Long cannot hold once it is rounded half to even, as VBA makes
+    a bound whole: `ReDim a(2147483648#)` raises 6 and `Dim a(2147483648#)` is
+    refused with "Overflow" (issue #1412, measured in Excel, Word, PowerPoint
+    and Access 16.0). 2147483647.5 rounds to 2147483648 and is past the range;
+    -2147483648.5 rounds to -2147483648 and is not. A bound whole-number
+    folding cannot read, a Double Const or `2147483647# + 1`, is read by
+    `fold`. A Long- or Integer-suffixed literal out of range is a compile
+    error first, suffixed-literal-overflow's."""
+    bounds = _dimension_bounds(source, span, lookup)
+    if bounds.malformed_literal:
+        return None
+
+    def read(value: int | float | None, text: str | None) -> int | float | None:
+        if value is not None or text is None:
+            return value
+        folded = fold(text)
+        return None if folded is None else bankers_round(folded) + 0
+
+    return next(
+        (
+            value
+            for value in (read(bounds.lower, bounds.lower_text), read(bounds.upper, bounds.upper_text))
+            if value is not None and (value < _LONG_MIN or value > _LONG_MAX)
+        ),
+        None,
+    )
 
 
 def _inspect_array_declaration(
     source: str,
     decl: VariableDeclNode | TypeFieldNode,
-    lookup: Callable[[], IntegerConstantLookup],
+    scope: _BoundScope,
     option_base: int,
     push: PushFn,
 ) -> None:
@@ -1005,7 +1260,16 @@ def _inspect_array_declaration(
         )
     for index, dim_tokens in enumerate(dims):
         span = _token_group_span(decl.span, dim_tokens)
-        bounds = _impossible_bounds(source, span, lookup(), option_base)
+        outside = _bound_outside_long(source, span, scope.lookup(), scope.fold)
+        if outside is not None:
+            push(
+                "arrayBoundOverflow",
+                f"Array '{decl.name}' bound {_fmt(outside)} for dimension {index + 1} is outside the range of a "
+                "Long; this is a VBE compile error: Overflow.",
+                span,
+            )
+            continue
+        bounds = _impossible_bounds(source, span, scope.lookup(), option_base)
         if bounds is None:
             continue
         lower_text, upper = bounds
@@ -1692,13 +1956,19 @@ def _erase_statement_simple_targets(source: str, span: Span) -> set[str]:
         return set()
     out: set[str] = set()
     for group in split_top_level_token_groups(toks, 1, ","):
-        content = _without_comments(group)
-        if len(content) != 1:
-            continue
-        name = token_name(content[0])
+        name = _erase_group_name(_without_comments(group))
         if name:
             out.add(name.lower())
     return out
+
+
+def _erase_group_name(content: Sequence[VbaToken]) -> str | None:
+    """The array an Erase target names: `a`, or `a()` with empty parentheses,
+    which Excel compiles as the same target (`Erase a(), b()`, measured in
+    Excel 16.0). Anything longer is an expression."""
+    if len(content) == 1 or (len(content) == 3 and content[1].raw_text == "(" and content[2].raw_text == ")"):
+        return token_name(content[0])
+    return None
 
 
 # -- checkEraseTargets -------------------------------------------------------
@@ -1769,9 +2039,7 @@ def _erase_scalar_targets(
     out: list[tuple[str, Span, str]] = []
     for group in split_top_level_token_groups(toks, 1, ","):
         content = _without_comments(group)
-        if len(content) != 1:
-            continue
-        name = token_name(content[0])
+        name = _erase_group_name(content)
         if not name:
             continue
         resolved = resolve_shape(name) if resolve_shape is not None else None

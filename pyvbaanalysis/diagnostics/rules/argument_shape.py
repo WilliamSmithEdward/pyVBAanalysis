@@ -173,7 +173,7 @@ def check_argument_shape(
             for call in expression_calls(source, stmt.span, module_signatures, source_names):
                 check_call(call)
             statement_call = extract_call(source, stmt.span) or extract_qualified_call(
-                source, stmt.span, module_signatures
+                source, stmt.span, module_signatures, source_names
             )
             if statement_call is not None:
                 check_call(statement_call)

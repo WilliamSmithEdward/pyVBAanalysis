@@ -95,8 +95,8 @@ def test_referenced_hosts_leave_out_the_projects_own() -> None:
 def test_a_single_known_library_is_the_plain_model() -> None:
     word = host_object_model_for_token("word")
     assert host_object_model_for_tokens(["word"]) is word
-    # Outlook has no model, so it adds nothing.
-    assert host_object_model_for_tokens(["word", "outlook"]) is word
+    # Visio has no model, so it adds nothing.
+    assert host_object_model_for_tokens(["word", "visio"]) is word
     # Excel is the default model, which rides as no model at all.
     assert host_object_model_for_tokens(["excel"]) is None
 

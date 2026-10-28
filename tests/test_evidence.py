@@ -10,9 +10,11 @@ from pyvbaanalysis.evidence import DATA_DIR, load_audit, load_manifest, load_ora
 def test_oracle_cases_load() -> None:
     cases = load_oracle_cases()
     manifest = load_manifest()
-    assert len(cases) == manifest["oracleCaseCount"] == 9273
+    assert len(cases) == manifest["oracleCaseCount"] == 14868
     assert all(c.modules for c in cases)
-    assert all(m.source for c in cases for m in c.modules)
+    # A document module a case only needs to exist (Sheet1, ThisWorkbook) has no
+    # code of its own since XLIDE 11.2.1; every case still has some.
+    assert all(any(m.source for m in c.modules) for c in cases)
     assert all(c.expected in ("rejected", "accepted", "observe") for c in cases)
     assert len({c.id for c in cases}) == len(cases)  # unique ids
 
@@ -20,7 +22,7 @@ def test_oracle_cases_load() -> None:
 def test_audit_loads_and_matches_manifest() -> None:
     audit = load_audit()
     manifest = load_manifest()
-    assert len(audit) == manifest["diagnosticCodeCount"] == 223
+    assert len(audit) == manifest["diagnosticCodeCount"] == 229
     assert {a.code for a in audit} == set(manifest["diagnosticCodes"])
     assert all(a.status in ("vbe-oracle-verified", "spec-derived") for a in audit)
 

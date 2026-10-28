@@ -51,6 +51,8 @@ _PLAIN_KEYS = frozenset(
         "severityOverrides",
         "designerClass",
         "errorsOnly",
+        "projectName",
+        "projectModuleNames",
     }
 )
 
@@ -152,6 +154,16 @@ def _plain_options(opts: Mapping[str, Any], **project: Any) -> AnalyzeModuleOpti
         severity_overrides=opts.get("severityOverrides"),
         designer_class=opts.get("designerClass"),
         errors_only=opts.get("errorsOnly", False),
+        project_name=opts.get("projectName"),
+        # The recorder writes a Set option as JSON, which drops its contents, so a
+        # recorded projectModuleNames says only that the option was there.
+        # _project_options rebuilds it from the project's modules, which is where
+        # upstream takes it from (projectAnalysisOptionsForModule).
+        **(
+            {"project_module_names": frozenset()}
+            if "projectModuleNames" in opts and "project_module_names" not in project
+            else {}
+        ),
         # The recorded calls are upstream's analyzeModule: the rules' own list.
         raw_rule_output=True,
         **project,
@@ -173,6 +185,7 @@ def _rebuilt_index(project: Mapping[str, Any]) -> ProjectIndex:
                 implicit_members=_implicit_members(item.get("implicitMembers")),
                 predeclared_id=item.get("predeclaredId"),
                 designer_class=item.get("designerClass"),
+                document_type=item.get("documentType"),
             )
         )
     return index
@@ -194,6 +207,8 @@ def _project_options(row: Mapping[str, Any]) -> AnalyzeModuleOptions:
             fields["host_model"] = get_excel_object_model() if token == "excel" else host_object_model_for_token(token)
         else:
             fields["host_model"] = host_model["model"]
+    if "projectModuleNames" in row["opts"]:
+        fields["project_module_names"] = frozenset(name.lower() for name in index.module_names())
     return _plain_options(row["opts"], **fields)
 
 

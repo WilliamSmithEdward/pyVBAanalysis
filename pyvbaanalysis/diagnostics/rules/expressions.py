@@ -29,7 +29,7 @@ from ...constants.integer_constant_expression import (
 )
 from ...host.host_model import HostObjectModel
 from ...js_compat import JS_WHITESPACE, js_number
-from ...lexer.token_helpers import match_paren_from, relational_operator_at
+from ...lexer.token_helpers import is_decimal_line_number, match_paren_from, relational_operator_at
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import (
@@ -95,6 +95,7 @@ from ..const_expr import (
     collect_module_literal_integer_constants,
     fold_integer_expression_tokens,
 )
+from ...runtime.vba_value_results import TYPEOF_KEYWORD_OPERANDS
 from ..context import PushFn, statement_tokens
 from ..function_results import FunctionResult, function_integer_result, known_function_results
 from ..known_locals import KnownLocalValue
@@ -111,6 +112,7 @@ from ..walker import (
     block_header_line_span,
     first_executable_token_index,
     raw_expression_tokens,
+    statement_and_branch_spans,
     token_name,
     token_text,
     top_level_operator_index,
@@ -124,7 +126,7 @@ from .arrays import (
     known_array_shapes_at,
     module_option_base,
 )
-from .shared import is_bare_or_vba_qualified_intrinsic_call
+from .shared import is_bare_or_vba_qualified_intrinsic_call, is_line_label_only_statement
 
 
 def check_unbalanced_parens(
@@ -1083,10 +1085,13 @@ def check_string_arithmetic_operands(
                     )
                     if at >= 0:
                         branch_assigns.add(at)
+            # `LSet s = 2` and `RSet s = n` store too: the `=` compares nothing
+            # (measured in Excel 16.0).
+            copies = token_text(_at(toks, 0)) in ("lset", "rset")
             scan_operators(
                 stmt.span.start,
                 toks,
-                _find_index(toks, lambda tok: tok.raw_text == "=") if bare is not None else -1,
+                _find_index(toks, lambda tok: tok.raw_text == "=") if bare is not None or copies else -1,
                 branch_assigns,
             )
 
@@ -1984,6 +1989,148 @@ def _is_non_assignment_statement_leader(word: str) -> bool:
 
 # -- invalid expression syntax ---------------------------------------------
 
+
+def _new_with_argument_list(toks: Sequence[VbaToken], offset: int) -> Span | None:
+    """`Set o = New Class1()`, `New Collection()`, `New Excel.Application()`: New
+    is given a class, never an argument list, and the parentheses are a Syntax
+    error (XLIDE issue #1413, measured in Excel, Word, PowerPoint and Access
+    16.0). The span of the `(`, or None."""
+    for i, tok in enumerate(toks):
+        if token_text(tok) != "new" or (i > 0 and token_text(toks[i - 1]) == "as"):
+            continue
+        j = i + 1
+        if not token_name(_at(toks, j)):
+            continue
+        while _raw_at(toks, j + 1) == "." and token_name(_at(toks, j + 2)):
+            j += 2
+        if _raw_at(toks, j + 1) == "(":
+            return Span(offset + toks[j + 1].start, offset + toks[j + 1].end)
+    return None
+
+
+def _incomplete_assignment_value(toks: Sequence[VbaToken], offset: int) -> tuple[Span, str] | None:
+    """An assignment whose value runs on past a comma, `n = 1, 2`,
+    `.Value = 1, 2`, `!Value = 1, 2`: a Syntax error, and so it is before an
+    inline Else (XLIDE issue #1415, measured in Excel, Word, PowerPoint and
+    Access 16.0). Only a statement that is an assignment is read: a target of
+    names, `.` and `!` members and argument lists, then `=`. A Print list keeps
+    its commas. A value that ends at an operator, `n = 1 +`, is a Syntax error
+    too, but it is also a line being typed, and stays quiet on purpose (see the
+    realtime recovery tests). Returns (span, why)."""
+    first = first_executable_token_index(toks)
+    i = first
+    if token_text(_at(toks, i)) in ("let", "set"):
+        i += 1
+    if _raw_at(toks, i) in (".", "!"):
+        i += 1
+    tok = _at(toks, i)
+    if not token_name(tok) or (
+        tok is not None and tok.kind is TokenKind.KEYWORD and i == first and _raw_at(toks, i + 1) != "="
+    ):
+        return None
+    i += 1
+    while True:
+        raw = _raw_at(toks, i)
+        if raw in (".", "!") and token_name(_at(toks, i + 1)):
+            i += 2
+        elif raw == "(":
+            close = match_paren_from(toks, i)
+            if close < 0:
+                return None
+            i = close + 1
+        else:
+            break
+    if _raw_at(toks, i) != "=" or i + 1 >= len(toks):
+        return None
+    depth = 0
+    for value_tok in toks[i + 1 :]:
+        if value_tok.kind is TokenKind.COMMENT:
+            continue
+        depth += 1 if value_tok.raw_text == "(" else -1 if value_tok.raw_text == ")" else 0
+        if depth == 0 and value_tok.raw_text == ",":
+            return (
+                Span(offset + value_tok.start, offset + value_tok.end),
+                "An assignment takes one value; the ',' after it starts nothing.",
+            )
+    return None
+
+
+# VBA's value types, which no TypeOf can test for; Object is every object.
+_TYPEOF_VALUE_TYPES = frozenset(
+    {
+        "byte", "boolean", "integer", "long", "longlong", "longptr", "currency",
+        "decimal", "single", "double", "date", "string", "variant",
+    }
+)
+
+
+_TYPEOF_LITERAL_KINDS = frozenset(
+    {TokenKind.INTEGER_LITERAL, TokenKind.FLOAT_LITERAL, TokenKind.STRING_LITERAL, TokenKind.DATE_LITERAL}
+)
+_TYPEOF_LITERAL_WORDS = frozenset({"true", "false", "nothing", "null", "empty"})
+
+
+def _type_of_value_operand(toks: Sequence[VbaToken], at: int) -> tuple[int, str] | None:
+    """`TypeOf 1 Is Collection`, `TypeOf -1`, `TypeOf Nothing`, and a bare
+    keyword-named function, `TypeOf CDbl(1)` or `TypeOf Len("x")`: each is a
+    Syntax error (XLIDE issue #1416, measured in Excel, Word, PowerPoint and
+    Access 16.0). `TypeOf VBA.CDbl(1)` parses, and is a Type mismatch instead.
+    Returns (index of the operand's last token, what it is)."""
+    tok = _at(toks, at)
+    if tok is None:
+        return None
+    if tok.kind in _TYPEOF_LITERAL_KINDS or token_text(tok) in _TYPEOF_LITERAL_WORDS:
+        return (at, f"{tok.raw_text} is a literal")
+    if tok.raw_text in ("-", "+"):
+        return (at, f"'{tok.raw_text}' starts a value")
+    following = _at(toks, at + 1)
+    suffix = 1 if following is not None and following.raw_text == "$" and following.start == tok.end else 0
+    name = f"{token_text(tok)}{'$' if suffix else ''}"
+    if tok.kind is TokenKind.KEYWORD and name in TYPEOF_KEYWORD_OPERANDS:
+        return (
+            at + suffix,
+            f"{tok.raw_text}{'$' if suffix else ''} is one of VBA's own functions, which the VBE reads as a "
+            "keyword here",
+        )
+    return None
+
+
+def _malformed_type_of(toks: Sequence[VbaToken], offset: int) -> tuple[Span, str] | None:
+    """`TypeOf (o) Is Collection`, with its operand in parentheses, and
+    `TypeOf o Is Long`, testing for a value type: both are Syntax errors
+    (XLIDE issue #1415, measured in Excel, Word, PowerPoint and Access 16.0).
+    Returns (span, why)."""
+    for i, tok in enumerate(toks):
+        if token_text(tok) != "typeof":
+            continue
+        following = _at(toks, i + 1)
+        if following is not None and following.raw_text == "(":
+            return (
+                Span(offset + following.start, offset + following.end),
+                "TypeOf takes its operand without parentheses: 'TypeOf o Is Collection'.",
+            )
+        operand = _type_of_value_operand(toks, i + 1)
+        if operand is not None:
+            assert following is not None
+            return (
+                Span(offset + following.start, offset + toks[operand[0]].end),
+                f"TypeOf tests an object, and {operand[1]}.",
+            )
+        depth = 0
+        for j in range(i + 1, len(toks)):
+            raw = toks[j].raw_text
+            depth += 1 if raw == "(" else -1 if raw == ")" else 0
+            if depth == 0 and token_text(toks[j]) == "is":
+                target = _at(toks, j + 1)
+                if target is not None and token_text(target) in _TYPEOF_VALUE_TYPES and _raw_at(toks, j + 2) != ".":
+                    return (
+                        Span(offset + target.start, offset + target.end),
+                        f"TypeOf tests for a class, and {target.raw_text} is a value type.",
+                    )
+                break
+    return None
+
+
 _NON_UNARY_BINARY_OPERATORS = frozenset(
     {
         "*", "/", "\\", "^", "&", "=", "<", ">", "<=", ">=", "<>", ":=",
@@ -2010,6 +2157,15 @@ def check_invalid_expression_syntax(
             )
 
         def visitor(stmt: LeafStatementNode) -> None:
+            # `L1^:` is the label L1 with a type character, not a `^`, after a
+            # line number too: `10 L1^:` (measured in Excel 16.0).
+            label_toks = statement_tokens(source, stmt.span)
+            if is_line_label_only_statement(source, stmt.span, label_toks) or (
+                label_toks
+                and is_decimal_line_number(label_toks[0])
+                and is_line_label_only_statement(source, stmt.span, label_toks[1:])
+            ):
+                return
             incomplete = incomplete_member_access(
                 source, stmt.span, scalar_types=env, resolve_scalar_type=resolve_scalar_type
             )
@@ -2020,6 +2176,24 @@ def check_invalid_expression_syntax(
                     incomplete,
                 )
                 return
+            new_arguments = _new_with_argument_list(label_toks, stmt.span.start)
+            if new_arguments is not None:
+                push(
+                    "invalidExpressionSyntax",
+                    "New takes a class name and no argument list; remove the parentheses. This is a VBE "
+                    "compile error: Syntax error.",
+                    new_arguments,
+                )
+                return
+            type_of = _malformed_type_of(label_toks, stmt.span.start)
+            if type_of is not None:
+                push("invalidExpressionSyntax", f"{type_of[1]} This is a VBE compile error: Syntax error.", type_of[0])
+                return
+            for span in statement_and_branch_spans(stmt):
+                value = _incomplete_assignment_value(statement_tokens(source, span), span.start)
+                if value is not None:
+                    push("invalidExpressionSyntax", f"{value[1]} This is a VBE compile error: Syntax error.", value[0])
+                    return
             unsupported = _unsupported_question_mark_operator(source, stmt.span)
             if unsupported is not None:
                 push(

@@ -2,7 +2,8 @@
 
 Ported from exprWalk.ts. Owns the one canonical two-level walk over a procedure
 body that expression-consuming rules share: find every root expression (assignment
-sides, call callee + arguments, If/ElseIf conditions, nested block bodies) and
+sides, call callee + arguments, If/ElseIf conditions, For start, end and Step
+values, statement operands, nested block bodies) and
 recurse each into its sub-expressions in pre-order.
 """
 
@@ -17,16 +18,19 @@ from ..parser.nodes import (
     BodyNode,
     CallNode,
     ExprNode,
+    ForBlockNode,
     IfBlockNode,
     IndexExpr,
     MemberAccessExpr,
     ModuleNode,
     ParenExpr,
     ProcedureNode,
+    StatementNode,
     TypeOfIsExpr,
     UnaryExpr,
     iter_body_nodes,
 )
+from .statement_operands import statement_operand_roots
 from .walker import ProcedureWalkHooks, active_module_members
 
 # A rule's per-procedure expression visitor: the factory does per-member setup and
@@ -80,11 +84,20 @@ def for_each_expression_in_body(
             for arg in node.args:
                 if arg.value is not None:
                     for_each_sub_expression(arg.value, visit)
+        elif isinstance(node, StatementNode):
+            # Case items, Print # and Debug.Print items, file and record
+            # numbers, single-line If arms (statement_operands.py).
+            for root in statement_operand_roots(node):
+                for_each_sub_expression(root, visit)
         elif isinstance(node, IfBlockNode):
             # Arm statements live in the flat body, which the walk enters next.
             for branch in node.branches:
                 if branch.condition is not None:
                     for_each_sub_expression(branch.condition, visit)
+        elif isinstance(node, ForBlockNode):
+            # The body is entered next by the flat walk.
+            for bound in node.bound_expressions or []:
+                for_each_sub_expression(bound, visit)
 
 
 def for_each_sub_expression(expr: ExprNode, visit: Callable[[ExprNode], None]) -> None:

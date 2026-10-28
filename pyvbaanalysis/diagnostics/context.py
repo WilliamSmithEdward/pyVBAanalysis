@@ -12,12 +12,13 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from ..completion import MemberCompletionContext
 from ..conditional import ConditionalActivityTracker, ConditionalCompilationEnvironment
 from ..host.host_model import get_excel_object_model, get_host_members
 from ..host.msforms import VBA_USERFORM_TYPE, msforms_control_members
+from ..identity_cache import IdentityLru
 from ..lexer.token_helpers import cached_statement_tokens
 from ..lexer.token_kinds import VbaToken
 from ..parser.nodes import ModuleNode, Span
@@ -131,6 +132,10 @@ class AnalyzeModuleOptions:
     # or document module, Private ones included, bare and as `module.name` (XLIDE
     # issue #243). When omitted, Application.Run is not judged.
     project_runnable_procedures: AbstractSet[str] | None = None
+    # Every module of the project, lowercased (ProjectIndex.module_names): a module's
+    # name qualifies a type it declares, `Module1.Pair`. When omitted, an
+    # unreferenced qualifier is not judged (XLIDE issue #1413).
+    project_module_names: AbstractSet[str] | None = None
     # Lowercased names some module of the project may write (from
     # ProjectIndex.written_names). A Public variable none writes keeps its initial
     # value, which the runtime rules use (XLIDE issue #241). When omitted, a Public
@@ -177,6 +182,10 @@ class AnalyzeModuleOptions:
     # them (`Scripting`, `MSForms`). None where the project's references are not
     # known, which keeps the rules that read it silent.
     referenced_libraries: Sequence[str] | None = None
+    # The project's own name as its dir stream records it (`VBAProject`, `Project`,
+    # an Access database's), which qualifies its types the way a library's name
+    # does. Read with the references, and None with them.
+    project_name: str | None = None
     conditional_compilation: ConditionalCompilationEnvironment | None = None
     parsed_module: ModuleNode | None = None
 
@@ -265,3 +274,53 @@ def own_object_member_names(opts: AnalyzeModuleOptions) -> AbstractSet[str]:
         for member in get_host_members(type_name, model):
             names.add(member["name"].lower())
     return names
+
+
+# One analysis's answer: three rules ask, and each read every project surface.
+# It is kept only while the options it was read from are the same.
+_BARE_OBJECT_NAMES = IdentityLru(capacity=8)
+
+
+def bare_object_names(opts: AnalyzeModuleOptions) -> AbstractSet[str]:
+    """Every object name the module answers bare: its designer's controls, its
+    object's members and its designer class's, and the project's object modules
+    with a default instance. A VBA function of one of these names is shadowed in
+    the module: a control or a predeclared class named Timer makes `Timer` that
+    object (XLIDE issue #1419, measured in all four hosts). A class not known to
+    lack VB_PredeclaredId counts, as in issue #47."""
+    inputs = (
+        opts.implicit_members,
+        opts.project_class_members,
+        opts.designer_class,
+        opts.host_model,
+        opts.module_kind,
+        opts.module_name,
+    )
+    cached = _BARE_OBJECT_NAMES.get(opts)
+    if cached is not None and all(before is now for before, now in zip(cached[0], inputs)):
+        return cast("AbstractSet[str]", cached[1])
+    names = _compute_bare_object_names(opts)
+    _BARE_OBJECT_NAMES.put((inputs, names), opts)
+    return names
+
+
+def _compute_bare_object_names(opts: AnalyzeModuleOptions) -> AbstractSet[str]:
+    # Imported here: the rules package imports this module.
+    from .rules.undeclared import designer_class_member_names
+
+    controls = opts.implicit_members or []
+    own = own_object_member_names(opts)
+    designer = designer_class_member_names(opts.designer_class, opts.host_model)
+    instances = [
+        surface
+        for surface in opts.project_class_members or []
+        if surface.kind in ("document", "userform") or (surface.kind == "class" and surface.predeclared_id is not False)
+    ]
+    if not controls and not designer and not instances:
+        return own
+    return {
+        *(member.name.lower() for member in controls),
+        *own,
+        *designer,
+        *(surface.name.lower() for surface in instances),
+    }

@@ -2,8 +2,8 @@
 
 Ported from checkParameterDefaultValues (declarations.ts): an Optional parameter's
 default value must be type-compatible with its declared type (a string literal for
-a numeric/Boolean parameter is a VBE compile error; an object parameter's default
-must be Nothing; an array parameter's default cannot be scalar). Object typing goes
+a numeric/Boolean parameter is a VBE compile error; an object parameter takes any
+constant default; an array parameter's default cannot be scalar). Object typing goes
 through resolve_known_object_assignment_type, so host and project classes count.
 """
 
@@ -73,12 +73,14 @@ def _parameter_default_incompatibility_reason(
     expected_raw = param.as_type
     if not expected_raw:
         return None
-    if resolve_known_object_assignment_type(expected_raw, member_ctx) is not None:
-        if normalize_type(actual.type_) == "nothing":
-            return None
-        return "Optional object parameter defaults must be Nothing."
     reason = incompatibility_reason(expected_raw, actual)
     if not reason or "string literal" not in actual.label.lower():
+        return None
+    # An object parameter takes any constant default: `Optional c As
+    # Collection = 5`, `= "a"`, `= True` and `= Null` compile, and a call
+    # that leaves the argument out runs (measured in Excel 16.0). Asked last,
+    # as resolving the type can read the project's metadata.
+    if resolve_known_object_assignment_type(expected_raw, member_ctx) is not None:
         return None
     return "This is a VBE compile error: Type mismatch."
 

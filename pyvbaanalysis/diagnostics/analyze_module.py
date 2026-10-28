@@ -17,7 +17,7 @@ the member, object-state, call-shape, and type rules consume it.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 
 from ..completion import MemberCompletionContext
@@ -32,7 +32,7 @@ from ..lexer.tokenize import tokenize_cached
 from ..parser.nodes import ExprNode, LeafStatementNode, ModuleNode, ProcedureNode, Span, iter_body_nodes
 from ..parser.parse_module import parse_module
 from ..symbols.build_module_symbols import BuildModuleSymbolsOptions, build_module_symbols
-from ..symbols.symbol_model import ModuleSymbolKind
+from ..symbols.symbol_model import ModuleSymbolKind, VbaProjectClassMembers
 from ..types.type_inference import dead_branch_spans_in, unreachable_statements_in
 from .context import (
     AnalysisFailure,
@@ -440,8 +440,8 @@ def diagnostic_member_completion_context(
     full-source token stream so member resolution never re-parses or re-lexes per
     dotted reference, and with a With-scan cache so each procedure's `With` stack
     is scanned once rather than once per leading-dot member. `me_project_type` and
-    `me_type` are derived from the module identity; `code_names` is left unset (the
-    diagnostics pass has no code-name map).
+    `me_type` are derived from the module identity, and `code_names` maps each
+    document module of the project whose `Me` has a host type to that type.
     """
     ctx = MemberCompletionContext(
         project_symbols=opts.project_visible_symbols,
@@ -460,10 +460,39 @@ def diagnostic_member_completion_context(
     me_project_type = _me_project_type_for(opts.module_name, opts.module_kind)
     if me_project_type:
         ctx.me_project_type = me_project_type
-    me_type = _me_host_type_for(opts.module_name, opts.module_kind, opts.host, opts.designer_class)
+    me_type = _me_host_type_for(
+        opts.module_name, opts.module_kind, opts.host, opts.designer_class, opts.document_type
+    )
     if me_type:
         ctx.me_type = me_type
+    code_names = _document_code_names(opts.project_class_members, opts.host)
+    if code_names:
+        ctx.code_names = code_names
     return ctx
+
+
+def _document_code_names(
+    project_class_members: Sequence[VbaProjectClassMembers] | None, host: str | None
+) -> dict[str, str] | None:
+    """The document modules whose `Me` has a host type, by code name. Reached from
+    another module, through the name or a variable of its type, such a module is the
+    same closed class as its `Me`: `Dim w As ThisWorkbook` then `w.UsedRange` is
+    "Method or data member not found", measured in Excel and Word 16.0. A renamed
+    one, BookCode for ThisWorkbook, is known by the document type the host reads
+    from its VB_Base. A module with a designer class already reaches it through its
+    project type, and a sheet without one stays unchecked, as its `Me` does."""
+    code_names: dict[str, str] | None = None
+    for candidate in project_class_members or []:
+        if candidate.kind != "document" or candidate.designer_class:
+            continue
+        host_type = _me_host_type_for(
+            candidate.name, ModuleSymbolKind.DOCUMENT, host, None, candidate.document_type
+        )
+        if host_type:
+            if code_names is None:
+                code_names = {}
+            code_names[candidate.name.lower()] = host_type
+    return code_names
 
 
 def _me_project_type_for(
@@ -477,6 +506,7 @@ def _me_host_type_for(
     module_kind: ModuleSymbolKind | None,
     host: str | None = None,
     designer_class: str | None = None,
+    document_type: str | None = None,
 ) -> str | None:
     # A designer class is what the module IS, whatever kind it is listed as: an
     # Access form's `Me` reaches Requery from `Access.Form`, which the module's own
@@ -484,7 +514,19 @@ def _me_host_type_for(
     # `Me` keeps its own procedures too.
     if designer_class:
         return designer_class
-    if not module_name or module_kind is not ModuleSymbolKind.DOCUMENT:
+    if module_kind is not ModuleSymbolKind.DOCUMENT:
+        return None
+    # The host's word for the object outranks the code name, which the user can
+    # change: a workbook module renamed BookCode is still a Workbook. A sheet stays
+    # without one unless its designer class came with it, since only then are the
+    # ActiveX controls that are members of it known too.
+    if document_type == "workbook":
+        return "Excel.Workbook"
+    if document_type == "document":
+        return "Word.Document"
+    if document_type in ("worksheet", "chart"):
+        return None
+    if not module_name:
         return None
     lower = module_name.lower()
     token = (host or "excel").lower()

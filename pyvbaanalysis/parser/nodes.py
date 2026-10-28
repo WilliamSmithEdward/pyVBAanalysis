@@ -218,6 +218,8 @@ class MemberAccessExpr(Expr):
     member: str
     member_span: Span
     access_kind: MemberAccessKind | None = None
+    # Type-declaration character glued to the member (`VBA.Mid$`): $, % or @.
+    type_suffix: str | None = None
 
 
 @dataclass(slots=True)
@@ -620,6 +622,8 @@ class ForBlockNode(Node):
     control_variable_span: Span | None = None
     source_expression: str | None = None
     source_expression_span: Span | None = None
+    # A counted For's start, end and Step values, each that parsed whole (MS-VBAL 5.4.2.3).
+    bound_expressions: list[ExprNode] | None = None
     next_variable: str | None = None
     next_variable_span: Span | None = None
     body: list[BodyNode] = field(default_factory=list)

@@ -294,12 +294,12 @@ def _undeclared_reference_skip_indexes(
     skip: set[int] = set()
     if len(toks) == 0:
         return skip
-    if token_raw(_at(toks, 1)) == ":" or _is_line_label_only_statement(source, span, toks):
+    if token_raw(_at(toks, 1)) == ":" or is_line_label_only_statement(source, span, toks):
         skip.add(0)  # line label declaration
     elif (
-        len(toks) == 2
+        len(toks) in (2, 3)
         and is_decimal_line_number(toks[0])
-        and _is_line_label_only_statement(source, span, toks[1:])
+        and is_line_label_only_statement(source, span, toks[1:])
     ):
         skip.add(1)  # `10 L1:`, a line number and a label (XLIDE issue #230)
     first_executable = first_executable_token_index(toks)
@@ -525,10 +525,20 @@ def _simple_assignment_lhs_identifier_index(toks: Sequence[VbaToken]) -> int:
     )
 
 
-def _is_line_label_only_statement(source: str, span: Span, toks: Sequence[VbaToken]) -> bool:
-    if len(toks) != 1 or not _is_potential_variable_reference_token(toks[0]):
+_TYPE_CHARACTER_RE = re.compile(r"^[%&!#@$^]$")
+
+
+def is_type_character_suffix(name: VbaToken, suffix: VbaToken | None) -> bool:
+    """A type character written right after a name: `L1$`, `n%`."""
+    return suffix is not None and suffix.start == name.end and _TYPE_CHARACTER_RE.match(suffix.raw_text) is not None
+
+
+def is_line_label_only_statement(source: str, span: Span, toks: Sequence[VbaToken]) -> bool:
+    # `L1$:` is the label L1, a type character included (measured in Excel 16.0).
+    suffixed = len(toks) == 2 and is_type_character_suffix(toks[0], toks[1])
+    if (len(toks) != 1 and not suffixed) or not _is_potential_variable_reference_token(toks[0]):
         return False
-    j = span.start + toks[0].end
+    j = span.start + toks[-1].end
     while j < len(source) and (source[j] == " " or source[j] == "\t"):
         j += 1
     return j < len(source) and source[j] == ":"

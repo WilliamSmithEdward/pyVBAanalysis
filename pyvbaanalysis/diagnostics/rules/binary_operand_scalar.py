@@ -6,7 +6,9 @@ of a scalar-requiring binary operator is a VBE compile error ("Type mismatch").
 Fires only on a plain identifier provably non-scalar (its shape is an array, or
 its declared type names a Type in this module); everything else stays quiet.
 A Nothing literal operand of any operator but Is (binary or unary) is "Invalid
-use of object".
+use of object". Parentheses keep the aggregate, `(a) + 1` (issue #1415).
+`Like` refuses an array, and its Type operand is udt-value-mismatch's (issue
+#1415).
 """
 
 from __future__ import annotations
@@ -33,12 +35,15 @@ from ...types.type_inference import (
 )
 from ..context import PushFn
 from ..exprwalk import ProcedureExpressionVisitor
+from ..statement_operands import case_comparison_operator
 
 # Binary operators that require scalar operands. Excludes Is (object operands,
-# owned by is-operator-non-object) and Like (operands coerced to String).
+# owned by is-operator-non-object), Like (operands coerced to String) and `^`:
+# the VBE compiles `a ^ 2` on an array or a Type, which runs or raises 51
+# (measured in Excel 16.0).
 _SCALAR_OPERAND_OPERATORS = frozenset(
     {
-        "&", "+", "-", "*", "/", "\\", "^", "Mod",
+        "&", "+", "-", "*", "/", "\\", "Mod",
         "=", "<>", "<", ">", "<=", ">=",
         "And", "Or", "Xor", "Eqv", "Imp",
     }
@@ -69,10 +74,39 @@ def check_binary_operand_scalar(symbols: ModuleSymbols, push: PushFn) -> Procedu
                     operation[1].span,
                 )
                 return
-            if not isinstance(expr, BinaryExpr) or expr.operator not in _SCALAR_OPERAND_OPERATORS:
+            # A unary minus negates one value, and an array is none: `-a` is
+            # Type mismatch, where `Not a` compiles (measured in Excel 16.0).
+            if isinstance(expr, UnaryExpr) and expr.operator == "-" and isinstance(expr.operand, IdentifierExpr):
+                operand_shape = shapes.get(expr.operand.name.lower())
+                if operand_shape is not None and operand_shape.is_array is True:
+                    push(
+                        "nonScalarBinaryOperand",
+                        f"The '-' operator requires a scalar operand, but '{expr.operand.name}' is declared "
+                        "As an array. This will fail to compile with 'Type mismatch'.",
+                        expr.operand.span,
+                    )
+                    return
+            # `Case a` compares the Select value with a, and an array is no value
+            # to compare (issue #1415, measured in Excel, Word, PowerPoint and
+            # Access 16.0).
+            comparison = case_comparison_operator(expr)
+            comparand = _non_scalar_operand(expr, shapes, udt_names, True) if comparison is not None else None
+            if comparand is not None:
+                push(
+                    "nonScalarBinaryOperand",
+                    f"The Case's '{comparison}' comparison requires a scalar operand, but {comparand[1]}. "
+                    "This will fail to compile with 'Type mismatch'.",
+                    comparand[0],
+                )
                 return
-            offender = _non_scalar_operand(expr.left, shapes, udt_names) or _non_scalar_operand(
-                expr.right, shapes, udt_names
+            # `a Like "*"` and `"x" Like a` refuse an array too, where Like
+            # takes any value as a String; a Type there is udt-value-mismatch's
+            # (issue #1415, measured in Excel, Word, PowerPoint and Access 16.0).
+            like = isinstance(expr, BinaryExpr) and expr.operator == "Like"
+            if not isinstance(expr, BinaryExpr) or (expr.operator not in _SCALAR_OPERAND_OPERATORS and not like):
+                return
+            offender = _non_scalar_operand(expr.left, shapes, udt_names, like) or _non_scalar_operand(
+                expr.right, shapes, udt_names, like
             )
             if offender is not None:
                 span, detail = offender
@@ -94,17 +128,26 @@ def _is_nothing(expr: ExprNode) -> bool:
 
 
 def _non_scalar_operand(
-    expr: ExprNode, shapes: Mapping[str, DeclaredValueShape], udt_names: AbstractSet[str]
+    operand: ExprNode,
+    shapes: Mapping[str, DeclaredValueShape],
+    udt_names: AbstractSet[str],
+    arrays_only: bool = False,
 ) -> tuple[Span, str] | None:
+    # Parentheses keep the aggregate: `(a) + 1` and `((a)) & 1` are Type
+    # mismatch too (issue #1415, measured in Excel, Word, PowerPoint and
+    # Access 16.0).
+    expr = operand
+    while isinstance(expr, ParenExpr):
+        expr = expr.inner
     # Only a bare identifier is typed: an indexed element a(i) is an IndexExpr
-    # (a scalar element), member access / calls / parens are not the aggregate,
-    # and literals are scalar.
+    # (a scalar element), member access / calls are not the aggregate, and
+    # literals are scalar.
     if not isinstance(expr, IdentifierExpr):
         return None
     shape = shapes.get(expr.name.lower())
     if shape is not None and shape.is_array:
         return (expr.span, f"'{expr.name}' is declared As an array")
     declared = shape.as_type if shape is not None else None
-    if declared and declared.lower() in udt_names:
+    if not arrays_only and declared and declared.lower() in udt_names:
         return (expr.span, f"'{expr.name}' is declared As {declared} (a user-defined Type)")
     return None

@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
+from typing import cast
 
 from ...completion.member_access import (
     KnownObjectAssignmentType,
@@ -32,6 +34,7 @@ from ...completion.member_access import (
     resolve_known_object_assignment_type,
     simple_type_name_for_assignment,
 )
+from ...completion.event_handlers import event_handler_document_type_for_context
 from ...conditional import ConditionalActivityTracker
 from ...host.host_default_members import HOST_DEFAULT_MEMBERS
 from ...host.host_model import HostMember, get_host_members, get_host_type, resolve_host_alias
@@ -44,21 +47,52 @@ from ...parser.nodes import (
     DoBlockNode,
     ExprNode,
     IdentifierExpr,
+    IndexExpr,
     LiteralExpr,
     LiteralKind,
+    MemberAccessExpr,
+    MemberAccessKind,
     ModuleNode,
+    ParenExpr,
     ProcedureNode,
     Span,
     StatementNode,
     TypeOfIsExpr,
+    UnaryExpr,
     WhileBlockNode,
     iter_body_nodes,
 )
 from ...parser.parse_expression import parse_expression
-from ...symbols.symbol_model import ModuleSymbols
-from ...types.type_inference import SCALAR_OBJECT_ASSIGNMENT_REASON, type_environment_for
+from ...runtime.vba_value_results import (
+    ARGUMENT_TYPED_FUNCTIONS,
+    BARE_VALUE_RESULT_FUNCTIONS,
+    TYPEOF_KEYWORD_OPERANDS,
+    VALUE_RESULT_FUNCTIONS,
+)
+from ...identity_cache import IdentityLru
+from ...symbols.symbol_model import (
+    ModuleSymbolKind,
+    ModuleSymbols,
+    VbaProcedureSignature,
+    VbaSymbol,
+    VbaSymbolKind,
+    qualified_procedure_key,
+)
+from ...symbols.name_resolution import BareIdentifierContext
+from ...types.type_inference import (
+    SCALAR_OBJECT_ASSIGNMENT_REASON,
+    procedure_symbol_for,
+    source_identifier_bound,
+    type_environment_for,
+)
 from ...types.type_names import is_known_scalar_type, normalize_type
-from ..call_extraction import InferredArgumentType
+from ..call_extraction import CallableTypeSignature, InferredArgumentType
+from ..callable_signatures import (
+    SourceNameScope,
+    bare_callable_source_shadowed,
+    callable_type_signatures_for,
+    source_name_scope_for,
+)
 from ..context import PushFn, statement_tokens
 from ..exprwalk import ProcedureExpressionVisitor, for_each_sub_expression
 from ..walker import (
@@ -103,8 +137,29 @@ _IS_NON_OBJECT_LITERAL_KINDS: dict[LiteralKind, str] = {
 }
 
 
-def _non_object_operand(expr: ExprNode, env: dict[str, str]) -> tuple[Span, str] | None:
+def _non_object_operand(
+    operand: ExprNode,
+    env: dict[str, str],
+    call_result: Callable[[ExprNode], tuple[str, str] | None] | None = None,
+) -> tuple[Span, str] | None:
     """A provably non-object (scalar) operand of `Is`, or None."""
+    # `(n) Is Nothing` is the same Type mismatch (issue #1415, measured in
+    # Excel, Word, PowerPoint and Access 16.0).
+    expr = operand
+    while isinstance(expr, ParenExpr):
+        expr = expr.inner
+    # `a(0) Is Nothing` for a Long array: its element is a Long (issue #1415).
+    if isinstance(expr, IndexExpr) and isinstance(expr.callee, IdentifierExpr):
+        array_type = env.get(expr.callee.name.lower())
+        element = js_trim(_TRAILING_ARRAY_RE.sub("", array_type, count=1)) if array_type is not None else None
+        if element and is_known_scalar_type(element.lower()):
+            article = "an" if element[0].lower() in "aeiou" else "a"
+            return (expr.span, f"an element of '{expr.callee.name}' is {article} {element}")
+    result = call_result(expr) if call_result is not None else None
+    if result is not None and result[0] == "value":
+        return (expr.span, f"VBA's '{result[1]}' returns a value")
+    if result is not None and is_known_scalar_type(_TRAILING_ARRAY_RE.sub("", result[0]).strip().lower()):
+        return (expr.span, f"'{result[1]}' returns {result[0]}")
     if isinstance(expr, LiteralExpr):
         kind = _IS_NON_OBJECT_LITERAL_KINDS.get(expr.literal_kind)
         if kind is not None:
@@ -123,16 +178,238 @@ def _non_object_operand(expr: ExprNode, env: dict[str, str]) -> tuple[Span, str]
     return None  # member / call / paren / array / New / unary -> quiet (v1)
 
 
-def check_is_operator_operands(symbols: ModuleSymbols, push: PushFn) -> ProcedureExpressionVisitor:
+def _call_result_type(
+    expr: ExprNode,
+    env: dict[str, str],
+    module_signatures: Mapping[str, CallableTypeSignature],
+    source_names: SourceNameScope,
+) -> tuple[str, str] | None:
+    """The declared result of a call to a project or same-module Function, `Bar()`
+    or `Other.Foo()`, typed by the DefType of the module that declares it, with the
+    name to show for the call. None for a variable's element, a name a source
+    variable takes, and VBA's own functions, which were not measured (XLIDE issue
+    #1411)."""
+    if not isinstance(expr, IndexExpr):
+        return None
+    callee = expr.callee
+    if isinstance(callee, IdentifierExpr):
+        lower = callee.name.lower()
+        if lower in env or bare_callable_source_shadowed(callee.name, source_names):
+            return None
+        signature = module_signatures.get(lower)
+        type_ = signature.return_type if signature is not None else None
+        return (type_, callee.name) if type_ else None
+    if (
+        isinstance(callee, MemberAccessExpr)
+        and callee.access_kind is not MemberAccessKind.BANG
+        and isinstance(callee.object_, IdentifierExpr)
+    ):
+        qualifier = callee.object_.name
+        if qualifier.lower() in env or qualifier.lower() in source_names.callable_shadows:
+            return None
+        signature = module_signatures.get(qualified_procedure_key(qualifier, callee.member))
+        type_ = signature.return_type if signature is not None else None
+        return (type_, f"{qualifier}.{callee.member}") if type_ else None
+    return None
+
+
+def _enum_type_names(symbols: ModuleSymbols, project_visible_symbols: Sequence[VbaSymbol] | None) -> frozenset[str]:
+    """The Enums this module and the project make visible, lowercase. A name
+    another kind of symbol of the project also takes is left out."""
+    enums: set[str] = set()
+    others: set[str] = set()
+    for sym in [*(symbols.root.children or []), *(project_visible_symbols or [])]:
+        (enums if sym.kind is VbaSymbolKind.ENUM else others).add(sym.name.lower())
+    return frozenset(enums - others)
+
+
+def _enum_operand(operand: ExprNode, env: dict[str, str], enums: AbstractSet[str]) -> tuple[Span, str] | None:
+    """`n Is Nothing` and `TypeOf n Is Collection` with n declared As an Enum,
+    of this module or another: Type mismatch (XLIDE issue #1416, measured in
+    Excel, Word, PowerPoint and Access 16.0)."""
+    expr = operand
+    while isinstance(expr, ParenExpr):
+        expr = expr.inner
+    if not isinstance(expr, IdentifierExpr):
+        return None
+    declared = env.get(expr.name.lower())
+    if declared and js_trim(declared).lower() in enums:
+        return (expr.span, f"'{expr.name}' is declared As {declared}, an Enum")
+    return None
+
+
+def _runtime_value_result(
+    expr: ExprNode,
+    form: str,
+    env: dict[str, str],
+    shadowed: Callable[[str], bool],
+) -> tuple[str, str] | None:
+    """A call to one of VBA's own functions whose result is a value under `Is`
+    (form "is") or `TypeOf` (form "typeof"), vba_value_results.py, XLIDE issue
+    #1416: `CDbl(1)`, `VBA.Mid$(s, 1)`, `Erl`. None when `shadowed` says a
+    source or object name takes the function's name or `VBA`'s, and for a bare
+    keyword-named TypeOf operand, which is a Syntax error reported in
+    expressions.py. The result's type is "value"."""
+    target = expr.callee if isinstance(expr, IndexExpr) else expr
+    args = expr.args if isinstance(expr, IndexExpr) else []
+    if isinstance(target, IdentifierExpr):
+        if shadowed(target.name):
+            return None
+        display = target.name
+        qualified = False
+        if target.type_suffix and target.type_suffix != "$":
+            return None
+        name = target.name + (target.type_suffix or "")
+    elif (
+        isinstance(target, MemberAccessExpr)
+        and target.access_kind is not MemberAccessKind.BANG
+        and isinstance(target.object_, IdentifierExpr)
+        and target.object_.name.lower() == "vba"
+        and not shadowed("VBA")
+    ):
+        if target.type_suffix and target.type_suffix != "$":
+            return None
+        name = f"{target.member}{target.type_suffix or ''}"
+        display = f"VBA.{name}"
+        qualified = True
+    else:
+        return None
+    lower = name.lower()
+    if not qualified and form == "typeof" and lower in TYPEOF_KEYWORD_OPERANDS:
+        return None
+    value = (
+        lower in VALUE_RESULT_FUNCTIONS
+        or (not qualified and lower in BARE_VALUE_RESULT_FUNCTIONS)
+        or (
+            not qualified
+            and form == "is"
+            and lower in ARGUMENT_TYPED_FUNCTIONS
+            and len(args) > 0
+            and all(arg.value is not None and _provably_scalar(arg.value, env, shadowed) for arg in args)
+        )
+    )
+    if not value:
+        return None
+    return ("value", f"{display}{'(...)' if args or isinstance(expr, IndexExpr) else ''}")
+
+
+def _without_control_locals(
+    env: dict[str, str],
+    implicit_locals: AbstractSet[str] | None,
+    object_names: AbstractSet[str],
+) -> dict[str, str]:
+    """The environment without the implicit locals a control's name takes. With
+    DefLng and no Option Explicit, `Picker = 1` in a form whose ComboBox is
+    Picker assigns the control's Value; it declares no Long (XLIDE issue #1419).
+    A copy, since the environment is shared."""
+    controls = [name for name in implicit_locals or () if name in object_names]
+    if not controls:
+        return env
+    out = dict(env)
+    for name in controls:
+        out.pop(name, None)
+    return out
+
+
+# Arithmetic and `&`, which give a value when both sides are values.
+_SCALAR_OPERATORS = frozenset({"+", "-", "*", "/", "\\", "^", "Mod", "&"})
+
+
+def _provably_scalar(expr: ExprNode, env: dict[str, str], shadowed: Callable[[str], bool]) -> bool:
+    """An argument that is provably a value: a literal, a typed variable or
+    element, a value call, or arithmetic on those. Upstream recurses through the
+    operands; an explicit stack does the same here, every operand having to be
+    a value."""
+    pending = [expr]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ParenExpr):
+            pending.append(node.inner)
+            continue
+        if isinstance(node, UnaryExpr) and node.operator == "-":
+            pending.append(node.operand)
+            continue
+        if isinstance(node, BinaryExpr):
+            if node.operator not in _SCALAR_OPERATORS:
+                return False
+            pending.append(node.right)
+            pending.append(node.left)
+            continue
+        if _non_object_operand(node, env, lambda inner: _runtime_value_result(inner, "is", env, shadowed)) is None:
+            return False
+    return True
+
+
+def check_is_operator_operands(
+    symbols: ModuleSymbols,
+    push: PushFn,
+    project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None = None,
+    project_visible_symbols: Sequence[VbaSymbol] | None = None,
+    object_names: AbstractSet[str] = frozenset(),
+) -> ProcedureExpressionVisitor:
     """The `Is` operator requires object operands; a provably-scalar operand is an error."""
 
+    module_signatures = callable_type_signatures_for(symbols, project_procedures)
+    enums: list[frozenset[str]] = []
+
+    def enum_names() -> frozenset[str]:
+        if not enums:
+            enums.append(_enum_type_names(symbols, project_visible_symbols))
+        return enums[0]
+
     def factory(member: ProcedureNode) -> Callable[[ExprNode], None]:
-        env = type_environment_for(symbols, member)
+        implicit_locals = symbols.implicit_locals.get(member.span.start) if symbols.implicit_locals else None
+        env = _without_control_locals(type_environment_for(symbols, member), implicit_locals, object_names)
+        source_names = source_name_scope_for(symbols, member, project_visible_symbols)
+        proc_sym = procedure_symbol_for(symbols, member)
+
+        # A VBA function's name answers the source, or the module's own object,
+        # before VBA: a control or a predeclared class named Timer makes `Timer`
+        # that object (XLIDE issue #1419, measured in all four hosts).
+        def shadowed(name: str) -> bool:
+            return (
+                name.lower() in env
+                or name.lower() in object_names
+                or source_identifier_bound(
+                    symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.EXPRESSION
+                )
+            )
+
+        def result_of(form: str) -> Callable[[ExprNode], tuple[str, str] | None]:
+            def results(expr: ExprNode) -> tuple[str, str] | None:
+                return _call_result_type(expr, env, module_signatures, source_names) or _runtime_value_result(
+                    expr, form, env, shadowed
+                )
+
+            return results
+
+        calls = result_of("is")
+        type_of_calls = result_of("typeof")
+
+        def operand(
+            side: ExprNode, results: Callable[[ExprNode], tuple[str, str] | None]
+        ) -> tuple[Span, str] | None:
+            return _non_object_operand(side, env, results) or _enum_operand(side, env, enum_names())
 
         def visitor(expr: ExprNode) -> None:
+            # `TypeOf n Is Collection` with n a Long is the same compile error,
+            # Type mismatch (XLIDE issue #1411, measured in Excel, Word,
+            # PowerPoint and Access 16.0). A literal operand is a Syntax error,
+            # which expressions.py reports (XLIDE issue #1416).
+            if isinstance(expr, TypeOfIsExpr):
+                type_of_offender = (
+                    None if isinstance(expr.operand, LiteralExpr) else operand(expr.operand, type_of_calls)
+                )
+                if type_of_offender is not None:
+                    push(
+                        "isOperatorNonObject",
+                        f"'TypeOf ... Is' requires an object operand, but {type_of_offender[1]}, which is not an object.",
+                        type_of_offender[0],
+                    )
+                return
             if not isinstance(expr, BinaryExpr) or expr.operator != "Is":
                 return
-            offender = _non_object_operand(expr.left, env) or _non_object_operand(expr.right, env)
+            offender = operand(expr.left, calls) or operand(expr.right, calls)
             if offender is not None:
                 span, detail = offender
                 push(
@@ -153,16 +430,27 @@ def check_is_operands_in_conditions(
     symbols: ModuleSymbols,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None = None,
+    project_visible_symbols: Sequence[VbaSymbol] | None = None,
+    object_names: AbstractSet[str] = frozenset(),
 ) -> None:
     """The same check on the conditions the expression walk does not parse: a
     single-line If's, and a Do or While loop's (XLIDE issue #325, measured in Excel
     16.0: each is a compile error, Type mismatch)."""
+    check_operands = check_is_operator_operands(
+        symbols, push, project_procedures, project_visible_symbols, object_names
+    )
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
-        env = type_environment_for(symbols, member)
+        check_expression = check_operands(member)
 
-        def check(span: Span, from_: int, to: Callable[[list[VbaToken]], int], env: dict[str, str] = env) -> None:
+        def check(
+            span: Span,
+            from_: int,
+            to: Callable[[list[VbaToken]], int],
+            check_expression: Callable[[ExprNode], None] = check_expression,
+        ) -> None:
             # Absolute offsets, so the parsed nodes carry the source's spans.
             toks = [
                 dataclasses.replace(tok, start=span.start + tok.start, end=span.start + tok.end)
@@ -175,21 +463,7 @@ def check_is_operands_in_conditions(
             parsed = parse_expression(toks, from_, end).expr
             if parsed is None:
                 return
-
-            def visit_expr(expr: ExprNode) -> None:
-                if not isinstance(expr, BinaryExpr) or expr.operator != "Is":
-                    return
-                offender = _non_object_operand(expr.left, env) or _non_object_operand(expr.right, env)
-                if offender is not None:
-                    offender_span, detail = offender
-                    push(
-                        "isOperatorNonObject",
-                        f"The 'Is' operator requires object operands, but {detail}, "
-                        "which is not an object.",
-                        offender_span,
-                    )
-
-            for_each_sub_expression(parsed, visit_expr)
+            for_each_sub_expression(parsed, check_expression)
 
         def if_condition_end(toks: list[VbaToken]) -> int:
             if token_text(toks[0] if toks else None) != "if":
@@ -220,6 +494,35 @@ def check_is_operands_in_conditions(
 
 
 # -- checkTypeOfIsCompatibility (always-False) ------------------------------
+
+
+_PROJECT_DOCUMENT_HOST_TYPES_CACHE = IdentityLru()
+
+
+def _project_document_host_types(member_ctx: MemberCompletionContext) -> dict[str, str]:
+    """Each document module's host class, lowercased and qualified
+    (`excel.workbook` for ThisWorkbook): its designer's class where the workbook
+    gave one, otherwise the class its document type or, failing that, its code
+    name implies."""
+    members = member_ctx.project_class_members
+    cached = _PROJECT_DOCUMENT_HOST_TYPES_CACHE.get(member_ctx, members)
+    if cached is not None:
+        return cast(dict[str, str], cached)
+    types: dict[str, str] = {}
+    for candidate in members or []:
+        if candidate.kind != "document":
+            continue
+        document_type = event_handler_document_type_for_context(
+            candidate.name, ModuleSymbolKind.DOCUMENT, candidate.document_type
+        )
+        host_type = candidate.designer_class if candidate.designer_class is not None else (
+            "Excel.Workbook" if document_type == "workbook"
+            else "Excel.Chart" if document_type == "chart"
+            else "Word.Document" if document_type == "document"
+            else "Excel.Worksheet"
+        )
+        types[candidate.name.lower()] = host_type.lower()
+    return cast(dict[str, str], _PROJECT_DOCUMENT_HOST_TYPES_CACHE.put(types, member_ctx, members))
 
 
 def _implements_object_type(
@@ -310,6 +613,17 @@ def object_assignment_incompatibility_reason(
             return None
         return f"This object type is not compatible with {expected.display}."
     if actual_object.kind == "host" and _HOST_VALUES_ALSO_OF_TYPE.get(actual_object.key) == expected.key:
+        return None
+    # A document module is the host's own object: the workbook ThisWorkbook
+    # names is a Workbook, so `Set a = ActiveWorkbook` into `a As ThisWorkbook`
+    # runs while that workbook is the active one (measured in Excel 16.0).
+    # Which workbook the host value holds is not known here, but a value of
+    # another host class is never the document.
+    if (
+        expected.kind == "project"
+        and actual_object.kind == "host"
+        and _project_document_host_types(member_ctx).get(expected.key) == actual_object.key
+    ):
         return None
     if actual_object.kind == "project" and _implements_object_type(actual_object, expected):
         return None

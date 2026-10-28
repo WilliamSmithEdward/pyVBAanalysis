@@ -21,7 +21,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from ..lexer.token_helpers import (
+    colon_directive_starts,
     match_paren_from,
+    misplaced_directive_starts,
+    rem_directive_starts,
     split_top_level_token_groups,
     token_word,
     tokens_without_leading_line_number,
@@ -225,8 +228,24 @@ class _Parser:
     # (XLIDE issue #130): `End If` written in both arms closes one block, and
     # `If ... Then` written in both arms opens one.
     _directive_chains: list[_DirectiveChain]
+    # The directive lines holding a Rem (XLIDE issue #1321), found once.
+    _rem_directive_starts: frozenset[int] | None
+    # The directive lines a statement colon follows (XLIDE issue #1323), found once.
+    _colon_directive_starts: frozenset[int] | None
+    # The directives that do not start their logical line (XLIDE issue #1331), found once.
+    _misplaced_directive_starts: frozenset[int] | None
 
-    __slots__ = ("_source", "_cursor", "_diagnostics", "_open_stack", "_pending_next", "_directive_chains")
+    __slots__ = (
+        "_source",
+        "_cursor",
+        "_diagnostics",
+        "_open_stack",
+        "_pending_next",
+        "_directive_chains",
+        "_rem_directive_starts",
+        "_colon_directive_starts",
+        "_misplaced_directive_starts",
+    )
 
     def __init__(self, source: str, tokens: Sequence[VbaToken]) -> None:
         self._source = source
@@ -235,6 +254,9 @@ class _Parser:
         self._open_stack = []
         self._pending_next = None
         self._directive_chains = []
+        self._rem_directive_starts = None
+        self._colon_directive_starts = None
+        self._misplaced_directive_starts = None
 
     def parse(self) -> ModuleNode:
         members: list[ModuleMember] = []
@@ -463,7 +485,25 @@ class _Parser:
     def _parse_conditional_directive_node(
         self, stmt: LogicalStatement, tokens: Sequence[VbaToken]
     ) -> ConditionalDirectiveNode:
-        directive_word = token_word(_at(tokens, 1))
+        # A directive line holding a Rem is no directive to the VBE (XLIDE issue
+        # #1321): an #If, #ElseIf, #Else or #End If one opens, continues and
+        # closes nothing, and a #Const one defines nothing, even in a skipped
+        # arm. So is any directive line a statement colon follows (XLIDE issue
+        # #1323), and a directive that does not start its logical line (XLIDE
+        # issue #1331).
+        if self._rem_directive_starts is None:
+            self._rem_directive_starts = rem_directive_starts(self._source)
+        if self._colon_directive_starts is None:
+            self._colon_directive_starts = colon_directive_starts(self._source)
+        if self._misplaced_directive_starts is None:
+            self._misplaced_directive_starts = misplaced_directive_starts(self._source)
+        directive_word = (
+            ""
+            if stmt.start in self._rem_directive_starts
+            or stmt.start in self._colon_directive_starts
+            or stmt.start in self._misplaced_directive_starts
+            else token_word(_at(tokens, 1))
+        )
         span = Span(stmt.start, stmt.end)
         if directive_word == "const":
             name_token = _at(tokens, 2)
@@ -531,6 +571,19 @@ class _Parser:
         else:
             modifier = ""
         if head == "dim" or head == "const":
+            i += 1
+        # `Dim Shared a As Long`, and Private, Public or Global Shared at module
+        # level, compile, Shared a leftover of older Basic that changes nothing;
+        # `Static Shared`, `Dim Shared As Long` and `Private Shared WithEvents`
+        # are errors (measured in Excel 16.0).
+        following = _at(tokens, i + 1)
+        if (
+            not is_const
+            and modifier in ("Dim", "Private", "Public", "Global")
+            and token_word(_at(tokens, i)) == "shared"
+            and following is not None
+            and token_word(following) not in ("as", "withevents")
+        ):
             i += 1
         with_events = False
         if token_word(_at(tokens, i)) == "withevents":
@@ -1281,12 +1334,15 @@ class _Parser:
         if opener == "for" or opener == "foreach":
             control = self._for_control_variable(opener, head)
             source = self._for_each_source_expression(head) if opener == "foreach" else None
+            bounds = _for_bound_expressions(head) if opener == "for" and control is not None else []
             nxt = next_override if next_override is not None else self._next_control_variable(end_stmt)
             for_node = ForBlockNode(span=span, each=(opener == "foreach"), closed=closed, body=body)
             if control is not None:
                 for_node.control_variable, for_node.control_variable_span = control
             if source is not None:
                 for_node.source_expression, for_node.source_expression_span = source
+            if bounds:
+                for_node.bound_expressions = bounds
             if nxt is not None:
                 for_node.next_variable, for_node.next_variable_span = nxt
             return for_node
@@ -1739,6 +1795,29 @@ def _is_mid_statement_target(tokens: Sequence[VbaToken], start: int) -> bool:
         return True
     two = _at(tokens, start + 2)
     return after is not None and after.raw_text == "$" and two is not None and two.raw_text == "("
+
+
+def _for_bound_expressions(stmt: LogicalStatement) -> list[ExprNode]:
+    """The start, end and Step values of `For i = start To end [Step step]`, each
+    that parses whole. `To` and `Step` are read at parenthesis depth 0 only."""
+    tokens = _code_tokens_after_line_number(stmt)
+    cuts: list[int] = []
+    depth = 0
+    for i in range(3, len(tokens)):
+        raw = tokens[i].raw_text
+        depth += 1 if raw == "(" else -1 if raw == ")" else 0
+        if depth == 0 and token_word(tokens[i]) == ("to" if not cuts else "step"):
+            cuts.append(i)
+            if len(cuts) == 2:
+                break
+    bounds: list[ExprNode] = []
+    from_ = 3
+    for to in [*cuts, len(tokens)]:
+        result = parse_expression(tokens, from_, to)
+        if from_ < to and _fully_consumed(result, to) and result.expr is not None:
+            bounds.append(result.expr)
+        from_ = to + 1
+    return bounds
 
 
 def _fully_consumed(result: ExprParseResult, to: int) -> bool:

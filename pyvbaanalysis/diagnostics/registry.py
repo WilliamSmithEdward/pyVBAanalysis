@@ -19,7 +19,7 @@ from ..host.host_model import get_excel_object_model
 from ..parser.nodes import Span
 from ..symbols.symbol_model import ModuleSymbolKind, VbaSymbolKind
 from .callable_signatures import callable_type_signatures_for
-from .context import PushFn, RulePassContext, own_object_member_names
+from .context import PushFn, RulePassContext, bare_object_names, own_object_member_names
 from .exprwalk import ProcedureExpressionVisitor
 from .model import VbaDiagnosticData
 from .rules.access_data import check_access_data
@@ -32,6 +32,7 @@ from .rules.arrays import (
     check_erase_targets,
     check_fixed_array_subscript_bounds,
     check_invalid_redim_targets,
+    check_indexed_next_counters,
     check_redim_impossible_bounds,
     check_redim_preserve_dimensions,
     check_redim_type_change,
@@ -63,6 +64,7 @@ from .rules.control_flow import (
     check_statement_context,
     check_undefined_labels,
 )
+from .rules.base_class_members import check_base_class_member_clash
 from .rules.dead_code import (
     check_unreachable_code,
     check_unused_declarations,
@@ -141,7 +143,11 @@ from .rules.local_declaration_order import check_local_declaration_order
 from .rules.locked_arrays import check_locked_arrays
 from .rules.long_long_narrowing import check_long_long_narrowing
 from .rules.malformed_lines import check_malformed_lines
-from .rules.missing_reference import check_missing_library_reference, check_missing_scripting_reference
+from .rules.missing_reference import (
+    ProjectNames,
+    check_missing_library_reference,
+    check_missing_scripting_reference,
+)
 from .rules.module_kind import (
     check_declare_ptr_safe_for_win64,
     check_event_declaration_module_kind,
@@ -324,6 +330,11 @@ def _missing_library_reference(ctx: RulePassContext, push: PushFn) -> None:
         },
         ctx.symbols,
         ctx.opts.project_visible_symbols,
+        ProjectNames(
+            referenced_libraries=ctx.opts.referenced_libraries,
+            project_name=ctx.opts.project_name,
+            project_module_names=ctx.opts.project_module_names,
+        ),
     )
 
 
@@ -374,7 +385,15 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     ),
     DiagnosticRuleEntry(
         name="redimTypeChange",
-        procedure_statements=lambda ctx, push: check_redim_type_change(ctx.source, ctx.mod, ctx.activity, push),
+        procedure_statements=lambda ctx, push: check_redim_type_change(
+            ctx.source,
+            ctx.mod,
+            ctx.activity,
+            push,
+            ctx.symbols,
+            ctx.opts.project_types,
+            ctx.member_ctx.model,
+        ),
     ),
     DiagnosticRuleEntry(
         name="tooManyParameters",
@@ -660,7 +679,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     ),
     DiagnosticRuleEntry(
         name="directiveForms",
-        run=lambda ctx, push: check_directive_forms(ctx.source, ctx.mod, ctx.opts.conditional_compilation, push),
+        run=lambda ctx, push: check_directive_forms(
+            ctx.source, ctx.mod, ctx.opts.conditional_compilation, push, ctx.activity
+        ),
     ),
     DiagnosticRuleEntry(
         name="optionPlacement",
@@ -720,9 +741,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     ),
     DiagnosticRuleEntry(
         name="parameterDefaultNotConstant",
-        run=lambda ctx, push: check_non_constant_parameter_defaults(
-            ctx.source, ctx.mod, ctx.activity, ctx.member_ctx, push
-        ),
+        run=lambda ctx, push: check_non_constant_parameter_defaults(ctx.source, ctx.mod, ctx.activity, push),
     ),
     DiagnosticRuleEntry(
         name="constValueNotConstant",
@@ -784,6 +803,10 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
             push,
             ctx.opts.host_model,
         ),
+    ),
+    DiagnosticRuleEntry(
+        name="indexedNextCounters",
+        run=lambda ctx, push: check_indexed_next_counters(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push),
     ),
     DiagnosticRuleEntry(
         name="arrayDeclarationImpossibleBounds",
@@ -960,6 +983,10 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
         run=lambda ctx, push: check_invalid_as_type_names(ctx.source, ctx.mod, ctx.activity, ctx.opts, push),
     ),
     DiagnosticRuleEntry(
+        name="baseClassMemberClash",
+        run=lambda ctx, push: check_base_class_member_clash(ctx.mod, ctx.activity, ctx.opts, push),
+    ),
+    DiagnosticRuleEntry(
         name="callParens",
         procedure_statements=lambda ctx, push: check_call_parens(
             ctx.source,
@@ -1070,6 +1097,10 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="missingLibraryReference", run=_missing_library_reference),
     DiagnosticRuleEntry(
         name="memberNotFound",
+        # `If Sheet1.NoSuchMember Then`, `Do While`, `Select Case` and a For
+        # bound are the same compile error (XLIDE issue #1419, measured in Excel
+        # and Word).
+        block_headers=True,
         procedure_statements=lambda ctx, push: check_member_not_found(ctx.source, ctx.member_ctx, push),
     ),
     DiagnosticRuleEntry(
@@ -1109,6 +1140,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
             ctx.opts.project_visible_symbols,
             ctx.member_ctx,
             push,
+            bare_object_names(ctx.opts),
         ),
     ),
     DiagnosticRuleEntry(
@@ -1174,11 +1206,20 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     ),
     DiagnosticRuleEntry(
         name="isOperatorNonObject",
-        procedure_expressions=lambda ctx, push: check_is_operator_operands(ctx.symbols, push),
+        procedure_expressions=lambda ctx, push: check_is_operator_operands(
+            ctx.symbols,
+            push,
+            ctx.opts.project_procedures,
+            ctx.opts.project_visible_symbols,
+            bare_object_names(ctx.opts),
+        ),
     ),
     DiagnosticRuleEntry(
         name="isOperandsInConditions",
-        run=lambda ctx, push: check_is_operands_in_conditions(ctx.source, ctx.mod, ctx.symbols, ctx.activity, push),
+        run=lambda ctx, push: check_is_operands_in_conditions(
+            ctx.source, ctx.mod, ctx.symbols, ctx.activity, push,
+            ctx.opts.project_procedures, ctx.opts.project_visible_symbols, bare_object_names(ctx.opts),
+        ),
     ),
     DiagnosticRuleEntry(
         name="nonScalarBinaryOperand",

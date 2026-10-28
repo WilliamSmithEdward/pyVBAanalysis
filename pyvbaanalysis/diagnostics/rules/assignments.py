@@ -28,7 +28,7 @@ from ...completion.member_access import (
     is_known_object_assignment_type as is_known_object_assignment_type_ctx,
 )
 from ...conditional import ConditionalActivityTracker, inactive_node_skip
-from ...host.host_model import is_dispatch_only_host_type, resolve_host_enum
+from ...host.host_model import get_host_type, is_dispatch_only_host_type, resolve_host_enum
 from ...js_compat import JS_WHITESPACE, js_number, js_number_to_string, js_trim
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
 from ...lexer.token_kinds import TokenKind, VbaToken
@@ -44,7 +44,7 @@ from ...parser.nodes import (
     StatementNode,
     iter_body_nodes,
 )
-from ...runtime.vba_runtime import resolve_runtime_function
+from ...runtime.vba_runtime import resolve_runtime_function, resolve_runtime_object
 from ...symbols.name_resolution import BareIdentifierContext, BareIdentifierResolutionScope
 from ...symbols.symbol_model import (
     ModuleSymbols,
@@ -93,6 +93,7 @@ from ..call_extraction import (
     InferredArgumentType,
     extract_call,
     extract_qualified_call,
+    module_qualifier_shadowed,
     CallableParamType,
     split_arg_slots,
     validate_arity,
@@ -218,6 +219,9 @@ def check_const_assignment(
             if hit is None:
                 hit = set_assignment_target(source, span)
             if hit is None:
+                call = scalar_function_call_target(source, span, symbols, member, project_visible_symbols)
+                if call is not None:
+                    push("assignmentToProcedureName", call[1], call[0])
                 return
             name, name_span, _value = hit
             binding = source_identifier_binding(
@@ -269,6 +273,69 @@ def _read_only_project_default(type_name: str, member_ctx: MemberCompletionConte
         and not member.let_accessor
         and member.writable is not True
         else None
+    )
+
+
+def scalar_function_call_target(
+    source: str,
+    span: Span,
+    symbols: ModuleSymbols,
+    member: ProcedureNode,
+    project_visible_symbols: Sequence[VbaSymbol] | None,
+) -> tuple[Span, str] | None:
+    """`F() = 2`, `Let F(1) = 2`, `Module2.F() = 2`: a call to a Function that
+    returns a type of VBA's own, on the left of an assignment, as (name span,
+    message). That is the error, "Function call on left-hand side of assignment
+    must return Variant or Object", whether the call's arguments would fit or
+    not; a Variant result is assignable, and its arguments are then what is
+    wrong (XLIDE issue #1414, measured in Excel, Word, PowerPoint and Access
+    16.0). A module name a variable takes is that variable."""
+    toks = statement_tokens(source, span)
+    i = first_executable_token_index(toks)
+    if token_text(_at(toks, i)) == "let":
+        i += 1
+    qualifier: str | None = None
+    if token_name(_at(toks, i)) and _raw_at(toks, i + 1) == "." and token_name(_at(toks, i + 2)):
+        qualifier = token_name(_at(toks, i))
+        i += 2
+    name = token_name(_at(toks, i))
+    if not name or _raw_at(toks, i + 1) != "(":
+        return None
+    close = match_paren_from(toks, i + 1)
+    if close < 0 or _raw_at(toks, close + 1) != "=":
+        return None
+    proc_sym = procedure_symbol_for(symbols, member)
+    lower = name.lower()
+    definitions: Sequence[VbaSymbol]
+    if qualifier:
+        if module_qualifier_shadowed(qualifier, source_name_scope_for(symbols, member, project_visible_symbols)):
+            return None
+        module = qualifier.lower()
+        definitions = (
+            [child for child in symbols.root.children or [] if child.name.lower() == lower]
+            if module == symbols.module_name.lower()
+            else [
+                symbol
+                for symbol in project_visible_symbols or []
+                if symbol.module_name.lower() == module and symbol.name.lower() == lower
+            ]
+        )
+    else:
+        binding = source_identifier_binding(
+            symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.ASSIGNMENT_TARGET
+        )
+        if binding.scope in (BareIdentifierResolutionScope.AMBIGUOUS, BareIdentifierResolutionScope.UNRESOLVED):
+            return None
+        definitions = binding.definitions
+    # A Sub given arguments on the left was not measured.
+    if len(definitions) != 1 or definitions[0].kind is VbaSymbolKind.SUB:
+        return None
+    target = _procedure_assignment_target(definitions, proc_sym)
+    if target is None:
+        return None
+    return (
+        Span(span.start + toks[i].start, span.start + toks[i].end),
+        target(f"{qualifier}.{name}" if qualifier else name),
     )
 
 
@@ -1336,13 +1403,14 @@ def _null_from_choice(
     """A Choose, Switch or IIf whose literal arguments make it return Null
     (XLIDE issue #243, measured in Excel 16.0): `Choose(5, 1, 2)` and
     `Choose(0, "a")` name no choice, `Switch(False, 1)` finds no True
-    condition, and `IIf(False, 1, Null)` takes its Null. A module procedure of
-    the same name is the module's."""
+    condition, and `IIf(False, 1, Null)` takes its Null. `Str(Null)` gives
+    its Null back, which a String refuses with 94 (measured in Excel 16.0). A
+    module procedure of the same name is the module's."""
     toks = _non_comment(value_tokens)
     start = 2 if token_text(_at(toks, 0)) == "vba" and _raw_at(toks, 1) == "." else 0
     fn = token_text(_at(toks, start))
     if (
-        fn not in ("choose", "switch", "iif")
+        fn not in ("choose", "switch", "iif", "str")
         or _raw_at(toks, start + 1) != "("
         or match_paren_from(toks, start + 1) != len(toks) - 1
     ):
@@ -1368,6 +1436,12 @@ def _null_from_choice(
 
     shown = "".join(tok.raw_text for tok in toks[start:]).replace(",", ", ")
     first, last = toks[0], toks[-1]
+    if fn == "str":
+        return (
+            _NullChoice(f"{shown} gives its Null argument back", first, last)
+            if len(args) == 1 and len(args[0]) == 1 and token_text(args[0][0]) == "null"
+            else None
+        )
     if fn == "choose":
         index = literal(args[0]) if len(args) > 1 else None
         choices = len(args) - 1
@@ -2064,6 +2138,17 @@ def _late_bound_receiver(source: str, offset: int, member_ctx: MemberCompletionC
     return receiver is None or is_late_bound_type_key(receiver)
 
 
+def _known_scalar_setter_receiver(source: str, offset: int, member_ctx: MemberCompletionContext) -> bool:
+    """A late-bound host chain with one known runtime class still has that scalar setter contract."""
+    receiver = resolve_receiver_type_at(source, offset, member_ctx)
+    if receiver is None:
+        return False
+    if not is_late_bound_type_key(receiver):
+        return True
+    alternatives = receiver[len("union:"):].split("|")
+    return len(alternatives) == 1 and get_host_type(alternatives[0], member_ctx.model) is not None
+
+
 def _push_object_assignment_mismatch(
     push: PushFn,
     label: str,
@@ -2246,7 +2331,7 @@ def check_member_assignment_types(
                 push("hostPropertyValueOutOfRange", problem, value_span)
                 return
         # `ActiveSheet.Visible = "abc"`: a receiver of several host types, each
-        if target and target.kind == "property" and target.access == "read/write" and target.writable is None and not assignment.uses_set and not assignment.with_arguments and target.declared_type and (is_known_scalar_type(normalize_type(target.declared_type) or "") or resolve_host_enum(target.declared_type, member_ctx.model)) and not _late_bound_receiver(source, assignment.member_span.end, member_ctx):
+        if target and target.kind == "property" and target.access == "read/write" and target.writable is None and not assignment.uses_set and not assignment.with_arguments and target.declared_type and (is_known_scalar_type(normalize_type(target.declared_type) or "") or resolve_host_enum(target.declared_type, member_ctx.model)) and _known_scalar_setter_receiver(source, assignment.member_span.end, member_ctx):
             actual = infer(assignment.value_tokens, span.start)
             host_expected = "Long" if resolve_host_enum(target.declared_type, member_ctx.model) else target.declared_type
             host_array_problem = _array_assignment_problem(assignment.label, assignment.member_span, assignment.value_tokens, span.start, DeclaredValueShape(host_expected, False, False), lambda name: declared_shape_for_source_binding(symbols, procedure_symbol_for(symbols, member), project_visible_symbols, name, BareIdentifierContext.EXPRESSION).shape if symbols else None, lambda name: array_value_at(stmt, name), lambda _: actual, source_names, member_ctx=member_ctx, source=source, array_failure_phase="runtime")
@@ -2301,8 +2386,12 @@ def check_member_assignment_types(
         # array field takes an array, or a String As Byte: typeMembers.ts
         # judges it (XLIDE issue #417).
         indexed_accessor = target is not None and (target.set_accessor if assignment.uses_set else (target.let_accessor or (target.writable is False and target.signature is not None and (signature_declares_parameters(target.signature) or normalize_type(target.returns or target.declared_type) != "string"))))
+        runtime_owner = resolve_runtime_object(target.owner) if target is not None else None
+        runtime_target = runtime_owner is not None and target is not None and any(
+            member["name"].lower() == target.name.lower() for member in runtime_owner.get("members", [])
+        )
         if (
-            not project_classes
+            (not project_classes and not runtime_target)
             or (assignment.with_arguments and not indexed_accessor)
             or target is None
             or target.writable is None
@@ -2325,7 +2414,8 @@ def check_member_assignment_types(
                 return
             push(
                 "readonlyMemberAssignment",
-                f"Cannot assign to read-only property '{assignment.label}'.",
+                f"Cannot assign to read-only property '{assignment.label}'."
+                + (" This is a VBE compile error: Can't assign to read-only property." if runtime_target else ""),
                 assignment.member_span,
             )
             return

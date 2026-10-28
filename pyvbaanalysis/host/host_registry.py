@@ -32,6 +32,7 @@ from .host_model import (
     get_word_object_model,
     get_scripting_object_model,
     get_regexp_object_model,
+    get_outlook_object_model,
 )
 
 # The host tokens xlide_vbide normalizes from the process image, so an embedder
@@ -62,6 +63,8 @@ _MODELS_BY_TOKEN = {
     "vb6": get_vb6_object_model,
     "scripting": get_scripting_object_model,
     "regexp": get_regexp_object_model,
+    # A referenced library only: Outlook is not a host XLIDE opens.
+    "outlook": get_outlook_object_model,
 }
 
 # Container extension (without the dot) -> host token. XLIDE's own file
@@ -162,6 +165,11 @@ def host_object_model_for_tokens(tokens: list[str]) -> HostObjectModel | None:
         "source": " + ".join(one["source"] for one in models),
         "hostName": models[0].get("hostName", ""),
         "globalType": models[0].get("globalType"),
+        # A referenced library's global object binds bare after the host's own:
+        # Outlook's Session in a workbook referencing Outlook.
+        "referencedGlobalTypes": tuple(
+            global_type for one in models[1:] if (global_type := one.get("globalType")) is not None
+        ),
         # Each field merges the same-typed field of every layer, so the value
         # types carry over from the source models unchanged.
         "types": cast("Mapping[str, HostType]", merged("types")),

@@ -36,7 +36,9 @@ def test_string_default_for_numeric_param() -> None:
 
 
 def test_non_nothing_default_for_object_param() -> None:
-    assert "parameter-default-type-mismatch" in _codes("Sub S(Optional o As Object = 5)\nEnd Sub")
+    # An object parameter takes any constant default (XLIDE a102b93f, measured
+    # in Excel 16.0).
+    assert "parameter-default-type-mismatch" not in _codes("Sub S(Optional o As Object = 5)\nEnd Sub")
 
 
 def test_valid_defaults_silent() -> None:

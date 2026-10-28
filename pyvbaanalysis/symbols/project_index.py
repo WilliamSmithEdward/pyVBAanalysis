@@ -21,7 +21,7 @@ from ..constants.integer_constant_expression import (
     parse_vba_integer_literal,
     resolve_raw_integer_constants,
 )
-from ..lexer.token_helpers import identifier_words
+from ..lexer.token_helpers import identifier_words, implements_statement_name
 from ..lexer.token_kinds import TokenKind
 from ..lexer.tokenize import tokenize_cached
 from ..parser.nodes import Span
@@ -56,6 +56,7 @@ from .symbol_model import (
     is_procedure_kind,
     procedure_params_from_symbol,
     procedure_signature_from_symbol,
+    procedure_signature_with_def_types,
     procedure_signature_label,
     qualified_procedure_key,
 )
@@ -113,6 +114,10 @@ class ModuleInput:
     # The host class the module's designer makes it: an Access form's
     # `Access.Form`. None for a UserForm, which is always an MSForms.UserForm.
     designer_class: str | None = None
+    # Which host object a document module is, from a host that knows it: a
+    # workbook module whose code name is not ThisWorkbook is still a Workbook.
+    # None leaves the code name to say. An EventHandlerDocumentType value.
+    document_type: str | None = None
 
 
 @dataclass(slots=True)
@@ -389,19 +394,15 @@ def _merge_member_attributes(
     return out
 
 
-_IMPLEMENTS_RE = re.compile(
-    r"^\s*Implements\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\b", re.IGNORECASE
-)
-
-
 def _module_implements(source: str) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for line in re.split(r"\r?\n", source):
-        match = _IMPLEMENTS_RE.match(line)
-        if match is None:
+        # Any letter names an interface (a Cyrillic or Thai one too), and
+        # `Implements As Long` is a Type member named Implements, not a statement.
+        name = implements_statement_name(line)
+        if name is None:
             continue
-        name = match.group(1)
         lower = name.lower()
         if lower not in seen:
             seen.add(lower)
@@ -492,6 +493,7 @@ class ProjectIndex:
         "_module_implicit_members",
         "_module_predeclared_ids",
         "_module_designer_classes",
+        "_module_document_types",
         "_module_string_literal_words",
         "_module_written_names",
         "_module_mentioned_names",
@@ -507,6 +509,8 @@ class ProjectIndex:
         self._module_implicit_members: dict[str, Sequence[ImplicitMember]] = {}
         self._module_predeclared_ids: dict[str, bool] = {}
         self._module_designer_classes: dict[str, str] = {}
+        # Host-supplied document types, keyed by lowercased module name.
+        self._module_document_types: dict[str, str] = {}
         # Identifier-shaped words inside each module's string literals, taken from
         # the token stream while it is still cached from the module's own parse.
         # The whole-project set unions these; re-tokenizing every module for it was
@@ -540,6 +544,7 @@ class ProjectIndex:
         _set_or_forget(self._module_implicit_members, key, input.implicit_members)
         _set_or_forget(self._module_predeclared_ids, key, input.predeclared_id)
         _set_or_forget(self._module_designer_classes, key, input.designer_class)
+        _set_or_forget(self._module_document_types, key, input.document_type)
         self._invalidate(key)
 
     def remove_module(self, module_name: str) -> None:
@@ -553,6 +558,7 @@ class ProjectIndex:
         self._module_implicit_members.pop(key, None)
         self._module_predeclared_ids.pop(key, None)
         self._module_designer_classes.pop(key, None)
+        self._module_document_types.pop(key, None)
         self._invalidate(key)
 
     # --- facts about a module beyond its code ------------------------------
@@ -907,7 +913,8 @@ class ProjectIndex:
                         or not _is_exported(symbol, mod.module_kind)
                     ):
                         continue
-                    sig = procedure_signature_from_symbol(symbol)
+                    declared = procedure_signature_from_symbol(symbol)
+                    sig = procedure_signature_with_def_types(declared, mod.def_types) if declared is not None else None
                     if sig is not None:
                         _add_procedure_signature(signatures, symbol.name.lower(), sig)
                         _add_procedure_signature(
@@ -1027,6 +1034,11 @@ class ProjectIndex:
                                 )
                             )
                 designer_class = self.module_designer_class(mod.module_name)
+                document_type = (
+                    self._module_document_types.get(mod.module_name.lower())
+                    if kind is VbaProjectTypeKind.DOCUMENT
+                    else None
+                )
                 out.append(
                     VbaProjectClassMembers(
                         name=mod.module_name,
@@ -1053,6 +1065,7 @@ class ProjectIndex:
                             or sheet_controls
                         ),
                         designer_class=designer_class,
+                        document_type=document_type,
                         # Documents and forms always have a default instance; only
                         # a class module has to be asked (XLIDE #47).
                         predeclared_id=(

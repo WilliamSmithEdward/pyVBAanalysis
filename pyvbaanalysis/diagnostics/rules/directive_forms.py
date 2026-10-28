@@ -10,7 +10,15 @@ in Excel 16.0 (build 20326, 2026-09-26):
   preceded by an # If clause" (the colon ends the directive, and what follows is no
   longer part of it).
 - null-directive-condition: `#If Null Then`, `#If Null = 1 Then`, or `#If N` after
-  `#Const N = Null` -> "Invalid use of Null" (issue #208).
+  `#Const N = Null` -> "Invalid use of Null" (issue #208), also in an arm the
+  VBE skips and after a taken arm (issue #1351).
+- directive-type-mismatch: a condition that is a string VBA cannot read as
+  True or False (`#If "abc"`, `#If ""`, `#If " True "`), or that hands such a
+  string to an operator (`#If Not "abc"`, `#If "abc" = 1`) -> "Type mismatch",
+  even in an arm the VBE skips (Excel 16.0, 2026-10-12); and a `#Const` value
+  that does the same (`#Const A = "abc" + 1`), even unread.
+- nothing-directive-condition: `#If Nothing Then`, `#If Not Nothing Then` ->
+  "Invalid use of object" (issue #1351), wherever the line is.
 """
 
 from __future__ import annotations
@@ -18,10 +26,16 @@ from __future__ import annotations
 import re
 
 from ...conditional.conditional_compilation import (
+    ConditionalActivityTracker,
     ConditionalCompilationEnvironment,
-    null_condition_directives,
+    invalid_condition_directives,
 )
-from ...lexer.token_helpers import first_token_at_or_after
+from ...lexer.token_helpers import (
+    colon_directive_starts,
+    directive_colon,
+    first_token_at_or_after,
+    token_word,
+)
 from ...lexer.token_kinds import TokenKind
 from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import (
@@ -39,11 +53,23 @@ from ..context import PushFn
 _LINE_TERMINATOR_RE = re.compile(r"[\r\n]")
 
 
+# What a directive line a colon follows fails to do, by its keyword (XLIDE issue #1323).
+_COLON_DIRECTIVE_EFFECT: dict[str, str] = {
+    "if": "opens no #If block, so the #Else, #ElseIf or #End If after it has no #If",
+    "elseif": "starts no new arm: it belongs to the arm above it",
+    "else": "starts no new arm: it belongs to the arm above it",
+    "end": "closes no #If block",
+    "endif": "closes no #If block",
+    "const": "defines no constant",
+}
+
+
 def check_directive_forms(
     source: str,
     mod: ModuleNode,
     conditional_compilation: ConditionalCompilationEnvironment | None,
     push: PushFn,
+    activity: ConditionalActivityTracker | None = None,
 ) -> None:
     directives: list[ConditionalDirectiveNode] = []
     for member in mod.members:
@@ -72,42 +98,77 @@ def check_directive_forms(
                 )
             else:
                 defined[lower] = directive
-    # A directive line that a colon continues: the tokens after the colon on
-    # the directive's own physical line.
-    tokens = tokenize_cached(source)
-    for directive in directives:
-        line_end = _line_end_at_or_after(source, directive.span.end)
-        colon = -1
-        for i in range(first_token_at_or_after(tokens, directive.span.end), len(tokens)):
-            tok = tokens[i]
-            if tok.start >= line_end:
-                break
-            if tok.kind is TokenKind.COLON:
-                colon = i
-                break
-        if colon < 0:
-            continue
-        following = tokens[colon + 1] if colon + 1 < len(tokens) else None
-        if (
-            following is not None
-            and following.kind is not TokenKind.NEWLINE
-            and following.kind is not TokenKind.COMMENT
-            and following.start < line_end
-        ):
+    # A directive line a statement colon follows is no directive: the VBE
+    # reads the whole line as code, refused where it is compiled and skipped
+    # with a skipped arm (XLIDE issue #1323). The parser reads the same lines.
+    starts = colon_directive_starts(source)
+    if len(starts) > 0:
+        tokens = tokenize_cached(source)
+        # Upstream's Set iterates in insertion order, which is source order.
+        for start in sorted(starts):
+            if activity is not None and activity.is_inactive(Span(start, start)):
+                continue
+            hash_index = first_token_at_or_after(tokens, start)
+            colon = directive_colon(tokens, hash_index)
+            if colon is None:
+                continue
+            keyword = token_word(tokens[hash_index + 1] if hash_index + 1 < len(tokens) else None)
+            effect = _COLON_DIRECTIVE_EFFECT.get(keyword, _COLON_DIRECTIVE_EFFECT["if"])
+            # What follows the colon, or the colon itself when nothing does.
+            line_end = _line_end_at_or_after(source, colon.start)
+            after_index = tokens.index(colon, hash_index) + 1
+            after = tokens[after_index] if after_index < len(tokens) else None
+            from_offset = (
+                after.start
+                if after is not None
+                and after.kind is not TokenKind.NEWLINE
+                and after.start < line_end
+                else colon.start
+            )
             push(
                 "directiveTrailingStatement",
-                "A compiler directive takes the whole line: nothing may follow the ':' after it. "
-                'This is a VBE compile error (the VBE reports "An # ElseIf, # Else, or # EndIf '
-                'must be preceded by an # If clause").',
-                Span(following.start, line_end),
+                f"A ':' after a compiler directive makes the whole line no directive, so it "
+                f"{effect}. A directive takes its line alone: drop the ':', and start any "
+                "comment with '. This is a VBE compile error.",
+                Span(from_offset, colon.end if from_offset == colon.start else line_end),
             )
-    for null_directive in null_condition_directives(mod, conditional_compilation):
-        push(
-            "nullDirectiveCondition",
-            f"This #{null_directive.directive_kind.value} condition is Null, which is neither "
-            "True nor False. This is a VBE compile error: Invalid use of Null.",
-            null_directive.span,
-        )
+    for item in invalid_condition_directives(mod, conditional_compilation):
+        directive = item.directive
+        kind = directive.directive_kind.value
+        if item.reason == "null":
+            push(
+                "nullDirectiveCondition",
+                f"This #{kind} condition is Null, which is neither True nor False. This is a VBE "
+                "compile error: Invalid use of Null.",
+                directive.span,
+            )
+        elif item.reason == "nothing":
+            push(
+                "nothingDirectiveCondition",
+                f"This #{kind} condition uses the literal Nothing where VBA requires True or "
+                "False. This is a VBE compile error: Invalid use of object.",
+                directive.span,
+            )
+        elif item.mismatch is not None:
+            what = (
+                "#Const value"
+                if directive.directive_kind is ConditionalDirectiveKind.CONST
+                else f"#{kind} condition"
+            )
+            conversion = item.mismatch.conversion
+            as_text = "True or False" if conversion == "boolean" else f"a {conversion}"
+            push(
+                "directiveTypeMismatch",
+                f"This {what} needs the string {_vba_string_literal(item.mismatch.value)} as "
+                f"{as_text}, and VBA cannot convert it. This is a VBE compile error: Type mismatch.",
+                directive.span,
+            )
+
+
+def _vba_string_literal(value: str) -> str:
+    """A string as VBA writes it, shortened past 40 characters."""
+    shown = f"{value[:40]}..." if len(value) > 40 else value
+    return '"' + shown.replace('"', '""') + '"'
 
 
 def _line_end_at_or_after(source: str, start: int) -> int:

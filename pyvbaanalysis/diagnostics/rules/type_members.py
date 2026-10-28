@@ -144,7 +144,14 @@ def _field_kind(step: FieldStep, types: ModuleTypes, is_object_type: Callable[[s
     return "object" if is_object_type(type_) else None
 
 
-_VALUE_OPERATORS = frozenset({"+", "-", "*", "/", "\\", "^", "mod", "&", "=", "<>", "<", ">", "<=", ">="})
+# The logical operators and Like refuse a Type field too (issue #1415,
+# measured in Excel, Word, PowerPoint and Access 16.0).
+_VALUE_OPERATORS = frozenset(
+    {
+        "+", "-", "*", "/", "\\", "^", "mod", "&", "=", "<>", "<", ">", "<=", ">=",
+        "and", "or", "xor", "eqv", "imp", "like",
+    }
+)
 _EMPTY_PARENS_END_RE = re.compile(r"\(\)\Z")
 _NUMBER_KINDS = frozenset({TokenKind.INTEGER_LITERAL, TokenKind.FLOAT_LITERAL})
 _LITERAL_KINDS = frozenset({TokenKind.INTEGER_LITERAL, TokenKind.FLOAT_LITERAL, TokenKind.STRING_LITERAL})
@@ -294,7 +301,7 @@ def _field_use_misuse(
     if operator_before or operator_after:
         operator = after if operator_after else before
         assert operator is not None
-        if kind in ("array", "udt"):
+        if kind in ("array", "udt") and not unchecked_aggregate_operators(toks, start - 1, operator_before, end + 1, operator_after):
             what = "an array" if kind == "array" else f"a {declared}"
             return (
                 "nonScalarBinaryOperand",
@@ -770,5 +777,30 @@ def _depth_at(toks: Sequence[VbaToken], start: int, index: int) -> int:
         raw = toks[i].raw_text
         depth += 1 if raw == "(" else -1 if raw == ")" else 0
     return depth
+
+
+def unchecked_aggregate_operators(
+    toks: Sequence[VbaToken], before_index: int, has_before: bool, after_index: int, has_after: bool
+) -> bool:
+    """The operators the VBE does not type-check against an array or a Type at
+    compile: `^` on either side, and `Not` before. `t ^ 2`, `a ^ 2`, `Not t` and
+    `Not a` compile; `^` on a Type raises 51 and Not runs (measured in Excel
+    16.0), where `-a` and `t + 1` are Type mismatch. Compiling `-t` stops Excel
+    itself, so it stays reported. True when every operator beside the operand is
+    one of these."""
+
+    def unchecked(index: int, side: str) -> bool:
+        tok = toks[index] if 0 <= index < len(toks) else None
+        if tok is not None and tok.raw_text == "^":
+            return True
+        if side == "after":
+            return False
+        return token_text(tok) == "not"
+
+    return (
+        (not has_before or unchecked(before_index, "before"))
+        and (not has_after or unchecked(after_index, "after"))
+        and (has_before or has_after)
+    )
 
 

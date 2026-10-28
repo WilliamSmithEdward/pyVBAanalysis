@@ -787,6 +787,8 @@ def _check_single_if_block_else_branch_order(
         word = token_text(toks[0])
         if word not in ("elseif", "else"):
             continue
+        if child.single_line_if_tail:
+            continue  # after a one-line If's colon: never a clause of this block
         # Only an `Else` that could be compiled beside this branch counts as
         # preceding it (XLIDE issue #58).
         after = any(
@@ -891,15 +893,29 @@ def check_else_without_if(
     source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn
 ) -> None:
     def visit(body: list[BodyNode]) -> None:
-        # Each node comes with whether the body holding it is an If block's.
-        for node, inside_if_block in iter_body_nodes_in_context(
-            body, False, lambda block, _: isinstance(block, IfBlockNode), inactive_node_skip(activity)
+        # Each node comes with whether the body holding it is an If block's, and
+        # that body's count of one-line Ifs on the current logical line still
+        # without an Else. Each may take one `Else` after a colon (MS-VBAL
+        # 5.4.2.9), innermost first.
+        for node, (inside_if_block, open_ifs) in iter_body_nodes_in_context(
+            body,
+            (False, [0]),
+            lambda block, _: (isinstance(block, IfBlockNode), [0]),
+            inactive_node_skip(activity),
         ):
-            if not is_leaf_statement(node) or inside_if_block:
+            if not is_leaf_statement(node):
                 continue
             toks = statement_tokens_after_leading_label(source, node.span)
             first = toks[0] if toks else None
             word = token_text(first) if first is not None else ""
+            else_tail = node.single_line_if_tail and word == "else" and open_ifs[0] > 0
+            open_ifs[0] = max(
+                0, (open_ifs[0] if node.single_line_if_tail else 0) + _ifs_minus_elses(toks)
+            )
+            if else_tail:
+                continue  # `If a Then b = 1: Else c = 2`
+            if inside_if_block and not node.single_line_if_tail:
+                continue  # a legit Else/ElseIf header inside its If block
             if first is not None and (word == "else" or word == "elseif"):
                 push(
                     "elseWithoutIf",
@@ -910,6 +926,22 @@ def check_else_without_if(
     for member in active_module_members(mod, activity):
         if isinstance(member, ProcedureNode):
             visit(member.body)
+
+
+def _ifs_minus_elses(toks: Sequence[VbaToken]) -> int:
+    """`If` keyword tokens minus `Else` ones: the one-line Ifs a statement leaves
+    open. `End If` and member names (`obj.If`, `rs!Else`) are neither."""
+    open_count = 0
+    for i, tok in enumerate(toks):
+        prev = toks[i - 1] if i > 0 else None
+        if prev is not None and prev.raw_text in (".", "!"):
+            continue
+        word = token_text(tok) if tok.kind == TokenKind.KEYWORD else ""
+        if word == "if" and token_text(prev) != "end":
+            open_count += 1
+        elif word == "else":
+            open_count -= 1
+    return open_count
 
 
 # -- checkMalformedStatements ----------------------------------------------

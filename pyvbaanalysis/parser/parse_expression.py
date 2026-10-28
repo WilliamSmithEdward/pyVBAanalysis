@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from ..lexer.token_helpers import is_ident_like, relational_operator_at, token_name, token_word
 from ..lexer.token_kinds import TokenKind, VbaToken
+from ..runtime.vba_runtime import resolve_runtime_function
 from .expression_limits import MAX_EXPRESSION_DEPTH
 from .nodes import (
     AddressOfExpr,
@@ -382,12 +383,24 @@ class _ExpressionParser:
                     break
                 self._next()
                 member = self._name_or_raw(member_token)
-                expr = MemberAccessExpr(
+                member_expr = MemberAccessExpr(
                     span=Span(self._span_of(expr).start, member_token.end),
                     object_=expr,
                     member=member,
                     member_span=Span(member_token.start, member_token.end),
                 )
+                # `VBA.Mid$(s, 1)`: the same adjacent suffix an identifier takes.
+                suffix = self._peek()
+                if (
+                    suffix is not None
+                    and suffix.kind is TokenKind.UNKNOWN
+                    and suffix.raw_text in UNAMBIGUOUS_SUFFIXES
+                    and suffix.start == member_token.end
+                ):
+                    self._next()
+                    member_expr.type_suffix = suffix.raw_text
+                    member_expr.span = Span(member_expr.span.start, suffix.end)
+                expr = member_expr
                 continue
             if token.kind is TokenKind.PUNCTUATION and token.raw_text == "(":
                 indexed = self._parse_index(expr)
@@ -581,6 +594,20 @@ class _ExpressionParser:
                 return self._parse_address_of(token)
             if word == "typeof":
                 return self._parse_type_of(token)
+            # `CLng(1)`, `Len("a")`: VBA's functions whose names the lexer reads
+            # as keywords are calls, and the expression is still one (issue #1415).
+            # So is a `$` form, `String$(1, "x")` (issue #1416).
+            following = self._peek_at(1)
+            dollar = 1 if following is not None and following.raw_text == "$" and following.start == token.end else 0
+            opener = self._peek_at(1 + dollar)
+            runtime = (
+                resolve_runtime_function(f"{token.raw_text}{'$' if dollar else ''}")
+                if opener is not None and opener.raw_text == "("
+                else None
+            )
+            if runtime is not None and runtime.kind == "function":
+                self._next()
+                return self._identifier_expr(token)
 
         # Identifier reference.
         if token.kind is TokenKind.IDENTIFIER or token.kind is TokenKind.BRACKETED_IDENTIFIER:

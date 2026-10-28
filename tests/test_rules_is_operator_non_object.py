@@ -47,19 +47,15 @@ def test_unknown_operand_is_silent() -> None:
     assert _CODE not in _codes("Sub S()\n    If foo Is Nothing Then\n    End If\nEnd Sub")
 
 
-def test_debug_print_form_is_dormant() -> None:
-    # The Debug.Print receiver statement parses raw, so the Is never reaches the
-    # walk -- silent, exactly as XLIDE is on this form.
+def test_debug_print_items_are_judged() -> None:
+    # The Debug.Print items reach the walk through statement_operands since
+    # XLIDE issue #1415, so the Is there is judged as anywhere else.
     src = "Sub S()\n    Dim n As Long\n    Debug.Print n Is Nothing\nEnd Sub"
-    assert _CODE not in _codes(src)
+    assert _CODE in _codes(src)
 
 
 def test_oracle_cases_match_xlide_activity() -> None:
-    dormant = {
-        "is_literal_integer_operands_probe", "is_literal_string_operands_probe",
-        "is_scalar_long_var_compile", "is_scalar_string_var_compile",
-        "is_two_scalar_vars_compile", "is_array_var_compile",
-    }
+    dormant: set[str] = set()
     ids = AUDIT[_CODE].asserted_oracle_cases
     cases = [CASES[i] for i in ids if i in CASES and CASES[i].expected == "rejected"]
     assert cases, "expected asserted is-operator-non-object oracle cases"

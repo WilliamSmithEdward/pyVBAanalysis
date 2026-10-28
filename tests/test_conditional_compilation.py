@@ -237,5 +237,11 @@ def test_null_condition_directives() -> None:
     src = "#Const N = Null\n#If N Then\nDim a\n#ElseIf Null Then\nDim b\n#End If\n#If Mac Then\n#If Null Then\n#End If\n#End If"
     module = parse_module(src)
     found = null_condition_directives(module)
-    assert [d.span.start for d in found] == [src.index("#If N")]
+    # Every Null condition, in a skipped arm and after an undecided one too
+    # (XLIDE issue #1351, measured in Excel 16.0).
+    assert [d.span.start for d in found] == [
+        src.index("#If N"),
+        src.index("#ElseIf Null"),
+        src.index("#If Null"),
+    ]
     assert null_condition_directives(module, None) == found

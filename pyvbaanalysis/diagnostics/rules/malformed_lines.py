@@ -22,6 +22,17 @@ Measured in Excel 16.0 (build 20326, 2026-09-30) with a full compile.
 - statement-outside-procedure: a lone `:` after a procedure -> "Only
     comments may appear after End Sub, End Function, or End Property". It
     compiles above the first procedure.
+- malformed-statement, XLIDE issue #1321 (Excel 16.0, 2026-10-12): `Rem` on
+    a directive line, which the VBE does not read as a comment there.
+    `#If Win64 Then Rem note`, `#If True Rem note Then`, `#Else Rem note`
+    and `#End If Rem note` are no directives at all: a later #Else has no
+    #If, an #If is left open, and in a compiled arm the line is a "Syntax
+    error". `#Const A = True Rem note` -> "Expected: end of statement",
+    `#Const A = Rem note` -> "Expected: expression", `#Const Rem = 1` ->
+    "Expected: identifier". So is a reserved word as the name, as
+    `#Const Empty = 1`, `#Const Debug = 1` or `#Const String = 1`, while
+    `#Const Error = 1` and `#Const Win64 = 1` compile: the words are
+    is_reserved_identifier's, all 30 measured.
 
 None of it is judged in an inactive #If branch, which the VBE does not
 parse.
@@ -36,7 +47,15 @@ from typing import Literal, Protocol
 
 from ...conditional import ConditionalActivityTracker
 from ...js_compat import js_trim
-from ...lexer.token_helpers import first_token_at_or_after
+from ...lexer.keyword_table import is_reserved_identifier
+from ...lexer.token_helpers import (
+    colon_directive_starts,
+    directive_rem,
+    first_token_at_or_after,
+    is_decimal_line_number,
+    misplaced_directive_starts,
+    rem_directive_starts,
+)
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import EnumNode, ModuleNode, ProcedureNode, Span, VariableGroupNode
@@ -103,9 +122,28 @@ def check_malformed_lines(
         return not (activity is not None and activity.is_inactive(span))
 
     toks = tokenize_cached(source)
+    misplaced = misplaced_directive_starts(source)
+    colon_lines = colon_directive_starts(source) if len(misplaced) > 0 else misplaced
 
     for i, tok in enumerate(toks):
         span = Span(tok.start, tok.end)
+        if tok.start in misplaced:
+            # After a directive's colon the line is directive-trailing-statement's.
+            if active(span) and _logical_line_start(toks, i) not in colon_lines:
+                where = "a line number" if tok.kind is TokenKind.OPERATOR else "a ':'"
+                error = (
+                    "Expected: line number or label or statement or end of statement"
+                    if place(tok.start) == "top"
+                    else "Syntax error"
+                )
+                push(
+                    "malformedStatement",
+                    f"A compiler directive must start its line: after {where} the VBE reads no "
+                    f"#{toks[i + 1].raw_text} here, so it opens, divides, closes and defines "
+                    f"nothing. This is a VBE compile error: {error}.",
+                    Span(tok.start, toks[i + 1].end),
+                )
+            continue
         if tok.kind is TokenKind.DIRECTIVE and active(span):
             following = toks[i + 1] if i + 1 < len(toks) else None
             word = (
@@ -126,6 +164,8 @@ def check_malformed_lines(
                     f"#Const are. This is a VBE compile error: {error}.",
                     Span(tok.start, word.end) if word is not None else span,
                 )
+            elif not _check_const_name(toks, i, push):
+                _check_directive_rem(source, toks, i, push)
         elif (
             tok.kind is TokenKind.BRACKETED_IDENTIFIER
             and not tok.raw_text.endswith("]")
@@ -543,7 +583,10 @@ def _check_value_keywords(
 # `1 + Shared` are a Syntax error, and so are `Tab(5)` and `Spc(5)` outside a
 # Print list. Input, Len and Array take an argument list, and Seek
 # needs its argument: bare, the first three are a Syntax error and
-# Seek is "Argument not optional".
+# Seek is "Argument not optional". So are LenB, Abs, Int, Fix, Sgn and the
+# C-conversions below, after `=`, in a Print list and in an If's condition,
+# `If Len Is Nothing Then` (XLIDE issue #1419, measured in Excel, Word,
+# PowerPoint and Access 16.0).
 VALUE_WORD_ERRORS: Mapping[str, str] = {
     "tab": "Syntax error",
     "spc": "Syntax error",
@@ -554,12 +597,28 @@ VALUE_WORD_ERRORS: Mapping[str, str] = {
     "len": "Syntax error",
     "array": "Syntax error",
     "seek": "Argument not optional",
+    "lenb": "Syntax error",
+    "abs": "Syntax error",
+    "int": "Syntax error",
+    "fix": "Syntax error",
+    "sgn": "Syntax error",
+    "cdbl": "Syntax error",
+    "cstr": "Syntax error",
+    "clng": "Syntax error",
+    "cint": "Syntax error",
+    "cbool": "Syntax error",
+    "cvar": "Syntax error",
+    "cdate": "Syntax error",
 }
+
+# The words of VALUE_WORD_ERRORS that are functions, fine with their argument list.
+_ARGUMENT_LIST_WORDS = frozenset(
+    word for word in VALUE_WORD_ERRORS if word not in ("tab", "spc", "print", "write", "shared")
+)
 
 
 def _check_value_words(source: str, span: Span, push: PushFn) -> None:
     toks = statement_tokens(source, span)
-    value_from = _value_start(source, span, toks)
     # A Print list, `Debug.Print "a"; Tab(5)` or `Print #1, Spc(2)`, takes Tab and Spc.
     print_ = next(
         (
@@ -569,6 +628,17 @@ def _check_value_words(source: str, span: Span, push: PushFn) -> None:
         ),
         -1,
     )
+    head = 1 if toks and is_decimal_line_number(toks[0]) else 0
+    assigned = _value_start(source, span, toks)
+    # After `=`; failing that, a Print list's items and an If's condition.
+    condition = assigned < 0 and print_ < 0 and token_text(_at(toks, head)) == "if"
+    value_from = assigned if assigned >= 0 else print_ + 1 if print_ >= 0 else head + 1 if condition else -1
+    # The condition ends at Then; the arms are statements of their own.
+    value_end = (
+        next((k for k, tok in enumerate(toks) if token_text(tok) == "then"), -1) if condition else -1
+    )
+    # Open's `Len = 128` clause is the record length, in an If's arm too.
+    open_ = next((k for k, tok in enumerate(toks) if token_text(tok) == "open"), -1)
     depth = 0
     for i, tok in enumerate(toks):
         depth += 1 if tok.raw_text == "(" else -1 if tok.raw_text == ")" else 0
@@ -578,13 +648,16 @@ def _check_value_words(source: str, span: Span, push: PushFn) -> None:
         if (
             not error
             or (depth == 0 and (value_from < 0 or i < value_from))
+            or (value_end >= 0 and i >= value_end)
             or (_raw_at(toks, i - 1) or "") in (".", "!")
             or (nxt or "") in (".", "!", ":=")
         ):
             continue
         if (word == "tab" or word == "spc") and print_ >= 0 and i > print_:
             continue
-        if word in ("input", "len", "seek", "array") and (nxt == "(" or nxt == "$"):
+        if word in _ARGUMENT_LIST_WORDS and (nxt == "(" or nxt == "$"):
+            continue
+        if word == "len" and 0 <= open_ < i:
             continue
         what = (
             "is a function that needs its file number"
@@ -711,3 +784,84 @@ def _check_enum_lines(
             "with = and a value if it has one. This is a VBE compile error: Invalid inside Enum.",
             Span(line.span.start + nxt.start, line.span.start + nxt.end),
         )
+
+
+_REM_DIRECTIVE_EFFECT: Mapping[str, str] = {
+    "if": "opens no #If block, so the #Else, #ElseIf or #End If after it has no #If",
+    "elseif": "starts no new arm: it belongs to the arm above it",
+    "else": "starts no new arm: it belongs to the arm above it",
+    "end": "closes no #If block",
+    "endif": "closes no #If block",
+}
+
+
+def _check_directive_rem(
+    source: str, toks: Sequence[VbaToken], hash_index: int, push: PushFn
+) -> None:
+    """`Rem` on a directive line: the VBE does not read it as a comment there
+    (XLIDE issue #1321)."""
+    # The lines the parser reads as no directive; one after a colon is
+    # directive-trailing-statement's.
+    rem = directive_rem(toks, hash_index)
+    if rem is None or toks[hash_index].start not in rem_directive_starts(source):
+        return
+    keyword = token_text(_at(toks, hash_index + 1))
+    span = Span(toks[hash_index].start, rem.start + len("Rem"))
+    effect = _REM_DIRECTIVE_EFFECT.get(keyword)
+    if effect is not None:
+        push(
+            "malformedStatement",
+            "Rem does not start a comment on a compiler-directive line, so the VBE does not "
+            f"read this line as a directive at all: it {effect}. Start the comment with ' "
+            "instead. This is a VBE compile error.",
+            span,
+        )
+        return
+    at = toks.index(rem, hash_index)
+    if at == hash_index + 2:
+        error = "Expected: identifier"
+    else:
+        before = _at(toks, at - 1)
+        error = (
+            "Expected: expression"
+            if before is not None and before.raw_text == "="
+            else "Expected: end of statement"
+        )
+    push(
+        "malformedStatement",
+        "Rem does not start a comment on a #Const line: the VBE reads it as a word. Start the "
+        f"comment with ' instead. This is a VBE compile error: {error}.",
+        span,
+    )
+
+
+def _check_const_name(toks: Sequence[VbaToken], hash_index: int, push: PushFn) -> bool:
+    """`#Const Empty = 1`: a reserved word cannot name a #Const (XLIDE issue
+    #1321). True when reported, which is then the line's one error."""
+    name = _at(toks, hash_index + 2)
+    # The lexer reads the attribute names and LineInput as identifiers, but
+    # the VBE refuses them too: `#Const vb_name = 1`. A bracketed name is
+    # allowed, `#Const [Rem] = 1` (both measured in Excel 16.0).
+    if (
+        token_text(_at(toks, hash_index + 1)) != "const"
+        or name is None
+        or (name.kind is not TokenKind.KEYWORD and name.kind is not TokenKind.IDENTIFIER)
+        or not is_reserved_identifier(name.raw_text)
+    ):
+        return False
+    push(
+        "malformedStatement",
+        f"'{name.raw_text}' is a reserved word, so it cannot name a #Const. This is a VBE "
+        "compile error: Expected: identifier.",
+        Span(name.start, name.end),
+    )
+    return True
+
+
+def _logical_line_start(tokens: Sequence[VbaToken], i: int) -> int:
+    """The start of the first token of the logical line holding ``tokens[i]``:
+    a continuation leaves no newline."""
+    first = i
+    while first > 0 and tokens[first - 1].kind is not TokenKind.NEWLINE:
+        first -= 1
+    return tokens[first].start

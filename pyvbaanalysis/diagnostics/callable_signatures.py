@@ -25,6 +25,7 @@ from ..conditional import ConditionalActivityTracker
 from ..constants.integer_constant_expression import IntegerConstantLookup
 from ..host.host_model import HostObjectModel
 from ..identity_cache import IdentityLru
+from ..js_compat import js_trim
 from ..lexer.token_helpers import match_paren_from
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..parser.nodes import ProcedureNode, Span
@@ -60,6 +61,7 @@ from .call_extraction import (
     CallableTypeSignature,
     CallArguments,
     empty_arg_split,
+    module_qualifier_shadowed,
     split_arg_slots,
 )
 from .const_expr import collect_body_literal_integer_constants, external_integer_constant_value
@@ -212,6 +214,10 @@ def callable_type_signatures_for(
 class SourceNameScope:
     callable_shadows: frozenset[str]
     runtime_shadows: frozenset[str]
+    # The variables a `Name.` receiver can mean instead of the module called
+    # Name: the procedure's locals and parameters and the current module's
+    # variables. See module_qualifier_shadowed.
+    variable_shadows: frozenset[str] = frozenset()
 
 
 def is_non_callable_symbol(sym: VbaSymbol) -> bool:
@@ -265,14 +271,20 @@ def source_name_scope_for(
     cached = _SOURCE_NAME_SCOPE_CACHE.get(symbols, proc, project)
     if cached is not None:
         return cached  # type: ignore[no-any-return]
-    callable_shadows = set(module_non_callable_symbols(symbols))
+    module_non_callables = module_non_callable_symbols(symbols)
+    callable_shadows = set(module_non_callables)
+    variables = {lower for lower, sym in module_non_callables.items() if sym.kind is VbaSymbolKind.MODULE_VARIABLE}
     proc_sym = procedure_symbol_for(symbols, proc)
     runtime_shadows = source_identifier_names(symbols, proc_sym, project)
     for child in (proc_sym.children if proc_sym is not None else None) or []:
         if is_non_callable_symbol(child):
             callable_shadows.add(child.name.lower())
+        if child.kind in (VbaSymbolKind.LOCAL_VARIABLE, VbaSymbolKind.PARAMETER):
+            variables.add(child.name.lower())
     scope = SourceNameScope(
-        callable_shadows=frozenset(callable_shadows), runtime_shadows=frozenset(runtime_shadows)
+        callable_shadows=frozenset(callable_shadows),
+        runtime_shadows=frozenset(runtime_shadows),
+        variable_shadows=frozenset(variables),
     )
     return _SOURCE_NAME_SCOPE_CACHE.put(scope, symbols, proc, project)  # type: ignore[no-any-return]
 
@@ -330,14 +342,31 @@ def runtime_type_signature(runtime: VbaRuntimeFunction) -> CallableTypeSignature
             )
             for p in runtime.params
         ]
-        return CallableTypeSignature(name=runtime.name, params=params, return_type=runtime.returns)
-    return parse_runtime_display_signature(runtime.name, runtime.signature, runtime.returns)
+        return CallableTypeSignature(name=runtime.name, params=params, return_type=runtime.returns, runtime=True)
+    return replace(parse_runtime_display_signature(runtime.name, runtime.signature, runtime.returns), runtime=True)
 
 
 def runtime_arity_signature(runtime: VbaRuntimeFunction) -> CallableTypeSignature | None:
     if runtime.params is not None or runtime_signature_parameter_text(runtime.signature) is not None:
         return runtime_type_signature(runtime)
+    # A statement's signature is its argument list after the name, unparenthesized.
+    if runtime.kind == "statement" and runtime.name.lower() in _ARGUMENT_LIST_STATEMENTS:
+        return parse_runtime_display_signature(
+            runtime.name, f"{runtime.name}({js_trim(runtime.signature[len(runtime.name):])})"
+        )
     return None
+
+
+# The statements whose arguments are a plain list, each measured to refuse a
+# missing argument (Argument not optional), one too many (Wrong number of
+# arguments) and a repeated named one (Named argument already specified) in
+# Excel, Word, PowerPoint and Access 16.0 (XLIDE issue #1414). Line Input #,
+# Name ... As and Width # have syntax of their own; Beep, Randomize, Reset, Load
+# and Unload were not measured.
+_ARGUMENT_LIST_STATEMENTS = frozenset({
+    "appactivate", "chdir", "chdrive", "deletesetting", "filecopy", "kill", "mkdir", "rmdir",
+    "savesetting", "sendkeys", "setattr",
+})
 
 
 def parse_runtime_display_signature(
@@ -396,8 +425,11 @@ def expression_calls(
     span: Span,
     module_signatures: Mapping[str, CallableTypeSignature],
     source_names: SourceNameScope | None = None,
+    *,
+    include_vba_library: bool = False,
 ) -> list[CallArguments]:
-    """Parenthesized current-module / unique-project calls inside an expression."""
+    """Parenthesized current-module / unique-project calls inside an expression, and
+    with `include_vba_library` the `VBA.`-qualified calls of VBA's own functions."""
     toks = statement_tokens(source, span)
     out: list[CallArguments] = []
     first_executable = first_executable_token_index(toks)
@@ -409,9 +441,18 @@ def expression_calls(
         # `Take (i)` as a statement passes `(i)` as its one argument: the space
         # makes the parentheses part of the argument, which is then a copy (XLIDE
         # issue #111). `Take(i)` glued, and `x = Take (i)` inside an expression,
-        # are calls with a list.
+        # are calls with a list. A qualified statement reads the same:
+        # `Module1.Take (i)` passes a copy (measured in Excel 16.0).
+        chain_start = i
+        while (
+            chain_start - 2 >= first_executable
+            and toks[chain_start - 1].raw_text == "."
+            and token_name(toks[chain_start - 2])
+        ):
+            chain_start -= 2
         arguments_parenthesized = (
-            i == first_executable and toks[call_name.paren_index].start > toks[call_name.name_end_index].end
+            chain_start == first_executable
+            and toks[call_name.paren_index].start > toks[call_name.name_end_index].end
         )
         # `ReDim Three(2)` inside Function Three sizes the return array, and a
         # ReDim target anywhere is a variable, never a call (XLIDE issue #115).
@@ -421,11 +462,28 @@ def expression_calls(
             token_name(toks[i - 2]) if i >= 2 and toks[i - 1].raw_text == "." else None
         )
         lookup_key = qualified_procedure_key(qualifier, call_name.name) if qualifier else None
-        if qualifier and (lookup_key is None or lookup_key not in module_signatures):
+        # `VBA.Len()` names VBA's own function, whatever the project calls Len,
+        # for a caller that asks for these calls (XLIDE issue #1414).
+        vba_library = (
+            include_vba_library
+            and qualifier is not None
+            and qualifier.lower() == "vba"
+            and not (i >= 3 and toks[i - 3].raw_text == ".")
+            and lookup_key not in module_signatures
+            and not module_qualifier_shadowed(qualifier, source_names)
+            and resolve_runtime_function(call_name.name) is not None
+        )
+        if qualifier and not vba_library and (
+            lookup_key is None
+            or lookup_key not in module_signatures
+            or module_qualifier_shadowed(qualifier, source_names)
+        ):
             continue  # host/member calls need receiver binding before checking
         if not qualifier and i > 0 and toks[i - 1].raw_text == ".":
             continue
-        if lookup_key is not None:
+        if vba_library:
+            pass
+        elif lookup_key is not None:
             if lookup_key not in module_signatures:
                 continue
         elif callable_signature_for(call_name.name, module_signatures, source_names) is None:
@@ -439,7 +497,8 @@ def expression_calls(
             CallArguments(
                 name=call_name.name,
                 qualifier=qualifier,
-                lookup_key=lookup_key,
+                vba_library=vba_library,
+                lookup_key=None if vba_library else lookup_key,
                 name_span=Span(
                     span.start + toks[i].start, span.start + toks[call_name.name_end_index].end
                 ),

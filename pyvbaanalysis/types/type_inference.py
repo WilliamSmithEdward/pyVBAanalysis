@@ -35,6 +35,7 @@ from ..completion.member_access import (
     is_explicit_element_accessor,
     library_object_type,
     member_takes_own_arguments,
+    project_value_type_names,
     resolve_known_object_assignment_type,
     simple_type_name_for_assignment,
 )
@@ -74,7 +75,7 @@ from ..symbols.name_resolution import (
     BareIdentifierResolutionScope,
     resolve_bare_identifier_binding,
 )
-from ..symbols.symbol_model import ModuleSymbols, VbaProjectClassMembers, VbaSymbol, VbaSymbolKind
+from ..symbols.symbol_model import ModuleSymbols, VbaProjectClassMembers, VbaSymbol, VbaSymbolKind, def_type_for
 from .type_names import (
     is_known_scalar_type,
     is_provably_non_numeric_string,
@@ -234,20 +235,11 @@ def _type_env_module_base(symbols: ModuleSymbols) -> dict[str, str]:
     return _TYPE_ENV_MODULE_BASE_CACHE.put(base, symbols)  # type: ignore[no-any-return]
 
 
-_DEF_TYPE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
-
-
 def def_type_of(symbols: ModuleSymbols, name: str) -> str | None:
     """The type a DefType line gives a name declared with no type and no type
     character: `DefInt A-Z` then `Dim i` is an Integer (XLIDE issue #285). A
     Variant is no type to report on, so it gives None, as no DefType does."""
-    def_types = symbols.def_types
-    type_ = (
-        def_types.get(name[0].lower())
-        if def_types is not None and _DEF_TYPE_NAME_RE.match(name) is not None
-        else None
-    )
-    return None if type_ in ("Variant", "Decimal") else type_
+    return def_type_for(symbols.def_types, name)
 
 
 def effective_declared_value_type(symbols: ModuleSymbols, symbol: VbaSymbol) -> str | None:
@@ -1605,7 +1597,9 @@ def create_object_assignment_type_resolver(
     ) -> KnownObjectAssignmentType | None:
         # Raw keys preserve the display spelling used for generic and host types.
         if type_name not in queries:
-            queries[type_name] = resolve_known_object_assignment_type(type_name, member_ctx, lookup)
+            queries[type_name] = resolve_known_object_assignment_type(
+                type_name, member_ctx, lookup, lambda: project_value_type_names(member_ctx)
+            )
         return queries[type_name]
 
     return resolve

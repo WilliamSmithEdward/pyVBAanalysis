@@ -13,6 +13,8 @@ import unicodedata
 from collections.abc import Sequence
 from typing import Literal, Protocol
 
+from ..identity_cache import IdentityLru
+from ..js_compat import JS_WHITESPACE
 from .token_kinds import TokenKind, VbaToken
 from .tokenize import tokenize, tokenize_cached
 
@@ -231,6 +233,43 @@ def identifiers_in(text: str) -> list[str]:
     return words
 
 
+_IMPLEMENTS_HEAD_RE = re.compile(f"[{JS_WHITESPACE}]*implements[{JS_WHITESPACE}]+", re.IGNORECASE)
+
+
+def _identifier_end(text: str, start: int) -> int:
+    """End of the identifier starting at `start`, or `start` when none does."""
+    if start >= len(text) or not _identifier_start(text[start]):
+        return start
+    end = start + 1
+    while end < len(text) and _identifier_part(text[end]):
+        end += 1
+    return end
+
+
+def implements_statement_name(code: str) -> str | None:
+    """The interface an `Implements` line names, plain or qualified, or None.
+
+    XLIDE's ``/^\\s*Implements\\s+(?!As(?![\\p{L}\\p{M}\\p{N}_]))([\\p{L}_][\\p{L}\\p{M}\\p{N}_]*
+    (?:\\.[\\p{L}_][\\p{L}\\p{M}\\p{N}_]*)?)/iu``, scanned by category. `Implements As
+    Long` is a Type member named Implements, not a statement; any letter after As
+    continues an interface name (`Asx`, an accented `As` + e)."""
+    head = _IMPLEMENTS_HEAD_RE.match(code)
+    if head is None:
+        return None
+    start = head.end()
+    after_as = start + 2
+    if code[start:after_as].lower() == "as" and (after_as >= len(code) or not _identifier_part(code[after_as])):
+        return None
+    end = _identifier_end(code, start)
+    if end == start:
+        return None
+    if end < len(code) and code[end] == ".":
+        member_end = _identifier_end(code, end + 1)
+        if member_end > end + 1:
+            end = member_end
+    return code[start:end]
+
+
 def identifier_words(text: str) -> list[str]:
     """The same words lower-cased, the way VBA compares names."""
     return [word.lower() for word in identifiers_in(text)]
@@ -378,3 +417,136 @@ def top_level_equals_index(tokens: Sequence[VbaToken]) -> int:
         elif raw == "=" and depth == 0:
             return i
     return -1
+
+
+_REM_COMMENT_RE = re.compile(r"^rem\b", re.IGNORECASE | re.ASCII)
+_REM_RE = re.compile(r"rem", re.IGNORECASE)
+
+
+def directive_rem(tokens: Sequence[VbaToken], hash_index: int) -> VbaToken | None:
+    """The `Rem` on the compiler-directive statement whose `#` is
+    ``tokens[hash_index]``: the word itself (it stays one after `Then`) or the
+    comment the lexer starts with it, but not a member name (`x.Rem`). The VBE
+    does not read Rem as a comment on a directive line: an #If, #ElseIf, #Else
+    or #End If line holding one is no directive at all, and a #Const line
+    holding one is a syntax error (XLIDE issue #1321). The scan stops at the
+    statement's newline or colon, and an apostrophe comment ends it."""
+    for i in range(hash_index + 1, len(tokens)):
+        tok = tokens[i]
+        if tok.kind is TokenKind.NEWLINE or tok.kind is TokenKind.COLON:
+            return None
+        if tok.kind is TokenKind.COMMENT:
+            return tok if _REM_COMMENT_RE.match(tok.raw_text) else None
+        # `x.Rem` and `x!Rem` name a member: that line is still a directive.
+        if token_word(tok) == "rem" and tokens[i - 1].raw_text not in (".", "!"):
+            return tok
+    return None
+
+
+_DIRECTIVE_WORDS = frozenset({"if", "elseif", "else", "end", "endif", "const"})
+_NO_STARTS: frozenset[int] = frozenset()
+# One scan per token array: the parser and malformed-statement each ask, and
+# malformed-statement asks once per line.
+_rem_directive_starts_by_tokens = IdentityLru()
+
+
+def rem_directive_starts(source: str) -> frozenset[int]:
+    """The start offsets of the `#` of every #If, #ElseIf, #Else, #End If or
+    #Const line holding a `Rem`, which the VBE does not act on as that
+    directive (XLIDE issue #1321): a #Const one defines nothing, even in a
+    skipped arm, where a plain #Const still does. Only a `#` that starts its
+    physical line counts (the token before it is a newline: a continued line
+    has none)."""
+    if _REM_RE.search(source) is None:
+        return _NO_STARTS
+    tokens = tokenize_cached(source)
+    cached: frozenset[int] | None = _rem_directive_starts_by_tokens.get(tokens)
+    if cached is not None:
+        return cached
+    starts = frozenset(
+        tokens[i].start
+        for i in range(len(tokens))
+        if tokens[i].kind is TokenKind.DIRECTIVE
+        and (i == 0 or tokens[i - 1].kind is TokenKind.NEWLINE)
+        and token_word(tokens[i + 1] if i + 1 < len(tokens) else None) in _DIRECTIVE_WORDS
+        and directive_rem(tokens, i) is not None
+    )
+    _rem_directive_starts_by_tokens.put(starts, tokens)
+    return starts
+
+
+def directive_colon(tokens: Sequence[VbaToken], hash_index: int) -> VbaToken | None:
+    """The statement colon after the compiler directive whose `#` is
+    ``tokens[hash_index]``, on its own line."""
+    for i in range(hash_index + 1, len(tokens)):
+        tok = tokens[i]
+        if tok.kind is TokenKind.COLON:
+            return tok
+        if tok.kind is TokenKind.NEWLINE or tok.kind is TokenKind.COMMENT:
+            return None
+    return None
+
+
+_colon_directive_starts_by_tokens = IdentityLru()
+
+
+def colon_directive_starts(source: str) -> frozenset[int]:
+    """The start offsets of the `#` of every #If, #ElseIf, #Else, #End If or
+    #Const line a statement colon follows, with nothing, a comment or code
+    after it. The VBE does not read such a line as a directive at all: it
+    opens, divides, closes and defines nothing, is skipped with a skipped arm,
+    and is an error where it is compiled (XLIDE issue #1323, measured in Excel
+    16.0). As for a Rem, only a `#` that starts its physical line counts."""
+    if ":" not in source:
+        return _NO_STARTS
+    tokens = tokenize_cached(source)
+    cached: frozenset[int] | None = _colon_directive_starts_by_tokens.get(tokens)
+    if cached is not None:
+        return cached
+    starts = frozenset(
+        tokens[i].start
+        for i in range(len(tokens))
+        if tokens[i].kind is TokenKind.DIRECTIVE
+        and (i == 0 or tokens[i - 1].kind is TokenKind.NEWLINE)
+        and token_word(tokens[i + 1] if i + 1 < len(tokens) else None) in _DIRECTIVE_WORDS
+        and directive_colon(tokens, i) is not None
+    )
+    _colon_directive_starts_by_tokens.put(starts, tokens)
+    return starts
+
+
+_misplaced_directive_starts_by_tokens = IdentityLru()
+
+
+def misplaced_directive_starts(source: str) -> frozenset[int]:
+    """The start offsets of the `#` of every #If, #ElseIf, #Else, #End If or
+    #Const that does not start its logical line: after a statement's or a
+    label's colon, another directive's colon, or a line number. The VBE reads
+    a directive only where it starts its logical line, after nothing but
+    blanks and line continuations; elsewhere it opens, divides, closes and
+    defines nothing, and is an error where it is compiled (XLIDE issue #1331,
+    measured in Excel 16.0). The lexer makes a directive token after a colon,
+    and an operator after a line number; both are listed."""
+    if "#" not in source:
+        return _NO_STARTS
+    tokens = tokenize_cached(source)
+    cached: frozenset[int] | None = _misplaced_directive_starts_by_tokens.get(tokens)
+    if cached is not None:
+        return cached
+    found: list[int] = []
+    for i in range(1, len(tokens)):
+        tok = tokens[i]
+        following = tokens[i + 1] if i + 1 < len(tokens) else None
+        if tok.raw_text != "#" or token_word(following) not in _DIRECTIVE_WORDS:
+            continue
+        after_colon = tok.kind is TokenKind.DIRECTIVE and tokens[i - 1].kind is not TokenKind.NEWLINE
+        after_line_number = (
+            tok.kind is TokenKind.OPERATOR
+            and is_decimal_line_number(tokens[i - 1])
+            and (i == 1 or tokens[i - 2].kind is TokenKind.NEWLINE)
+        )
+        if after_colon or after_line_number:
+            found.append(tok.start)
+    starts = frozenset(found)
+    _misplaced_directive_starts_by_tokens.put(starts, tokens)
+    return starts
