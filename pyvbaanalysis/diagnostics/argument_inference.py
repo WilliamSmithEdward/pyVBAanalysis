@@ -71,6 +71,7 @@ from .call_extraction import (
     CallableTypeSignature,
     CallArguments,
     InferredArgumentType,
+    module_qualifier_shadowed,
     named_argument_slot,
     split_arg_slots,
     string_literal_value,
@@ -287,7 +288,8 @@ def infer_atomic_expression_type(
             if host_global is not None:
                 return host_global
 
-    if name and len(toks) > 1 and toks[1].raw_text == ".":
+    # A variable named like a module is the receiver; member typing below reads it.
+    if name and len(toks) > 1 and toks[1].raw_text == "." and not module_qualifier_shadowed(name, source_names):
         member = token_name(toks[2]) if len(toks) > 2 else None
         error_variant = infer_intrinsic_cverr_error_variant(
             toks, slice_start, module_signatures, source_names

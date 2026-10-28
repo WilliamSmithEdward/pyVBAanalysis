@@ -493,7 +493,9 @@ def check_member_not_found(
                 surface = resolve_exhaustive_member_surface(
                     source, ref.dot_end_offset, member_ctx
                 )
-                if surface is None or surface.has_member(ref.member):
+                # The compiler binds Err's members late: `Err.Nope` compiles, and
+                # raises 438 when it runs (measured in Excel 16.0).
+                if surface is None or surface.has_member(ref.member) or surface.owner.lower() == "err":
                     form = _project_member_form_problem(source, ref, member_ctx)
                     if form is not None:
                         push("argumentCount", form, ref.member_span)
@@ -874,6 +876,10 @@ def check_undeclared_variables(
         lower = name.lower()
         return (
             lower == "vba"
+            # `Me = 1` in an object module assigns Me's default member: it
+            # compiles, and raises 438 only if there is none (measured in
+            # Excel 16.0). In a standard module Me has its own rule.
+            or (lower == "me" and module_kind is not None and module_kind is not ModuleSymbolKind.STANDARD)
             or lower in library_qualifiers
             or lower in redim_declared
             # A UserForm's controls are members the designer declared, not the

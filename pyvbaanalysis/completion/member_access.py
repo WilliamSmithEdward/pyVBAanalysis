@@ -2107,10 +2107,33 @@ class KnownObjectAssignmentType:
 ProjectTypeLookup = Callable[[str], VbaProjectClassMembers | None]
 
 
+_PROJECT_VALUE_TYPE_NAMES_CACHE = IdentityLru()
+
+
+def project_value_type_names(ctx: MemberCompletionContext) -> frozenset[str]:
+    """The lowercase names of the project's visible Types and Enums that no
+    project object module shares: a name the project gives a value type hides
+    a library class of that name. One pass over the project's surfaces, memoized
+    per context (upstream's WeakMap)."""
+    members = ctx.project_class_members
+    cached = _PROJECT_VALUE_TYPE_NAMES_CACHE.get(ctx, members)
+    if cached is not None:
+        return cast(frozenset[str], cached)
+    values: set[str] = set()
+    objects: set[str] = set()
+    for candidate in members or []:
+        kind = candidate.kind
+        if kind == "standardModule":
+            continue
+        (values if kind in ("userType", "enum") else objects).add(candidate.name.lower())
+    return cast(frozenset[str], _PROJECT_VALUE_TYPE_NAMES_CACHE.put(frozenset(values - objects), ctx, members))
+
+
 def resolve_known_object_assignment_type(
     type_name: str | None,
     ctx: MemberCompletionContext,
     project_type_lookup: ProjectTypeLookup | None = None,
+    value_type_lookup: Callable[[], frozenset[str]] | None = None,
 ) -> KnownObjectAssignmentType | None:
     """The object class a declared type names, when it names one that Set-binds and
     supports members: the generic `Object`, VBA's `Collection`, a host alias
@@ -2133,6 +2156,14 @@ def resolve_known_object_assignment_type(
     # clean while refusing to compile.
     if normalized == "collection":
         return KnownObjectAssignmentType(kind="generic", display=type_name, key="collection")
+    # A Type or Enum the project declares, where the code can see it, takes the
+    # name before any library: `Type Range` makes `Dim v As Range` a value, and
+    # `Public Enum Worksheet` in another module does the same (measured in Excel
+    # 16.0). Only a qualified name reaches the library.
+    if "." not in type_name and normalized in (
+        value_type_lookup() if value_type_lookup is not None else project_value_type_names(ctx)
+    ):
+        return None
     host = resolve_host_alias(type_name, ctx.model)
     if host:
         return KnownObjectAssignmentType(kind="host", display=type_name, key=host.lower())

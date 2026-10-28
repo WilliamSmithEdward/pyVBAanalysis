@@ -14,12 +14,12 @@ non-constant Const/Enum values, and parameter order.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Literal, Union, cast
 
-from ...completion.member_access import MemberCompletionContext
 from ...completion.type_completion import (
     TypeCompletionKind,
     is_creatable_type_completion,
@@ -31,8 +31,9 @@ from ...conditional import (
     collect_conditional_directives,
 )
 from ...host.library_type_names import library_type_names
-from ...js_compat import js_trim
+from ...js_compat import JS_WHITESPACE, js_trim
 from ...lexer.keyword_table import OPERATOR_IDENTIFIERS, is_reserved_identifier
+from ...lexer.token_helpers import implements_statement_name
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize
 from ...parser.fixed_length_string import parse_fixed_length_string_type
@@ -70,6 +71,7 @@ from ..context import AnalyzeModuleOptions, PushFn, is_object_module_kind, state
 from ..walker import (
     absolute_span,
     active_module_members,
+    block_header_line_span,
     declared_name_span,
     first_token_span,
     for_each_body_statement,
@@ -95,9 +97,6 @@ from .shared import (
     report_repeated_keys,
     scan_conditional_compilation_branch_order,
 )
-# resolveKnownObjectAssignmentType lives in XLIDE's typeInference.ts; the port
-# keeps it with the member-access resolver, whose project and host lookups it uses.
-from ...completion.member_access import resolve_known_object_assignment_type
 
 # Access/storage modifiers that may lead a procedure declaration.
 _PROC_MODIFIERS: frozenset[str] = frozenset({"public", "private", "friend", "global", "static"})
@@ -149,6 +148,17 @@ def check_procedure_header(source: str, mod: ModuleNode, activity: ConditionalAc
         i = 0
         while i < len(toks) and toks[i].raw_text.lower() in _PROC_MODIFIERS:
             i += 1
+        # `Static Public Sub` compiles, `Static Global Sub` is "Expected:
+        # identifier" at Global (measured in Excel 16.0). The block matcher
+        # still reads the header, so its End Sub does not report as well.
+        if len(toks) > 1 and toks[0].raw_text.lower() == "static" and toks[1].raw_text.lower() == "global":
+            push(
+                "invalidProcedureHeader",
+                "'Global' cannot follow 'Static' in a procedure header. This is a VBE compile error: "
+                "Expected: identifier.",
+                Span(header_start + toks[1].start, header_start + toks[1].end),
+            )
+            continue
         kw_tok = _at(toks, i)
         kw = kw_tok.raw_text.lower() if kw_tok is not None else None
         allow_as = False
@@ -459,6 +469,27 @@ def check_module_name(
     )
 
 
+_NEW_PREFIX_RE = re.compile(f"new[{JS_WHITESPACE}]+", re.IGNORECASE)
+_BARE_NEW_RE = re.compile(f"new(?:[{JS_WHITESPACE}]|$)", re.IGNORECASE)
+
+
+def _names_as_type(as_type: str | None) -> bool:
+    """True when the text after `As` names a type: `Long`, `[Long]`, `New Collection`.
+    (XLIDE's `/^(?:New\\s+|(?!New(?:\\s|$)))(?:[\\p{L}_]|\\[[^\\]])/iu`, by category.)"""
+    text = as_type or ""
+    new_prefix = _NEW_PREFIX_RE.match(text)
+    if new_prefix is not None:
+        text = text[new_prefix.end():]
+    elif _BARE_NEW_RE.match(text) is not None:
+        return False
+    if not text:
+        return False
+    first = text[0]
+    if first == "_" or unicodedata.category(first).startswith("L"):
+        return True
+    return first == "[" and len(text) > 1 and text[1] != "]"
+
+
 def check_reserved_declaration_names(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
     def report(kind: str, hit: NameTokenHit | None) -> None:
         if hit is None or hit.bracketed or not is_reserved_identifier(hit.name):
@@ -481,6 +512,19 @@ def check_reserved_declaration_names(source: str, mod: ModuleNode, activity: Con
         elif isinstance(member, TypeNode):
             report("user-defined type", _type_or_enum_name_hit(source, member.span, "type"))
             for field_node in member.fields:
+                # A reserved word names a Type member when an As clause with a type
+                # follows: `Next As Long`, `Long As Long`, `Loop As New Collection`
+                # (VBE oracle reserved_member_name_*). An array clause, a type
+                # suffix or an As with no type is still a syntax error, and so is
+                # `Me As Long` (Expected: =).
+                if (
+                    field_node.name.lower() != "me"
+                    and field_node.has_as_clause
+                    and not field_node.type_suffix
+                    and not field_node.is_array
+                    and _names_as_type(field_node.as_type)
+                ):
+                    continue
                 report("type field", declaration_name_hit(source, field_node.span, field_node.name))
         elif isinstance(member, EnumNode):
             report("enum", _type_or_enum_name_hit(source, member.span, "enum"))
@@ -711,12 +755,6 @@ def _type_names_after_typeof_is(source: str, span: Span) -> list[_TypeNameRef]:
     return out
 
 
-_IMPLEMENTS_RE = re.compile(
-    r"^\s*Implements\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\b",
-    re.IGNORECASE,
-)
-
-
 def _collect_implements_refs(source: str, scan_end: int) -> list[_TypeNameRef]:
     out: list[_TypeNameRef] = []
     line_start = 0
@@ -729,10 +767,9 @@ def _collect_implements_refs(source: str, scan_end: int) -> list[_TypeNameRef]:
         if line.endswith("\r"):
             line = line[:-1]
         code = re.sub(r"'.*$", "", line)
-        match = _IMPLEMENTS_RE.match(code)
-        if match:
-            raw_name = match.group(1)
-            column = line.find(raw_name, match.start())
+        raw_name = implements_statement_name(code)
+        if raw_name is not None:
+            column = line.find(raw_name)
             dot = raw_name.find(".")
             if column >= 0 and dot > 0:
                 out.append(
@@ -788,7 +825,9 @@ def _collect_type_name_references(source: str, mod: ModuleNode) -> list[_TypeNam
         elif isinstance(member, TypeNode):
             for field_node in member.fields:
                 if field_node.as_type:
-                    ref = _type_name_after_as(source, field_node.span)
+                    # Scan after the name: a member may be named As (`As As Long`).
+                    start = field_node.name_span.end if field_node.name_span is not None else field_node.span.start
+                    ref = _type_name_after_as(source, Span(start, field_node.span.end))
                     if ref is not None:
                         out.append(ref)
         elif isinstance(member, ProcedureNode):
@@ -849,6 +888,9 @@ def _collect_with_events_new_declaration_spans(
     return spans
 
 
+# The Print statement's keywords, which no unqualified type name can be (XLIDE issue #1413).
+_PRINT_LIST_KEYWORDS = frozenset({"tab", "spc"})
+
 # The Scripting Runtime's types, which missing-library-reference judges (XLIDE issue #349).
 _SCRIPTING_TYPE_NAMES = frozenset({"dictionary", "filesystemobject", "textstream"})
 
@@ -875,6 +917,17 @@ def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: Conditio
             push(
                 "invalidAsTypeName",
                 f"'{ref.name}' is ambiguous because multiple visible project types use that name.",
+                ref.span,
+            )
+            continue
+        # `Dim t As Tab` is a Syntax error even in Excel, whose library has a
+        # Tab type: unqualified, the Print keyword wins (XLIDE issue #1413,
+        # measured in Excel, Word, PowerPoint and Access 16.0). Excel.Tab compiles.
+        if not ref.qualifier and ref.name.lower() in _PRINT_LIST_KEYWORDS:
+            push(
+                "invalidAsTypeName",
+                f"'{ref.name}' is a keyword of the Print statement, not a type name. This is a VBE "
+                "compile error: Syntax error.",
                 ref.span,
             )
             continue
@@ -1208,12 +1261,53 @@ def check_unexpected_declaration_tokens(source: str, mod: ModuleNode, activity: 
             )
         elif isinstance(member, TypeNode):
             for field_node in member.fields:
-                inspect(field_node.span, False)
+                # Scan after the name: a member may be named As (`As As Long`).
+                start = field_node.name_span.end if field_node.name_span is not None else field_node.span.start
+                inspect(Span(start, field_node.span.end), False)
         elif isinstance(member, ProcedureNode):
             for param in member.params:
                 if _parameter_array_as_type_syntax_hit(source, param) is None:
                     inspect(param.span, True)
+            fixed_result = _fixed_length_string_result(source, member)
+            if fixed_result is not None:
+                kind = "Property Get" if member.proc_kind is ProcKind.PROPERTY_GET else "Function"
+                push(
+                    "unexpectedDeclarationToken",
+                    f"A {kind} cannot return a fixed-length String; '{member.name}' ends at its String. This "
+                    "is a VBE compile error: Expected: end of statement.",
+                    fixed_result,
+                )
             for_each_variable_group(member.body, inspect_group, activity)
+
+
+def _fixed_length_string_result(source: str, member: ProcedureNode) -> Span | None:
+    """`Function F As String * 3`, with or without its parentheses: no procedure
+    returns a fixed-length String, so the `*` is Expected: end of statement (XLIDE
+    issue #1413, measured in Excel, Word, PowerPoint and Access 16.0). The span of
+    the `*`, or None."""
+    if member.proc_kind not in (ProcKind.FUNCTION, ProcKind.PROPERTY_GET) or member.name_span is None:
+        return None
+    header = block_header_line_span(source, member.span)
+    toks = statement_tokens(source, header)
+    name_start = member.name_span.start
+    i = next((k for k, tok in enumerate(toks) if header.start + tok.start == name_start), -1)
+    if i < 0:
+        return None
+    i += 1
+    if (
+        i < len(toks)
+        and member.type_suffix_span is not None
+        and header.start + toks[i].start == member.type_suffix_span.start
+    ):
+        i += 1
+    if _raw_at(toks, i) == "(":
+        close = match_paren_from(toks, i)
+        if close < 0:
+            return None
+        i = close + 1
+    if token_text(_at(toks, i)) != "as" or token_text(_at(toks, i + 1)) != "string" or _raw_at(toks, i + 2) != "*":
+        return None
+    return Span(header.start + toks[i + 2].start, header.start + toks[i + 2].end)
 
 
 # -- checkTypeDeclarationCharacterAsClause ---------------------------------
@@ -1944,22 +2038,18 @@ def check_non_constant_parameter_defaults(
     source: str,
     mod: ModuleNode,
     activity: ConditionalActivityTracker | None,
-    member_ctx: MemberCompletionContext,
     push: PushFn,
 ) -> None:
     """An Optional parameter default must be a constant expression (no call/New/AddressOf).
 
-    Object-typed parameters, host and project classes included, are skipped: their
-    defaults are owned by the parameter-default-type-mismatch rule ("must be
-    Nothing"), which avoids a double diagnostic.
+    An object parameter's default is held to the same: any constant compiles
+    there (measured in Excel 16.0), a call does not.
     """
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
         for param in member.params:
             if not param.default_raw:
-                continue
-            if resolve_known_object_assignment_type(param.as_type, member_ctx) is not None:
                 continue
             value_tokens = _value_tokens_after_equals(source, param.span)
             if value_tokens is None:
@@ -1974,6 +2064,35 @@ def check_non_constant_parameter_defaults(
                 f"{label} is not constant.",
                 hit_span,
             )
+
+
+# The intrinsic types a Const can have, whose Nothing is Invalid use of object.
+_CONST_VALUE_TYPES = frozenset(
+    {"byte", "boolean", "integer", "long", "longlong", "longptr", "currency", "single", "double", "date", "string"}
+)
+_SUFFIX_CONST_TYPES: Mapping[str, str] = {
+    "%": "integer", "&": "long", "^": "longlong", "@": "currency", "!": "single", "#": "double", "$": "string",
+}
+
+
+def _const_nothing_error(decl: VariableDeclNode, value: Sequence[VbaToken]) -> str | None:
+    """The VBE's error for a Const whose value is Nothing, parentheses and all: one
+    of VBA's types refuses it as Invalid use of object, an untyped Const as Invalid
+    data type for constant, and a Variant one as Object variable or With block
+    variable not set (XLIDE issue #1413, measured in Excel, Word, PowerPoint and
+    Access 16.0). Other types were not measured."""
+    words = [tok for tok in value if tok.kind is not TokenKind.COMMENT and tok.raw_text not in ("(", ")")]
+    if len(words) != 1 or token_text(words[0]) != "nothing":
+        return None
+    if decl.as_type is not None:
+        type_: str | None = js_trim(decl.as_type).lower()
+    else:
+        type_ = _SUFFIX_CONST_TYPES.get(decl.type_suffix) if decl.type_suffix else None
+    if type_ is None:
+        return "Invalid data type for constant"
+    if type_ == "variant":
+        return "Object variable or With block variable not set"
+    return "Invalid use of object" if type_ in _CONST_VALUE_TYPES else None
 
 
 def check_non_constant_const_values(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
@@ -2001,6 +2120,16 @@ def check_non_constant_const_values(source: str, mod: ModuleNode, activity: Cond
             if value_tokens is None:
                 continue
             tokens = value_tokens[0]
+            nothing = _const_nothing_error(decl, tokens)
+            if nothing is not None:
+                at = next(tok for tok in tokens if token_text(tok) == "nothing")
+                push(
+                    "constValueNotConstant",
+                    f"Const '{decl.name}' cannot be Nothing, which is an object reference. This is a VBE "
+                    f"compile error: {nothing}.",
+                    Span(decl.span.start + at.start, decl.span.start + at.end),
+                )
+                continue
             non_constant = _non_constant_default_element(tokens, decl.span.start, "const")
             if non_constant is None:
                 non_constant = _argumentless_function(tokens, decl.span.start, declared)
@@ -2296,9 +2425,26 @@ def check_module_declarations_after_procedures(source: str, mod: ModuleNode, act
         )
 
 
+_PROCEDURE_CLOSER_RE = re.compile(r"^\s*End\s+(?:Sub|Function|Property)(?![A-Za-z0-9_])", re.IGNORECASE)
+
+
 def check_module_level_statements_outside_procedures(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
-    for member in active_module_members(mod, activity):
-        if not isinstance(member, StatementNode):
+    active = {id(member) for member in active_module_members(mod, activity)}
+    procedure_end: Span | None = None
+    for member in mod.members:
+        if isinstance(member, ProcedureNode):
+            procedure_end = Span(max(member.span.start, member.span.end - 1), member.span.end)
+        if not isinstance(member, StatementNode) or id(member) not in active:
+            continue
+        # `End Function` in both arms of an #If: the procedure ended at the
+        # first one, in another arm, and this one closes it in the build that
+        # compiles this arm (XLIDE issue #1315, measured in Excel 16.0).
+        if (
+            procedure_end is not None
+            and activity is not None
+            and activity.mutually_exclusive(procedure_end, member.span)
+            and _PROCEDURE_CLOSER_RE.match(source[member.span.start:member.span.end])
+        ):
             continue
         toks = statement_tokens_after_leading_label(source, member.span)
         first = toks[0] if toks else None

@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from typing import Literal, Protocol
 
 from ..identity_cache import IdentityLru
+from ..js_compat import JS_WHITESPACE
 from .token_kinds import TokenKind, VbaToken
 from .tokenize import tokenize, tokenize_cached
 
@@ -230,6 +231,43 @@ def identifiers_in(text: str) -> list[str]:
             i += 1
         words.append(text[start:i])
     return words
+
+
+_IMPLEMENTS_HEAD_RE = re.compile(f"[{JS_WHITESPACE}]*implements[{JS_WHITESPACE}]+", re.IGNORECASE)
+
+
+def _identifier_end(text: str, start: int) -> int:
+    """End of the identifier starting at `start`, or `start` when none does."""
+    if start >= len(text) or not _identifier_start(text[start]):
+        return start
+    end = start + 1
+    while end < len(text) and _identifier_part(text[end]):
+        end += 1
+    return end
+
+
+def implements_statement_name(code: str) -> str | None:
+    """The interface an `Implements` line names, plain or qualified, or None.
+
+    XLIDE's ``/^\\s*Implements\\s+(?!As(?![\\p{L}\\p{M}\\p{N}_]))([\\p{L}_][\\p{L}\\p{M}\\p{N}_]*
+    (?:\\.[\\p{L}_][\\p{L}\\p{M}\\p{N}_]*)?)/iu``, scanned by category. `Implements As
+    Long` is a Type member named Implements, not a statement; any letter after As
+    continues an interface name (`Asx`, an accented `As` + e)."""
+    head = _IMPLEMENTS_HEAD_RE.match(code)
+    if head is None:
+        return None
+    start = head.end()
+    after_as = start + 2
+    if code[start:after_as].lower() == "as" and (after_as >= len(code) or not _identifier_part(code[after_as])):
+        return None
+    end = _identifier_end(code, start)
+    if end == start:
+        return None
+    if end < len(code) and code[end] == ".":
+        member_end = _identifier_end(code, end + 1)
+        if member_end > end + 1:
+            end = member_end
+    return code[start:end]
 
 
 def identifier_words(text: str) -> list[str]:

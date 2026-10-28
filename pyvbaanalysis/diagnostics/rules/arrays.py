@@ -1692,13 +1692,19 @@ def _erase_statement_simple_targets(source: str, span: Span) -> set[str]:
         return set()
     out: set[str] = set()
     for group in split_top_level_token_groups(toks, 1, ","):
-        content = _without_comments(group)
-        if len(content) != 1:
-            continue
-        name = token_name(content[0])
+        name = _erase_group_name(_without_comments(group))
         if name:
             out.add(name.lower())
     return out
+
+
+def _erase_group_name(content: Sequence[VbaToken]) -> str | None:
+    """The array an Erase target names: `a`, or `a()` with empty parentheses,
+    which Excel compiles as the same target (`Erase a(), b()`, measured in
+    Excel 16.0). Anything longer is an expression."""
+    if len(content) == 1 or (len(content) == 3 and content[1].raw_text == "(" and content[2].raw_text == ")"):
+        return token_name(content[0])
+    return None
 
 
 # -- checkEraseTargets -------------------------------------------------------
@@ -1769,9 +1775,7 @@ def _erase_scalar_targets(
     out: list[tuple[str, Span, str]] = []
     for group in split_top_level_token_groups(toks, 1, ","):
         content = _without_comments(group)
-        if len(content) != 1:
-            continue
-        name = token_name(content[0])
+        name = _erase_group_name(content)
         if not name:
             continue
         resolved = resolve_shape(name) if resolve_shape is not None else None

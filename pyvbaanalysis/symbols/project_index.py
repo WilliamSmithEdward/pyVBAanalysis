@@ -21,7 +21,7 @@ from ..constants.integer_constant_expression import (
     parse_vba_integer_literal,
     resolve_raw_integer_constants,
 )
-from ..lexer.token_helpers import identifier_words
+from ..lexer.token_helpers import identifier_words, implements_statement_name
 from ..lexer.token_kinds import TokenKind
 from ..lexer.tokenize import tokenize_cached
 from ..parser.nodes import Span
@@ -56,6 +56,7 @@ from .symbol_model import (
     is_procedure_kind,
     procedure_params_from_symbol,
     procedure_signature_from_symbol,
+    procedure_signature_with_def_types,
     procedure_signature_label,
     qualified_procedure_key,
 )
@@ -393,19 +394,15 @@ def _merge_member_attributes(
     return out
 
 
-_IMPLEMENTS_RE = re.compile(
-    r"^\s*Implements\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\b", re.IGNORECASE
-)
-
-
 def _module_implements(source: str) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for line in re.split(r"\r?\n", source):
-        match = _IMPLEMENTS_RE.match(line)
-        if match is None:
+        # Any letter names an interface (a Cyrillic or Thai one too), and
+        # `Implements As Long` is a Type member named Implements, not a statement.
+        name = implements_statement_name(line)
+        if name is None:
             continue
-        name = match.group(1)
         lower = name.lower()
         if lower not in seen:
             seen.add(lower)
@@ -916,7 +913,8 @@ class ProjectIndex:
                         or not _is_exported(symbol, mod.module_kind)
                     ):
                         continue
-                    sig = procedure_signature_from_symbol(symbol)
+                    declared = procedure_signature_from_symbol(symbol)
+                    sig = procedure_signature_with_def_types(declared, mod.def_types) if declared is not None else None
                     if sig is not None:
                         _add_procedure_signature(signatures, symbol.name.lower(), sig)
                         _add_procedure_signature(

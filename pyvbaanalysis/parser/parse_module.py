@@ -572,6 +572,19 @@ class _Parser:
             modifier = ""
         if head == "dim" or head == "const":
             i += 1
+        # `Dim Shared a As Long`, and Private, Public or Global Shared at module
+        # level, compile, Shared a leftover of older Basic that changes nothing;
+        # `Static Shared`, `Dim Shared As Long` and `Private Shared WithEvents`
+        # are errors (measured in Excel 16.0).
+        following = _at(tokens, i + 1)
+        if (
+            not is_const
+            and modifier in ("Dim", "Private", "Public", "Global")
+            and token_word(_at(tokens, i)) == "shared"
+            and following is not None
+            and token_word(following) not in ("as", "withevents")
+        ):
+            i += 1
         with_events = False
         if token_word(_at(tokens, i)) == "withevents":
             with_events = True

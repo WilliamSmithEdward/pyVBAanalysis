@@ -36,10 +36,17 @@ from ...parser.nodes import (
     Span,
     iter_body_nodes,
 )
-from ...symbols.symbol_model import ModuleSymbols, VbaProcedureSignature, VbaSymbol
+from ...symbols.symbol_model import ModuleSymbols, VbaProcedureSignature, VbaSymbol, qualified_procedure_key
 from ...types.type_inference import procedure_symbol_for, type_environment_for
 from ...types.type_names import normalize_type
-from ..call_extraction import CallArguments, CallableTypeSignature, extract_call, is_named_slot
+from ..call_extraction import (
+    CallArguments,
+    CallableTypeSignature,
+    extract_call,
+    extract_qualified_call,
+    is_named_slot,
+    named_argument_slot,
+)
 from ..callable_signatures import (
     callable_type_signatures_for,
     expression_calls,
@@ -168,32 +175,53 @@ def _check_procedure(
         first_call = extract_call(source, span)
         if first_call is not None:
             calls.append(first_call)
+        qualified_call = extract_qualified_call(source, span, signatures, source_names)
+        if qualified_call is not None:
+            calls.append(qualified_call)
         calls.extend(expression_calls(source, span, signatures, source_names))
         seen: set[int] = set()
         for call in calls:
-            if call.name_span.start in seen or any(is_named_slot(slot) for slot in call.slots):
+            if call.name_span.start in seen:
                 continue
             seen.add(call.name_span.start)
             base = call.slice_start
-            signature = None if call.qualifier else signatures.get(call.name.lower())
+            signature = (
+                signatures.get(call.lookup_key or qualified_procedure_key(call.qualifier, call.name))
+                if call.qualifier
+                else signatures.get(call.name.lower())
+            )
             if signature is None:
                 continue
             params = signature.params
             for k, slot in enumerate(call.slots):
-                param = params[k] if k < len(params) else None
+                named = named_argument_slot(slot) if is_named_slot(slot) else None
+                if is_named_slot(slot) and named is None:
+                    continue
+                if named is not None:
+                    param = next((p for p in params if p.name.lower() == named[0].lower()), None)
+                else:
+                    param = params[k] if k < len(params) else None
+                value = named[1] if named is not None else slot
                 param_type = normalize_type(param.type_ if param is not None else None)
+                # A ByRef parameter given a copy converts it the same way:
+                # `Take (q)`, `Module1.Take (q)`, `Take n:=(q)` (measured in
+                # Excel 16.0).
+                copied = (call.arguments_parenthesized is True and len(call.slots) == 1) or (
+                    len(value) > 0 and value[0].raw_text == "(" and match_paren_from(value, 0) == len(value) - 1
+                )
                 if (
                     param is not None
-                    and not param.by_ref
+                    and (not param.by_ref or copied)
                     and param_type
                     and param_type in _NARROW
-                    and len(slot) > 0
-                    and wide(slot)
+                    and len(value) > 0
+                    and wide(value)
                 ):
                     report(
-                        slot,
+                        value,
                         base,
-                        f"the ByVal {_capitalize(param_type)} '{param.name}' of '{signature.name}'",
+                        f"the {'' if param.by_ref else 'ByVal '}{_capitalize(param_type)} '{param.name}' "
+                        f"of '{signature.name}'",
                     )
         # `Mid$("abc", q, 1)`: a VBA function's whole-number argument, `$` or not.
         for i, tok in enumerate(toks):

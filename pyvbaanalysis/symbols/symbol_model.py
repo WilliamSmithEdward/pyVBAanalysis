@@ -11,8 +11,9 @@ reads it, so it is intentionally omitted from this port.
 from __future__ import annotations
 
 import enum
+import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..parser.nodes import Span
 
@@ -386,6 +387,42 @@ def _callable_kind_for_symbol(symbol: VbaSymbol) -> VbaSymbolKind:
     return symbol.kind  # already SUB or FUNCTION
 
 
+_DEF_TYPE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*\Z")
+
+
+def def_type_for(def_types: Mapping[str, str] | None, name: str) -> str | None:
+    """The type a module's DefType lines give a name declared with no type, by its
+    first character: `DefInt A-Z` then `Dim i` is an Integer (XLIDE issue #285). A
+    Variant is no type to report on, so it gives None, as no DefType does."""
+    type_ = (
+        def_types.get(name[0].lower())
+        if def_types is not None and _DEF_TYPE_NAME_RE.match(name) is not None
+        else None
+    )
+    return None if type_ in ("Variant", "Decimal") else type_
+
+
+def procedure_signature_with_def_types(
+    signature: VbaProcedureSignature, def_types: Mapping[str, str] | None
+) -> VbaProcedureSignature:
+    """A procedure's signature with its untyped result and parameters typed by the
+    DefType lines of the module that declares it, as VBA types them. A caller in
+    another module sees those types, whatever its own DefType lines say (XLIDE
+    issue #1411, measured in Excel, Word, PowerPoint and Access 16.0)."""
+    if not def_types or signature.external:
+        return signature
+    return replace(
+        signature,
+        params=[
+            param if param.type_ or param.param_array else replace(param, type_=def_type_for(def_types, param.name))
+            for param in signature.params
+        ],
+        return_type=signature.return_type
+        if signature.return_type is not None
+        else (def_type_for(def_types, signature.name) if signature.kind is VbaSymbolKind.FUNCTION else None),
+    )
+
+
 def procedure_signature_from_symbol(symbol: VbaSymbol) -> VbaProcedureSignature | None:
     """Converts a Sub/Function/Declare symbol into the shared callable signature."""
     if not is_bare_callable_kind(symbol.kind):
@@ -447,5 +484,7 @@ __all__ = [
     "is_bare_callable_kind",
     "procedure_params_from_symbol",
     "procedure_signature_from_symbol",
+    "def_type_for",
+    "procedure_signature_with_def_types",
     "is_procedure_kind",
 ]

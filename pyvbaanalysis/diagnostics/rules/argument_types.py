@@ -262,7 +262,7 @@ def check_argument_types(
             # (issue #254).
             for span in statement_and_branch_spans(stmt):
                 statement_call = extract_call(source, span) or extract_qualified_call(
-                    source, span, module_signatures
+                    source, span, module_signatures, source_names
                 )
                 if statement_call is not None:
                     validate_argument_types(
