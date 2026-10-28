@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from ..lexer.token_helpers import is_ident_like, relational_operator_at, token_name, token_word
 from ..lexer.token_kinds import TokenKind, VbaToken
+from ..runtime.vba_runtime import resolve_runtime_function
 from .expression_limits import MAX_EXPRESSION_DEPTH
 from .nodes import (
     AddressOfExpr,
@@ -581,6 +582,17 @@ class _ExpressionParser:
                 return self._parse_address_of(token)
             if word == "typeof":
                 return self._parse_type_of(token)
+            # `CLng(1)`, `Len("a")`: VBA's functions whose names the lexer reads
+            # as keywords are calls, and the expression is still one (issue #1415).
+            following = self._peek_at(1)
+            runtime = (
+                resolve_runtime_function(token.raw_text)
+                if following is not None and following.raw_text == "("
+                else None
+            )
+            if runtime is not None and runtime.kind == "function":
+                self._next()
+                return self._identifier_expr(token)
 
         # Identifier reference.
         if token.kind is TokenKind.IDENTIFIER or token.kind is TokenKind.BRACKETED_IDENTIFIER:

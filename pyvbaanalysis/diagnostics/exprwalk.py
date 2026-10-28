@@ -23,10 +23,12 @@ from ..parser.nodes import (
     ModuleNode,
     ParenExpr,
     ProcedureNode,
+    StatementNode,
     TypeOfIsExpr,
     UnaryExpr,
     iter_body_nodes,
 )
+from .statement_operands import statement_operand_roots
 from .walker import ProcedureWalkHooks, active_module_members
 
 # A rule's per-procedure expression visitor: the factory does per-member setup and
@@ -80,6 +82,11 @@ def for_each_expression_in_body(
             for arg in node.args:
                 if arg.value is not None:
                     for_each_sub_expression(arg.value, visit)
+        elif isinstance(node, StatementNode):
+            # Case items, Print # and Debug.Print items, file and record
+            # numbers, single-line If arms (statement_operands.py).
+            for root in statement_operand_roots(node):
+                for_each_sub_expression(root, visit)
         elif isinstance(node, IfBlockNode):
             # Arm statements live in the flat body, which the walk enters next.
             for branch in node.branches:

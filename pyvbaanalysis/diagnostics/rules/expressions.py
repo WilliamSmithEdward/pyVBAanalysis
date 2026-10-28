@@ -111,6 +111,7 @@ from ..walker import (
     block_header_line_span,
     first_executable_token_index,
     raw_expression_tokens,
+    statement_and_branch_spans,
     token_name,
     token_text,
     top_level_operator_index,
@@ -2006,6 +2007,91 @@ def _new_with_argument_list(toks: Sequence[VbaToken], offset: int) -> Span | Non
     return None
 
 
+def _incomplete_assignment_value(toks: Sequence[VbaToken], offset: int) -> tuple[Span, str] | None:
+    """An assignment whose value runs on past a comma, `n = 1, 2`,
+    `.Value = 1, 2`, `!Value = 1, 2`: a Syntax error, and so it is before an
+    inline Else (XLIDE issue #1415, measured in Excel, Word, PowerPoint and
+    Access 16.0). Only a statement that is an assignment is read: a target of
+    names, `.` and `!` members and argument lists, then `=`. A Print list keeps
+    its commas. A value that ends at an operator, `n = 1 +`, is a Syntax error
+    too, but it is also a line being typed, and stays quiet on purpose (see the
+    realtime recovery tests). Returns (span, why)."""
+    first = first_executable_token_index(toks)
+    i = first
+    if token_text(_at(toks, i)) in ("let", "set"):
+        i += 1
+    if _raw_at(toks, i) in (".", "!"):
+        i += 1
+    tok = _at(toks, i)
+    if not token_name(tok) or (
+        tok is not None and tok.kind is TokenKind.KEYWORD and i == first and _raw_at(toks, i + 1) != "="
+    ):
+        return None
+    i += 1
+    while True:
+        raw = _raw_at(toks, i)
+        if raw in (".", "!") and token_name(_at(toks, i + 1)):
+            i += 2
+        elif raw == "(":
+            close = match_paren_from(toks, i)
+            if close < 0:
+                return None
+            i = close + 1
+        else:
+            break
+    if _raw_at(toks, i) != "=" or i + 1 >= len(toks):
+        return None
+    depth = 0
+    for value_tok in toks[i + 1 :]:
+        if value_tok.kind is TokenKind.COMMENT:
+            continue
+        depth += 1 if value_tok.raw_text == "(" else -1 if value_tok.raw_text == ")" else 0
+        if depth == 0 and value_tok.raw_text == ",":
+            return (
+                Span(offset + value_tok.start, offset + value_tok.end),
+                "An assignment takes one value; the ',' after it starts nothing.",
+            )
+    return None
+
+
+# VBA's value types, which no TypeOf can test for; Object is every object.
+_TYPEOF_VALUE_TYPES = frozenset(
+    {
+        "byte", "boolean", "integer", "long", "longlong", "longptr", "currency",
+        "decimal", "single", "double", "date", "string", "variant",
+    }
+)
+
+
+def _malformed_type_of(toks: Sequence[VbaToken], offset: int) -> tuple[Span, str] | None:
+    """`TypeOf (o) Is Collection`, with its operand in parentheses, and
+    `TypeOf o Is Long`, testing for a value type: both are Syntax errors
+    (XLIDE issue #1415, measured in Excel, Word, PowerPoint and Access 16.0).
+    Returns (span, why)."""
+    for i, tok in enumerate(toks):
+        if token_text(tok) != "typeof":
+            continue
+        following = _at(toks, i + 1)
+        if following is not None and following.raw_text == "(":
+            return (
+                Span(offset + following.start, offset + following.end),
+                "TypeOf takes its operand without parentheses: 'TypeOf o Is Collection'.",
+            )
+        depth = 0
+        for j in range(i + 1, len(toks)):
+            raw = toks[j].raw_text
+            depth += 1 if raw == "(" else -1 if raw == ")" else 0
+            if depth == 0 and token_text(toks[j]) == "is":
+                target = _at(toks, j + 1)
+                if target is not None and token_text(target) in _TYPEOF_VALUE_TYPES and _raw_at(toks, j + 2) != ".":
+                    return (
+                        Span(offset + target.start, offset + target.end),
+                        f"TypeOf tests for a class, and {target.raw_text} is a value type.",
+                    )
+                break
+    return None
+
+
 _NON_UNARY_BINARY_OPERATORS = frozenset(
     {
         "*", "/", "\\", "^", "&", "=", "<", ">", "<=", ">=", "<>", ":=",
@@ -2060,6 +2146,15 @@ def check_invalid_expression_syntax(
                     new_arguments,
                 )
                 return
+            type_of = _malformed_type_of(label_toks, stmt.span.start)
+            if type_of is not None:
+                push("invalidExpressionSyntax", f"{type_of[1]} This is a VBE compile error: Syntax error.", type_of[0])
+                return
+            for span in statement_and_branch_spans(stmt):
+                value = _incomplete_assignment_value(statement_tokens(source, span), span.start)
+                if value is not None:
+                    push("invalidExpressionSyntax", f"{value[1]} This is a VBE compile error: Syntax error.", value[0])
+                    return
             unsupported = _unsupported_question_mark_operator(source, stmt.span)
             if unsupported is not None:
                 push(

@@ -52,6 +52,7 @@ from ...parser.nodes import (
     MemberAccessExpr,
     MemberAccessKind,
     ModuleNode,
+    ParenExpr,
     ProcedureNode,
     Span,
     StatementNode,
@@ -122,11 +123,23 @@ _IS_NON_OBJECT_LITERAL_KINDS: dict[LiteralKind, str] = {
 
 
 def _non_object_operand(
-    expr: ExprNode,
+    operand: ExprNode,
     env: dict[str, str],
     call_result: Callable[[ExprNode], tuple[str, str] | None] | None = None,
 ) -> tuple[Span, str] | None:
     """A provably non-object (scalar) operand of `Is`, or None."""
+    # `(n) Is Nothing` is the same Type mismatch (issue #1415, measured in
+    # Excel, Word, PowerPoint and Access 16.0).
+    expr = operand
+    while isinstance(expr, ParenExpr):
+        expr = expr.inner
+    # `a(0) Is Nothing` for a Long array: its element is a Long (issue #1415).
+    if isinstance(expr, IndexExpr) and isinstance(expr.callee, IdentifierExpr):
+        array_type = env.get(expr.callee.name.lower())
+        element = js_trim(_TRAILING_ARRAY_RE.sub("", array_type, count=1)) if array_type is not None else None
+        if element and is_known_scalar_type(element.lower()):
+            article = "an" if element[0].lower() in "aeiou" else "a"
+            return (expr.span, f"an element of '{expr.callee.name}' is {article} {element}")
     result = call_result(expr) if call_result is not None else None
     if result is not None and is_known_scalar_type(_TRAILING_ARRAY_RE.sub("", result[0]).strip().lower()):
         return (expr.span, f"'{result[1]}' returns {result[0]}")

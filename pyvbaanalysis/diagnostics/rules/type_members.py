@@ -144,7 +144,14 @@ def _field_kind(step: FieldStep, types: ModuleTypes, is_object_type: Callable[[s
     return "object" if is_object_type(type_) else None
 
 
-_VALUE_OPERATORS = frozenset({"+", "-", "*", "/", "\\", "^", "mod", "&", "=", "<>", "<", ">", "<=", ">="})
+# The logical operators and Like refuse a Type field too (issue #1415,
+# measured in Excel, Word, PowerPoint and Access 16.0).
+_VALUE_OPERATORS = frozenset(
+    {
+        "+", "-", "*", "/", "\\", "^", "mod", "&", "=", "<>", "<", ">", "<=", ">=",
+        "and", "or", "xor", "eqv", "imp", "like",
+    }
+)
 _EMPTY_PARENS_END_RE = re.compile(r"\(\)\Z")
 _NUMBER_KINDS = frozenset({TokenKind.INTEGER_LITERAL, TokenKind.FLOAT_LITERAL})
 _LITERAL_KINDS = frozenset({TokenKind.INTEGER_LITERAL, TokenKind.FLOAT_LITERAL, TokenKind.STRING_LITERAL})
