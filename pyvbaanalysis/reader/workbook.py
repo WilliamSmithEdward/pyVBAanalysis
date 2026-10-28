@@ -248,7 +248,7 @@ def _read_access_project(
     libids = _reference_libids(info.references) if info is not None else None
     if metadata is not None and info is not None:
         metadata.referenced_libraries = _reference_library_names(info.references)
-        metadata.project_name = _project_name(info.project_name, metadata.referenced_libraries)
+        metadata.project_name = _project_name(getattr(info, "project_name", None), metadata.referenced_libraries)
     return modules, libids, _project_constants(dir_raw)
 
 
@@ -433,7 +433,7 @@ def _read_office_project(
             libids = _reference_libids(project.references)
             if metadata is not None:
                 metadata.referenced_libraries = _reference_library_names(project.references)
-                metadata.project_name = _project_name(project.name, metadata.referenced_libraries)
+                metadata.project_name = _project_name(getattr(project, "name", None), metadata.referenced_libraries)
                 if suffix in EXCEL_EXTENSIONS:
                     metadata.workbook_sheets = workbook_sheets(container, suffix)
             constants = _project_constants(getattr(project, "dir_raw", None))
