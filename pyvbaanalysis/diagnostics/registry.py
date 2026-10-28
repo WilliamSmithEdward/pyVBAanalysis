@@ -384,7 +384,15 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     ),
     DiagnosticRuleEntry(
         name="redimTypeChange",
-        procedure_statements=lambda ctx, push: check_redim_type_change(ctx.source, ctx.mod, ctx.activity, push),
+        procedure_statements=lambda ctx, push: check_redim_type_change(
+            ctx.source,
+            ctx.mod,
+            ctx.activity,
+            push,
+            ctx.symbols,
+            ctx.opts.project_types,
+            ctx.member_ctx.model,
+        ),
     ),
     DiagnosticRuleEntry(
         name="tooManyParameters",

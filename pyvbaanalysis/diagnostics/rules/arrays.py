@@ -34,6 +34,7 @@ from ...constants.integer_constant_expression import (
 from ...flow.procedure_labels import jump_target_label_declaration
 from ...flow.procedure_unstructured import procedure_has_unstructured_flow
 from ...host.host_model import HostObjectModel
+from ...host.library_type_names import library_type_names
 from ...identity_cache import IdentityLru
 from ...js_compat import JS_WHITESPACE, js_number, js_number_to_string, js_trim, utf16_length
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups, top_level_equals_index
@@ -61,7 +62,13 @@ from ...parser.nodes import (
     iter_body_nodes_in_context,
 )
 from ...symbols.name_resolution import BareIdentifierContext, BareIdentifierResolutionScope
-from ...symbols.symbol_model import ModuleSymbols, SymbolVisibility, VbaSymbol, VbaSymbolKind
+from ...symbols.symbol_model import (
+    ModuleSymbols,
+    SymbolVisibility,
+    VbaProjectTypeName,
+    VbaSymbol,
+    VbaSymbolKind,
+)
 from ...types.type_inference import (
     DeclaredValueShape,
     SourceDeclaredShape,
@@ -652,12 +659,16 @@ def check_redim_type_change(
     mod: ModuleNode,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    symbols: ModuleSymbols | None = None,
+    project_types: Sequence[VbaProjectTypeName] | None = None,
+    model: HostObjectModel | None = None,
 ) -> ProcedureStatementVisitor:
     """Rule: a ReDim may not give a dynamic array another element type. `Dim x()
     As String` then `ReDim x(1) As Long` is "Can't change data types of array
     elements" in the VBE, and so is `Dim v()` then `ReDim v(1) As Long`, with
     Preserve or without; a Variant that is not an array takes any ReDim (issue
     #212, measured in Excel 16.0)."""
+    identity = _element_type_identity_resolver(symbols, project_types, model)
     module_arrays: dict[str, str | None] = {}
     for member in active_module_members(mod, activity):
         if isinstance(member, VariableGroupNode) and not member.is_const:
@@ -684,7 +695,13 @@ def check_redim_type_change(
                 if key in params:
                     continue
                 declared = local_arrays.get(key) if key in local_arrays else module_arrays.get(key)
-                if declared is None or declared == target.as_type.name.lower():
+                if declared is None:
+                    continue
+                # The same type spelled two ways, `Collection` and
+                # `VBA.Collection`, is no change (issue #1412).
+                before = identity(declared)
+                after = identity(target.as_type.name)
+                if before is None or after is None or before == after:
                     continue
                 push(
                     "redimTypeChange",
@@ -697,6 +714,59 @@ def check_redim_type_change(
         return visitor
 
     return factory
+
+
+# The intrinsic types a ReDim can name, lowercased.
+_INTRINSIC_ELEMENT_TYPES = frozenset(
+    {
+        "byte", "boolean", "integer", "long", "longlong", "longptr", "currency",
+        "single", "double", "date", "string", "object", "variant", "decimal",
+    }
+)
+
+
+def _element_type_identity_resolver(
+    symbols: ModuleSymbols | None,
+    project_types: Sequence[VbaProjectTypeName] | None,
+    model: HostObjectModel | None,
+) -> Callable[[str], str | None]:
+    """Which type an element type names, as a key two spellings of one type
+    share: a project's own Collection is not VBA.Collection, and an unqualified
+    Collection is the project's when the project has one, VBA's otherwise
+    (issue #1412, measured in Excel, Word, PowerPoint and Access 16.0). An
+    unqualified name resolves the way VBA does: the project's types, then its
+    intrinsic ones, then VBA's library, the host's, DAO in Access, Office and
+    stdole. A name qualified by anything else gives None, and the comparison
+    is not made; a name none of those knows keys on its spelling."""
+    own: set[str] = set()
+    for project_type in project_types or []:
+        own.add(project_type.name.lower())
+    for child in (symbols.root.children or []) if symbols is not None else []:
+        if child.kind in (VbaSymbolKind.TYPE, VbaSymbolKind.ENUM):
+            own.add(child.name.lower())
+    host_name = model.get("hostName") if model is not None else None
+    host = (host_name if host_name is not None else "Excel").lower()
+    libraries = ["vba", host, *(["dao"] if host == "access" else []), "office", "stdole"]
+
+    def resolve(type_name: str) -> str | None:
+        lower = _JS_WHITESPACE_RUN_RE.sub("", type_name).lower()
+        dot = lower.rfind(".")
+        if dot >= 0:
+            library = lower[:dot]
+            name = lower[dot + 1 :]
+            names = library_type_names(library) if library in libraries else None
+            return f"{library}.{name}" if names is not None and name in names else None
+        if lower in own:
+            return f"project.{lower}"
+        if lower in _INTRINSIC_ELEMENT_TYPES:
+            return lower
+        for candidate in libraries:
+            names = library_type_names(candidate)
+            if names is not None and lower in names:
+                return f"{candidate}.{lower}"
+        return f"unresolved.{lower}"
+
+    return resolve
 
 
 # -- comparable literal-bound folding ---------------------------------------
@@ -823,6 +893,15 @@ def check_redim_impossible_bounds(
                 if blocked is not None:
                     continue
                 for index, dimension in enumerate(target.dimensions):
+                    outside = _bound_outside_long(source, dimension.span, lookup())
+                    if outside is not None:
+                        push(
+                            "arithmeticOverflow",
+                            f"ReDim bound {_fmt(outside)} for dimension {index + 1} of '{target.name}' is "
+                            "outside the range of a Long; this will raise Run-time error '6': Overflow.",
+                            dimension.span,
+                        )
+                        continue
                     # `ReDim a(-1)`: the lower bound is Option Base, 0 by default,
                     # and an upper bound below it is the same impossibility as
                     # `ReDim a(5 To 1)` (issue #120, measured in Excel 16.0).
@@ -934,14 +1013,21 @@ _FLOAT_TYPE_SUFFIX_RE = re.compile(r"[!#@]\Z")
 _DOUBLE_EXPONENT_RE = re.compile(r"[dD]")
 
 
-def _impossible_bounds(
-    source: str, span: Span, lookup: IntegerConstantLookup, option_base: int
-) -> tuple[str, int | float] | None:
-    """A dimension's bounds when the lower is above the upper, folded through
-    constants. With no `To`, the lower bound is Option Base. A bound that is a
-    lone float literal is rounded half to even, as VBA rounds it: `1.5 To 1` is
-    refused and `2.5 To 2` is not (issue #209). None when either bound is
-    unknown or the bounds are fine. Returns (lower text, upper)."""
+@dataclass(frozen=True)
+class _DimensionBounds:
+    """One dimension's bounds where they are known: the lower one only when it is written."""
+
+    lower: int | float | None
+    upper: int | float | None
+    explicit_lower: bool
+    # A bound holds a type-suffixed literal its type cannot hold, a compile error of its own.
+    malformed_literal: bool
+
+
+def _dimension_bounds(source: str, span: Span, lookup: IntegerConstantLookup) -> _DimensionBounds:
+    """A dimension's bounds, folded through constants. A bound that is a lone
+    float literal is rounded half to even, as VBA rounds it: `1.5 To 1` is
+    refused and `2.5 To 2` is not (issue #209)."""
     text = source[span.start : span.end]
     toks = [tok for tok in tokenize(text) if tok.kind not in (TokenKind.COMMENT, TokenKind.NEWLINE)]
     depth = 0
@@ -968,12 +1054,63 @@ def _impossible_bounds(
             return rounded + 0
         return evaluate_integer_constant_expression(text[part[0].start : part[-1].end], lookup)
 
-    upper = side(toks if to < 0 else toks[to + 1 :])
-    lower = option_base if to < 0 else side(toks[:to])
+    return _DimensionBounds(
+        lower=None if to < 0 else side(toks[:to]),
+        upper=side(toks if to < 0 else toks[to + 1 :]),
+        explicit_lower=to >= 0,
+        malformed_literal=any(_suffixed_literal_out_of_range(tok) for tok in toks),
+    )
+
+
+def _impossible_bounds(
+    source: str, span: Span, lookup: IntegerConstantLookup, option_base: int
+) -> tuple[str, int | float] | None:
+    """A dimension's bounds when the lower is above the upper. With no `To`, the
+    lower bound is Option Base. None when either bound is unknown or the bounds
+    are fine. Returns (lower text, upper)."""
+    bounds = _dimension_bounds(source, span, lookup)
+    upper = bounds.upper
+    lower = bounds.lower if bounds.explicit_lower else option_base
     if upper is None or lower is None or lower <= upper:
         return None
-    lower_text = f"{_fmt(lower)} (Option Base {_fmt(lower)})" if to < 0 else _fmt(lower)
+    lower_text = _fmt(lower) if bounds.explicit_lower else f"{_fmt(lower)} (Option Base {_fmt(lower)})"
     return (lower_text, upper)
+
+
+_LONG_MIN = -2147483648
+_LONG_MAX = 2147483647
+_SUFFIX_RANGES: dict[str, tuple[int, int]] = {
+    "%": (-32768, 32767),
+    "&": (_LONG_MIN, _LONG_MAX),
+}
+_RADIX_PREFIX_RE = re.compile(r"\A&[hHoO]")
+
+
+def _suffixed_literal_out_of_range(tok: VbaToken) -> bool:
+    """`2147483648&`: an Integer or Long literal its type cannot hold, which the VBE refuses to parse."""
+    limits = _SUFFIX_RANGES.get(tok.raw_text[-1:]) if tok.kind is TokenKind.INTEGER_LITERAL else None
+    if limits is None or _RADIX_PREFIX_RE.match(tok.raw_text):
+        return False
+    value = js_number(tok.raw_text[:-1])
+    return math.isfinite(value) and (value < limits[0] or value > limits[1])
+
+
+def _bound_outside_long(source: str, span: Span, lookup: IntegerConstantLookup) -> int | float | None:
+    """A bound a Long cannot hold: `ReDim a(2147483648#)`, from a Double literal,
+    a Const or an expression, raises 6 (issue #1412, measured in Excel, Word,
+    PowerPoint and Access 16.0). A Long- or Integer-suffixed literal out of
+    range is a compile error first, suffixed-literal-overflow's."""
+    bounds = _dimension_bounds(source, span, lookup)
+    if bounds.malformed_literal:
+        return None
+    return next(
+        (
+            value
+            for value in (bounds.lower, bounds.upper)
+            if value is not None and (value < _LONG_MIN or value > _LONG_MAX)
+        ),
+        None,
+    )
 
 
 def _inspect_array_declaration(
