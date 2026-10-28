@@ -431,3 +431,34 @@ def test_single_line_if_reports_each_type_once(line: str, count: int) -> None:
     codes = _single_line_if_errors(line)
     assert len(codes) == count
     assert len(set(codes)) == len(codes)
+
+
+# -- 58fd2c90: a default member that returns an object, read into a Variant ---
+
+_DEFAULT_ITEMS_CLASS = (
+    "Option Explicit\nPrivate mItems As New Collection\nPublic Sub Add(ByVal v As Variant)\n"
+    "    mItems.Add v\nEnd Sub\nPublic Property Get Items() As Collection\n"
+    "Attribute Items.VB_UserMemId = 0\n    Set Items = mItems\nEnd Property\n"
+)
+
+
+@pytest.mark.parametrize("host", [None, "word", "powerpoint", "access"])
+@pytest.mark.parametrize("lines", [
+    ["Main = c"],
+    ["Dim v As Variant", "v = c"],
+    ["Dim v", "v = c"],
+    ["Dim a(1) As Variant", "a(0) = c"],
+    ["c.Add 1", "Dim v As Variant", "v = c", "If v.Count <> 1 Then Err.Raise 5"],
+    ["Take (c)"],
+])
+def test_collection_returning_default_member_is_kept(lines: list[str], host: str | None) -> None:
+    source = (
+        "Option Explicit\nFunction Main() As Variant\n    Dim c As New C1\n" + "\n".join(lines)
+        + "\nEnd Function\nSub Take(ByVal v As Variant)\nEnd Sub"
+    )
+    modules = [
+        ModuleInput("Module1", ModuleSymbolKind.STANDARD, source),
+        ModuleInput("C1", ModuleSymbolKind.CLASS, _DEFAULT_ITEMS_CLASS),
+    ]
+    findings = analyze_project(modules, host=host)["Module1"]
+    assert [d for d in findings if d.severity == "error"] == []
