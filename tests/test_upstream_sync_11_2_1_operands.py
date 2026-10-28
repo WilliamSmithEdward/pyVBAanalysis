@@ -23,7 +23,8 @@ from pyvbaanalysis.runtime.vba_value_results import (
     TYPEOF_KEYWORD_OPERANDS,
     VALUE_RESULT_FUNCTIONS,
 )
-from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
+from pyvbaanalysis.symbols import ModuleSymbolKind, ProjectIndex
+from oracle_support import oracle_module_input  # type: ignore[attr-defined]
 
 _ORACLE: dict[str, dict[str, Any]] = {
     case["id"]: case
@@ -54,7 +55,8 @@ def _errors_for(case: dict[str, Any], ignore: frozenset[str] = frozenset()) -> l
     modules = _modules(case)
     index = ProjectIndex()
     for module in modules:
-        index.set_module(ModuleInput(module["name"], _KIND.get(module.get("type", "standard"), ModuleSymbolKind.STANDARD), module["source"]))
+        # What the designer and the attributes declare too (XLIDE issue #1419).
+        index.set_module(oracle_module_input(module))
     out: list[str] = []
     for module in modules:
         kind = _KIND.get(module.get("type", "standard"), ModuleSymbolKind.STANDARD)
@@ -411,3 +413,56 @@ def test_deeply_nested_argument_typed_calls_do_not_overflow() -> None:
     for _ in range(200):
         call = f"Abs({call})"
     assert isinstance(_inline_errors("Sub Main()", f"    Debug.Print {call} Is Nothing", "End Sub"), list)
+
+
+# -- a58e427f: designer controls and attributes reach the analyzer ----------
+
+_CASES_1419 = [case for case_id, case in _ORACLE.items() if case_id.startswith("issue1419_")]
+
+_CODE_FOR_MESSAGE_1419 = {
+    "Type mismatch": "is-operator-non-object",
+    "Syntax error": "reserved-keyword-in-expression",
+    "Method or data member not found": "member-not-found",
+}
+
+# `Len() Is Nothing` is the VBE's Syntax error, reported as argument-count.
+# `Me.Len` on a form whose fixture does not state its control list stays
+# quiet: without the list nothing proves Len absent. The same form with an
+# empty designer, u_empty_designer_me_len, is reported.
+_OTHER_CODES_1419 = {
+    "u_len_control_4": ["argument-count"],
+    "u_no_control_me_len": [],
+}
+_FAMILY_1419 = re.compile(r"^issue1419_(word_|powerpoint_|access_)?")
+
+
+def test_designer_input_cases_cover_every_host() -> None:
+    assert len(_CASES_1419) == 233
+    assert {case.get("host", "excel") for case in _CASES_1419} == {"excel", "word", "powerpoint", "access"}
+
+
+@pytest.mark.parametrize("case_id", [case["id"] for case in _CASES_1419])
+def test_designer_input_case_gets_the_vbe_error(case_id: str) -> None:
+    case = _case(case_id)
+    family = _FAMILY_1419.sub("", case_id).removesuffix("_compile")
+    found = _MESSAGE_1416.search(case["description"])
+    expected = _OTHER_CODES_1419.get(family)
+    if expected is None:
+        expected = [] if case["expected"] == "accepted" else [_CODE_FOR_MESSAGE_1419.get(found.group(1) if found else "")]
+    assert None not in expected
+    assert _codes_of(_errors_for(case)) == expected
+
+
+def test_fixture_adapter_types_controls_by_prog_id() -> None:
+    picker = oracle_module_input(
+        {"name": "Form1", "type": "userform", "source": "",
+         "designerControls": [{"name": "Picker", "progId": "Forms.ComboBox.1"}]}
+    )
+    assert [(member.name, member.type) for member in picker.implicit_members] == [("Picker", "MSForms.ComboBox")]
+    assert oracle_module_input({"name": "Form1", "type": "userform", "source": "", "designerControls": []}).implicit_members == []
+    assert oracle_module_input({"name": "Form1", "type": "userform", "source": ""}).implicit_members is None
+    sheet = oracle_module_input(
+        {"name": "Sheet1", "type": "document", "source": "", "designerClass": "Excel.Worksheet", "implicitMembers": []}
+    )
+    assert (sheet.designer_class, sheet.implicit_members) == ("Excel.Worksheet", [])
+    assert oracle_module_input({"name": "Timer", "type": "class", "source": "", "predeclaredId": True}).predeclared_id is True

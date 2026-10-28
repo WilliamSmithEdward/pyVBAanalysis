@@ -6,14 +6,16 @@ Not a test module (no test_ prefix); imported by the rule test files.
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
+from typing import Any
 
 from pyvbaanalysis import analyze_module_options_for
 from pyvbaanalysis.conditional import ConditionalCompilationEnvironment
 from pyvbaanalysis.diagnostics import analyze_module
 from pyvbaanalysis.evidence import DATA_DIR, OracleCase, load_audit, load_oracle_cases
 from pyvbaanalysis.host.host_libraries import host_token_for_libid
-from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
+from pyvbaanalysis.symbols import ImplicitMember, ModuleInput, ModuleSymbolKind, ProjectIndex
 
 AUDIT = {a.code: a for a in load_audit()}
 CASES = {c.id: c for c in load_oracle_cases()}
@@ -25,6 +27,45 @@ _REFERENCED_HOSTS: dict[str, list[str]] = {
     raw["id"]: [token for ref in raw["references"] if (token := host_token_for_libid(ref["guid"])) is not None]
     for raw in json.loads((DATA_DIR / "vbe_oracle_cases.json").read_text(encoding="utf-8"))["cases"]
     if raw.get("references")
+}
+
+_PROG_ID_RE = re.compile(r"^Forms\.(\w+)\.\d+$")
+
+
+def oracle_module_input(module: dict[str, Any]) -> ModuleInput:
+    """An oracle fixture's module as the analyzer's project input, with what its
+    designer and attributes declare: a UserForm's controls, typed by ProgID, a
+    document module's designer class, a class's PredeclaredId (upstream's
+    tests/helpers/oracleModuleInput.ts, XLIDE issue #1419). The VBE oracle builds
+    the same module from the same fields, so the analyzer sees the project the
+    VBE compiled."""
+    controls = module.get("designerControls")
+    implicit: list[ImplicitMember] | None
+    if controls is not None:
+        implicit = []
+        for control in controls:
+            match = _PROG_ID_RE.match(control["progId"])
+            if match is None:
+                raise ValueError(f"No MSForms type for the ProgID {control['progId']}")
+            implicit.append(ImplicitMember(control["name"], f"MSForms.{match.group(1)}"))
+    elif module.get("implicitMembers") is not None:
+        implicit = [ImplicitMember(member["name"], member["type"]) for member in module["implicitMembers"]]
+    else:
+        implicit = None
+    return ModuleInput(
+        module["name"],
+        _kind(module.get("type", "standard")),
+        module["source"],
+        implicit_members=implicit,
+        predeclared_id=module.get("predeclaredId"),
+        designer_class=module.get("designerClass"),
+    )
+
+
+_RAW_MODULES: dict[str, list[dict[str, Any]]] = {
+    raw["id"]: raw["modules"]
+    for raw in json.loads((DATA_DIR / "vbe_oracle_cases.json").read_text(encoding="utf-8"))["cases"]
+    if "modules" in raw
 }
 
 _KIND = {
@@ -58,8 +99,14 @@ def case_codes(case: OracleCase) -> frozenset[str]:
     so enlarging the corpus does not repeat the same complete analysis per rule.
     """
     index = ProjectIndex()
+    raw_modules = {raw["name"]: raw for raw in _RAW_MODULES.get(case.id, [])}
     for module in case.modules:
-        index.set_module(ModuleInput(module.name, _kind(module.module_type), module.source))
+        raw = raw_modules.get(module.name)
+        index.set_module(
+            oracle_module_input(raw)
+            if raw is not None
+            else ModuleInput(module.name, _kind(module.module_type), module.source)
+        )
     out: set[str] = set()
     for module in case.modules:
         opts = analyze_module_options_for(

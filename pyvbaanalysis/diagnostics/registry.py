@@ -19,7 +19,7 @@ from ..host.host_model import get_excel_object_model
 from ..parser.nodes import Span
 from ..symbols.symbol_model import ModuleSymbolKind, VbaSymbolKind
 from .callable_signatures import callable_type_signatures_for
-from .context import PushFn, RulePassContext, own_object_member_names
+from .context import PushFn, RulePassContext, bare_object_names, own_object_member_names
 from .exprwalk import ProcedureExpressionVisitor
 from .model import VbaDiagnosticData
 from .rules.access_data import check_access_data
@@ -1097,6 +1097,10 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(name="missingLibraryReference", run=_missing_library_reference),
     DiagnosticRuleEntry(
         name="memberNotFound",
+        # `If Sheet1.NoSuchMember Then`, `Do While`, `Select Case` and a For
+        # bound are the same compile error (XLIDE issue #1419, measured in Excel
+        # and Word).
+        block_headers=True,
         procedure_statements=lambda ctx, push: check_member_not_found(ctx.source, ctx.member_ctx, push),
     ),
     DiagnosticRuleEntry(
@@ -1136,6 +1140,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
             ctx.opts.project_visible_symbols,
             ctx.member_ctx,
             push,
+            bare_object_names(ctx.opts),
         ),
     ),
     DiagnosticRuleEntry(
@@ -1202,14 +1207,18 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(
         name="isOperatorNonObject",
         procedure_expressions=lambda ctx, push: check_is_operator_operands(
-            ctx.symbols, push, ctx.opts.project_procedures, ctx.opts.project_visible_symbols
+            ctx.symbols,
+            push,
+            ctx.opts.project_procedures,
+            ctx.opts.project_visible_symbols,
+            bare_object_names(ctx.opts),
         ),
     ),
     DiagnosticRuleEntry(
         name="isOperandsInConditions",
         run=lambda ctx, push: check_is_operands_in_conditions(
             ctx.source, ctx.mod, ctx.symbols, ctx.activity, push,
-            ctx.opts.project_procedures, ctx.opts.project_visible_symbols,
+            ctx.opts.project_procedures, ctx.opts.project_visible_symbols, bare_object_names(ctx.opts),
         ),
     ),
     DiagnosticRuleEntry(

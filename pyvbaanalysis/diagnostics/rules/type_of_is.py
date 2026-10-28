@@ -78,7 +78,13 @@ from ...symbols.symbol_model import (
     VbaSymbolKind,
     qualified_procedure_key,
 )
-from ...types.type_inference import SCALAR_OBJECT_ASSIGNMENT_REASON, type_environment_for
+from ...symbols.name_resolution import BareIdentifierContext
+from ...types.type_inference import (
+    SCALAR_OBJECT_ASSIGNMENT_REASON,
+    procedure_symbol_for,
+    source_identifier_bound,
+    type_environment_for,
+)
 from ...types.type_names import is_known_scalar_type, normalize_type
 from ..call_extraction import CallableTypeSignature, InferredArgumentType
 from ..callable_signatures import (
@@ -236,18 +242,18 @@ def _runtime_value_result(
     expr: ExprNode,
     form: str,
     env: dict[str, str],
-    source_names: SourceNameScope,
+    shadowed: Callable[[str], bool],
 ) -> tuple[str, str] | None:
     """A call to one of VBA's own functions whose result is a value under `Is`
     (form "is") or `TypeOf` (form "typeof"), vba_value_results.py, XLIDE issue
-    #1416: `CDbl(1)`, `VBA.Mid$(s, 1)`, `Erl`. None when a source name takes the
-    function's name or `VBA`'s, and for a bare keyword-named TypeOf operand,
-    which is a Syntax error reported in expressions.py. The result's type is
-    "value"."""
+    #1416: `CDbl(1)`, `VBA.Mid$(s, 1)`, `Erl`. None when `shadowed` says a
+    source or object name takes the function's name or `VBA`'s, and for a bare
+    keyword-named TypeOf operand, which is a Syntax error reported in
+    expressions.py. The result's type is "value"."""
     target = expr.callee if isinstance(expr, IndexExpr) else expr
     args = expr.args if isinstance(expr, IndexExpr) else []
     if isinstance(target, IdentifierExpr):
-        if target.name.lower() in env or bare_callable_source_shadowed(target.name, source_names):
+        if shadowed(target.name):
             return None
         display = target.name
         qualified = False
@@ -259,8 +265,7 @@ def _runtime_value_result(
         and target.access_kind is not MemberAccessKind.BANG
         and isinstance(target.object_, IdentifierExpr)
         and target.object_.name.lower() == "vba"
-        and "vba" not in env
-        and "vba" not in source_names.callable_shadows
+        and not shadowed("VBA")
     ):
         if target.type_suffix and target.type_suffix != "$":
             return None
@@ -280,7 +285,7 @@ def _runtime_value_result(
             and form == "is"
             and lower in ARGUMENT_TYPED_FUNCTIONS
             and len(args) > 0
-            and all(arg.value is not None and _provably_scalar(arg.value, env, source_names) for arg in args)
+            and all(arg.value is not None and _provably_scalar(arg.value, env, shadowed) for arg in args)
         )
     )
     if not value:
@@ -288,11 +293,29 @@ def _runtime_value_result(
     return ("value", f"{display}{'(...)' if args or isinstance(expr, IndexExpr) else ''}")
 
 
+def _without_control_locals(
+    env: dict[str, str],
+    implicit_locals: AbstractSet[str] | None,
+    object_names: AbstractSet[str],
+) -> dict[str, str]:
+    """The environment without the implicit locals a control's name takes. With
+    DefLng and no Option Explicit, `Picker = 1` in a form whose ComboBox is
+    Picker assigns the control's Value; it declares no Long (XLIDE issue #1419).
+    A copy, since the environment is shared."""
+    controls = [name for name in implicit_locals or () if name in object_names]
+    if not controls:
+        return env
+    out = dict(env)
+    for name in controls:
+        out.pop(name, None)
+    return out
+
+
 # Arithmetic and `&`, which give a value when both sides are values.
 _SCALAR_OPERATORS = frozenset({"+", "-", "*", "/", "\\", "^", "Mod", "&"})
 
 
-def _provably_scalar(expr: ExprNode, env: dict[str, str], source_names: SourceNameScope) -> bool:
+def _provably_scalar(expr: ExprNode, env: dict[str, str], shadowed: Callable[[str], bool]) -> bool:
     """An argument that is provably a value: a literal, a typed variable or
     element, a value call, or arithmetic on those. Upstream recurses through the
     operands; an explicit stack does the same here, every operand having to be
@@ -312,7 +335,7 @@ def _provably_scalar(expr: ExprNode, env: dict[str, str], source_names: SourceNa
             pending.append(node.right)
             pending.append(node.left)
             continue
-        if _non_object_operand(node, env, lambda inner: _runtime_value_result(inner, "is", env, source_names)) is None:
+        if _non_object_operand(node, env, lambda inner: _runtime_value_result(inner, "is", env, shadowed)) is None:
             return False
     return True
 
@@ -322,6 +345,7 @@ def check_is_operator_operands(
     push: PushFn,
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None = None,
     project_visible_symbols: Sequence[VbaSymbol] | None = None,
+    object_names: AbstractSet[str] = frozenset(),
 ) -> ProcedureExpressionVisitor:
     """The `Is` operator requires object operands; a provably-scalar operand is an error."""
 
@@ -334,13 +358,27 @@ def check_is_operator_operands(
         return enums[0]
 
     def factory(member: ProcedureNode) -> Callable[[ExprNode], None]:
-        env = type_environment_for(symbols, member)
+        implicit_locals = symbols.implicit_locals.get(member.span.start) if symbols.implicit_locals else None
+        env = _without_control_locals(type_environment_for(symbols, member), implicit_locals, object_names)
         source_names = source_name_scope_for(symbols, member, project_visible_symbols)
+        proc_sym = procedure_symbol_for(symbols, member)
+
+        # A VBA function's name answers the source, or the module's own object,
+        # before VBA: a control or a predeclared class named Timer makes `Timer`
+        # that object (XLIDE issue #1419, measured in all four hosts).
+        def shadowed(name: str) -> bool:
+            return (
+                name.lower() in env
+                or name.lower() in object_names
+                or source_identifier_bound(
+                    symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.EXPRESSION
+                )
+            )
 
         def result_of(form: str) -> Callable[[ExprNode], tuple[str, str] | None]:
             def results(expr: ExprNode) -> tuple[str, str] | None:
                 return _call_result_type(expr, env, module_signatures, source_names) or _runtime_value_result(
-                    expr, form, env, source_names
+                    expr, form, env, shadowed
                 )
 
             return results
@@ -394,11 +432,14 @@ def check_is_operands_in_conditions(
     push: PushFn,
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None = None,
     project_visible_symbols: Sequence[VbaSymbol] | None = None,
+    object_names: AbstractSet[str] = frozenset(),
 ) -> None:
     """The same check on the conditions the expression walk does not parse: a
     single-line If's, and a Do or While loop's (XLIDE issue #325, measured in Excel
     16.0: each is a compile error, Type mismatch)."""
-    check_operands = check_is_operator_operands(symbols, push, project_procedures, project_visible_symbols)
+    check_operands = check_is_operator_operands(
+        symbols, push, project_procedures, project_visible_symbols, object_names
+    )
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue

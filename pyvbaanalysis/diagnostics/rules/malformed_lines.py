@@ -52,6 +52,7 @@ from ...lexer.token_helpers import (
     colon_directive_starts,
     directive_rem,
     first_token_at_or_after,
+    is_decimal_line_number,
     misplaced_directive_starts,
     rem_directive_starts,
 )
@@ -582,7 +583,10 @@ def _check_value_keywords(
 # `1 + Shared` are a Syntax error, and so are `Tab(5)` and `Spc(5)` outside a
 # Print list. Input, Len and Array take an argument list, and Seek
 # needs its argument: bare, the first three are a Syntax error and
-# Seek is "Argument not optional".
+# Seek is "Argument not optional". So are LenB, Abs, Int, Fix, Sgn and the
+# C-conversions below, after `=`, in a Print list and in an If's condition,
+# `If Len Is Nothing Then` (XLIDE issue #1419, measured in Excel, Word,
+# PowerPoint and Access 16.0).
 VALUE_WORD_ERRORS: Mapping[str, str] = {
     "tab": "Syntax error",
     "spc": "Syntax error",
@@ -593,12 +597,28 @@ VALUE_WORD_ERRORS: Mapping[str, str] = {
     "len": "Syntax error",
     "array": "Syntax error",
     "seek": "Argument not optional",
+    "lenb": "Syntax error",
+    "abs": "Syntax error",
+    "int": "Syntax error",
+    "fix": "Syntax error",
+    "sgn": "Syntax error",
+    "cdbl": "Syntax error",
+    "cstr": "Syntax error",
+    "clng": "Syntax error",
+    "cint": "Syntax error",
+    "cbool": "Syntax error",
+    "cvar": "Syntax error",
+    "cdate": "Syntax error",
 }
+
+# The words of VALUE_WORD_ERRORS that are functions, fine with their argument list.
+_ARGUMENT_LIST_WORDS = frozenset(
+    word for word in VALUE_WORD_ERRORS if word not in ("tab", "spc", "print", "write", "shared")
+)
 
 
 def _check_value_words(source: str, span: Span, push: PushFn) -> None:
     toks = statement_tokens(source, span)
-    value_from = _value_start(source, span, toks)
     # A Print list, `Debug.Print "a"; Tab(5)` or `Print #1, Spc(2)`, takes Tab and Spc.
     print_ = next(
         (
@@ -608,6 +628,17 @@ def _check_value_words(source: str, span: Span, push: PushFn) -> None:
         ),
         -1,
     )
+    head = 1 if toks and is_decimal_line_number(toks[0]) else 0
+    assigned = _value_start(source, span, toks)
+    # After `=`; failing that, a Print list's items and an If's condition.
+    condition = assigned < 0 and print_ < 0 and token_text(_at(toks, head)) == "if"
+    value_from = assigned if assigned >= 0 else print_ + 1 if print_ >= 0 else head + 1 if condition else -1
+    # The condition ends at Then; the arms are statements of their own.
+    value_end = (
+        next((k for k, tok in enumerate(toks) if token_text(tok) == "then"), -1) if condition else -1
+    )
+    # Open's `Len = 128` clause is the record length, in an If's arm too.
+    open_ = next((k for k, tok in enumerate(toks) if token_text(tok) == "open"), -1)
     depth = 0
     for i, tok in enumerate(toks):
         depth += 1 if tok.raw_text == "(" else -1 if tok.raw_text == ")" else 0
@@ -617,13 +648,16 @@ def _check_value_words(source: str, span: Span, push: PushFn) -> None:
         if (
             not error
             or (depth == 0 and (value_from < 0 or i < value_from))
+            or (value_end >= 0 and i >= value_end)
             or (_raw_at(toks, i - 1) or "") in (".", "!")
             or (nxt or "") in (".", "!", ":=")
         ):
             continue
         if (word == "tab" or word == "spc") and print_ >= 0 and i > print_:
             continue
-        if word in ("input", "len", "seek", "array") and (nxt == "(" or nxt == "$"):
+        if word in _ARGUMENT_LIST_WORDS and (nxt == "(" or nxt == "$"):
+            continue
+        if word == "len" and 0 <= open_ < i:
             continue
         what = (
             "is a function that needs its file number"

@@ -16,9 +16,11 @@ from ..setter_assignment import source_setter_assignment
 from ...types.type_inference import procedure_symbol_for
 
 from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 
 from ...completion.member_access import MemberCompletionContext, resolve_exact_member_completion
 from ...host.host_model import resolve_host_global_member
+from ...lexer.keyword_table import is_reserved_identifier
 from ...lexer.token_helpers import split_top_level_token_groups
 from ...lexer.token_kinds import VbaToken
 from ...parser.nodes import LeafStatementNode, ProcedureNode, Span
@@ -71,6 +73,7 @@ def check_argument_count(
     project_visible_symbols: Sequence[VbaSymbol] | None,
     member_ctx: MemberCompletionContext,
     push: PushFn,
+    object_names: AbstractSet[str] = frozenset(),
 ) -> ProcedureStatementVisitor:
     same_module_signatures = same_module_callable_signatures(symbols)
     project_signatures = unique_project_type_signatures(project_procedures)
@@ -100,7 +103,7 @@ def check_argument_count(
             effective = statement_call or qualified_statement_call
             if effective is not None:
                 _validate_callable_arity(
-                    source, effective, same_module_signatures, project_signatures, source_names, push
+                    source, effective, same_module_signatures, project_signatures, source_names, push, object_names
                 )
                 _record_project_qualified_call_span(effective, project_qualified_call_spans)
             for call in expression_calls(
@@ -109,7 +112,7 @@ def check_argument_count(
                 if call.name_span.start in setter_names or _same_call_target(call, effective):
                     continue
                 _validate_callable_arity(
-                    source, call, same_module_signatures, project_signatures, source_names, push
+                    source, call, same_module_signatures, project_signatures, source_names, push, object_names
                 )
                 _record_project_qualified_call_span(call, project_qualified_call_spans)
             for member_call in (
@@ -140,7 +143,7 @@ def check_argument_count(
                 ):
                     _validate_callable_arity(
                         source, branch_call, same_module_signatures, project_signatures,
-                        source_names, push,
+                        source_names, push, object_names,
                     )
                     _record_project_qualified_call_span(branch_call, project_qualified_call_spans)
                 for member_call in member_statement_calls(source, branch, member_ctx):
@@ -308,6 +311,7 @@ def _validate_callable_arity(
     project_signatures: Mapping[str, CallableTypeSignature],
     source_names: SourceNameScope | None,
     push: PushFn,
+    object_names: AbstractSet[str] = frozenset(),
 ) -> None:
     lower = call.lookup_key or call.name.lower()
     # `VBA.CLng()`: VBA's function, measured to take the arguments its bare
@@ -340,6 +344,13 @@ def _validate_callable_arity(
         return
     if not call.qualifier:
         if runtime_callable_source_shadowed(call.name, source_names):
+            return
+        # A control or a predeclared object takes a VBA function's name, except
+        # where the VBE reads that name as a keyword: with a control named Len,
+        # `[Len]()` is the control and `Len()` is still VBA's (XLIDE issue #1419).
+        if lower in object_names and (
+            source[call.name_span.start : call.name_span.start + 1] == "[" or not is_reserved_identifier(call.name)
+        ):
             return
         runtime = resolve_runtime_function(call.name)
         runtime_signature = runtime_arity_signature(runtime) if runtime is not None else None
