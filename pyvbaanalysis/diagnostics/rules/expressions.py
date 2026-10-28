@@ -1987,6 +1987,25 @@ def _is_non_assignment_statement_leader(word: str) -> bool:
 
 # -- invalid expression syntax ---------------------------------------------
 
+
+def _new_with_argument_list(toks: Sequence[VbaToken], offset: int) -> Span | None:
+    """`Set o = New Class1()`, `New Collection()`, `New Excel.Application()`: New
+    is given a class, never an argument list, and the parentheses are a Syntax
+    error (XLIDE issue #1413, measured in Excel, Word, PowerPoint and Access
+    16.0). The span of the `(`, or None."""
+    for i, tok in enumerate(toks):
+        if token_text(tok) != "new" or (i > 0 and token_text(toks[i - 1]) == "as"):
+            continue
+        j = i + 1
+        if not token_name(_at(toks, j)):
+            continue
+        while _raw_at(toks, j + 1) == "." and token_name(_at(toks, j + 2)):
+            j += 2
+        if _raw_at(toks, j + 1) == "(":
+            return Span(offset + toks[j + 1].start, offset + toks[j + 1].end)
+    return None
+
+
 _NON_UNARY_BINARY_OPERATORS = frozenset(
     {
         "*", "/", "\\", "^", "&", "=", "<", ">", "<=", ">=", "<>", ":=",
@@ -2030,6 +2049,15 @@ def check_invalid_expression_syntax(
                     "invalidExpressionSyntax",
                     "Incomplete member access: type a member name after '.'.",
                     incomplete,
+                )
+                return
+            new_arguments = _new_with_argument_list(label_toks, stmt.span.start)
+            if new_arguments is not None:
+                push(
+                    "invalidExpressionSyntax",
+                    "New takes a class name and no argument list; remove the parentheses. This is a VBE "
+                    "compile error: Syntax error.",
+                    new_arguments,
                 )
                 return
             unsupported = _unsupported_question_mark_operator(source, stmt.span)

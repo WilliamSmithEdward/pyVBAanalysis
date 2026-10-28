@@ -71,6 +71,7 @@ from ..context import AnalyzeModuleOptions, PushFn, is_object_module_kind, state
 from ..walker import (
     absolute_span,
     active_module_members,
+    block_header_line_span,
     declared_name_span,
     first_token_span,
     for_each_body_statement,
@@ -887,6 +888,9 @@ def _collect_with_events_new_declaration_spans(
     return spans
 
 
+# The Print statement's keywords, which no unqualified type name can be (XLIDE issue #1413).
+_PRINT_LIST_KEYWORDS = frozenset({"tab", "spc"})
+
 # The Scripting Runtime's types, which missing-library-reference judges (XLIDE issue #349).
 _SCRIPTING_TYPE_NAMES = frozenset({"dictionary", "filesystemobject", "textstream"})
 
@@ -913,6 +917,17 @@ def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: Conditio
             push(
                 "invalidAsTypeName",
                 f"'{ref.name}' is ambiguous because multiple visible project types use that name.",
+                ref.span,
+            )
+            continue
+        # `Dim t As Tab` is a Syntax error even in Excel, whose library has a
+        # Tab type: unqualified, the Print keyword wins (XLIDE issue #1413,
+        # measured in Excel, Word, PowerPoint and Access 16.0). Excel.Tab compiles.
+        if not ref.qualifier and ref.name.lower() in _PRINT_LIST_KEYWORDS:
+            push(
+                "invalidAsTypeName",
+                f"'{ref.name}' is a keyword of the Print statement, not a type name. This is a VBE "
+                "compile error: Syntax error.",
                 ref.span,
             )
             continue
@@ -1250,7 +1265,46 @@ def check_unexpected_declaration_tokens(source: str, mod: ModuleNode, activity: 
             for param in member.params:
                 if _parameter_array_as_type_syntax_hit(source, param) is None:
                     inspect(param.span, True)
+            fixed_result = _fixed_length_string_result(source, member)
+            if fixed_result is not None:
+                kind = "Property Get" if member.proc_kind is ProcKind.PROPERTY_GET else "Function"
+                push(
+                    "unexpectedDeclarationToken",
+                    f"A {kind} cannot return a fixed-length String; '{member.name}' ends at its String. This "
+                    "is a VBE compile error: Expected: end of statement.",
+                    fixed_result,
+                )
             for_each_variable_group(member.body, inspect_group, activity)
+
+
+def _fixed_length_string_result(source: str, member: ProcedureNode) -> Span | None:
+    """`Function F As String * 3`, with or without its parentheses: no procedure
+    returns a fixed-length String, so the `*` is Expected: end of statement (XLIDE
+    issue #1413, measured in Excel, Word, PowerPoint and Access 16.0). The span of
+    the `*`, or None."""
+    if member.proc_kind not in (ProcKind.FUNCTION, ProcKind.PROPERTY_GET) or member.name_span is None:
+        return None
+    header = block_header_line_span(source, member.span)
+    toks = statement_tokens(source, header)
+    name_start = member.name_span.start
+    i = next((k for k, tok in enumerate(toks) if header.start + tok.start == name_start), -1)
+    if i < 0:
+        return None
+    i += 1
+    if (
+        i < len(toks)
+        and member.type_suffix_span is not None
+        and header.start + toks[i].start == member.type_suffix_span.start
+    ):
+        i += 1
+    if _raw_at(toks, i) == "(":
+        close = match_paren_from(toks, i)
+        if close < 0:
+            return None
+        i = close + 1
+    if token_text(_at(toks, i)) != "as" or token_text(_at(toks, i + 1)) != "string" or _raw_at(toks, i + 2) != "*":
+        return None
+    return Span(header.start + toks[i + 2].start, header.start + toks[i + 2].end)
 
 
 # -- checkTypeDeclarationCharacterAsClause ---------------------------------
@@ -2009,6 +2063,35 @@ def check_non_constant_parameter_defaults(
             )
 
 
+# The intrinsic types a Const can have, whose Nothing is Invalid use of object.
+_CONST_VALUE_TYPES = frozenset(
+    {"byte", "boolean", "integer", "long", "longlong", "longptr", "currency", "single", "double", "date", "string"}
+)
+_SUFFIX_CONST_TYPES: Mapping[str, str] = {
+    "%": "integer", "&": "long", "^": "longlong", "@": "currency", "!": "single", "#": "double", "$": "string",
+}
+
+
+def _const_nothing_error(decl: VariableDeclNode, value: Sequence[VbaToken]) -> str | None:
+    """The VBE's error for a Const whose value is Nothing, parentheses and all: one
+    of VBA's types refuses it as Invalid use of object, an untyped Const as Invalid
+    data type for constant, and a Variant one as Object variable or With block
+    variable not set (XLIDE issue #1413, measured in Excel, Word, PowerPoint and
+    Access 16.0). Other types were not measured."""
+    words = [tok for tok in value if tok.kind is not TokenKind.COMMENT and tok.raw_text not in ("(", ")")]
+    if len(words) != 1 or token_text(words[0]) != "nothing":
+        return None
+    if decl.as_type is not None:
+        type_: str | None = js_trim(decl.as_type).lower()
+    else:
+        type_ = _SUFFIX_CONST_TYPES.get(decl.type_suffix) if decl.type_suffix else None
+    if type_ is None:
+        return "Invalid data type for constant"
+    if type_ == "variant":
+        return "Object variable or With block variable not set"
+    return "Invalid use of object" if type_ in _CONST_VALUE_TYPES else None
+
+
 def check_non_constant_const_values(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
     """VBA's functions that take no argument, `Now`, `Date`, `Time`, `Timer` and
     `Rnd`, are calls without the parentheses unless the module declares the name
@@ -2034,6 +2117,16 @@ def check_non_constant_const_values(source: str, mod: ModuleNode, activity: Cond
             if value_tokens is None:
                 continue
             tokens = value_tokens[0]
+            nothing = _const_nothing_error(decl, tokens)
+            if nothing is not None:
+                at = next(tok for tok in tokens if token_text(tok) == "nothing")
+                push(
+                    "constValueNotConstant",
+                    f"Const '{decl.name}' cannot be Nothing, which is an object reference. This is a VBE "
+                    f"compile error: {nothing}.",
+                    Span(decl.span.start + at.start, decl.span.start + at.end),
+                )
+                continue
             non_constant = _non_constant_default_element(tokens, decl.span.start, "const")
             if non_constant is None:
                 non_constant = _argumentless_function(tokens, decl.span.start, declared)

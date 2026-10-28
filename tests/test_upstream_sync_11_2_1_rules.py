@@ -648,3 +648,50 @@ _CALLS_1414 = ["clng_none", "cint_none", "left_dollar_none", "len_none", "clng_e
 ])
 def test_which_error_a_call_gets(case_id: str, expected: str, codes: list[str]) -> None:
     _expect_only_codes(case_id, expected, codes)
+
+
+# -- b79f8c3c: declaration errors VBA reports (the oracle cases issue1413_*) ---
+
+def _each_1413(names: list[str], hosts: tuple[str, ...] = _HOST_PREFIXES) -> list[str]:
+    return [f"issue1413_{host}{name}_compile" for name in names for host in hosts]
+
+
+@pytest.mark.parametrize("case_id", _each_1413([
+    "c_single", "c_single_suffix", "c_double_parenthesized", "c_long_double_parenthesized", "c_longlong",
+    "c_longptr", "c_string", "c_untyped", "c_variant", "c_module_level",
+]))
+def test_const_given_nothing_is_refused(case_id: str) -> None:
+    assert CASES[case_id].expected == "rejected"
+    assert _case_errors(case_id) == ["const-value-not-constant: Nothing"]
+
+
+@pytest.mark.parametrize("name, message", [
+    ("c_single", "Invalid use of object"),
+    ("c_untyped", "Invalid data type for constant"),
+    ("c_variant", "Object variable or With block variable not set"),
+])
+def test_const_nothing_message_per_type(name: str, message: str) -> None:
+    source = CASES[f"issue1413_{name}_compile"].modules[0].source
+    found = [d for d in analyze_module(source) if d.code == "const-value-not-constant"]
+    assert found and message in found[0].message
+
+
+@pytest.mark.parametrize("case_id, expected, codes", [
+    *[(c, "accepted", []) for c in _each_1413(["c_single_ok"])],
+    *[(c, "rejected", ["invalid-as-type-name"]) for c in _each_1413(["t_dim_tab", "t_dim_spc", "t_param_tab"])],
+    *[(c, "accepted", []) for c in [*_each_1413(["t_name_tab_ok"]), "issue1413_t_dim_excel_tab_ok_compile"]],
+    *[(c, "accepted", []) for c in _each_1413(["f_no_parens_string_ok"])],
+    *[(c, "rejected", ["invalid-expression-syntax"]) for c in [
+        *_each_1413(["n_class_parens", "n_collection_parens"]), "issue1413_n_excel_application_parens_compile",
+    ]],
+    *[(c, "rejected", ["unexpected-declaration-token"]) for c in _each_1413(["n_dim_as_new_parens"])],
+    *[(c, "accepted", []) for c in _each_1413(["n_class_ok"])],
+])
+def test_declaration_errors_vba_reports(case_id: str, expected: str, codes: list[str]) -> None:
+    _expect_only_codes(case_id, expected, codes)
+
+
+@pytest.mark.parametrize("case_id", _each_1413(["f_no_parens_fixed_string", "f_parens_fixed_string"]))
+def test_no_procedure_returns_a_fixed_length_string(case_id: str) -> None:
+    assert CASES[case_id].expected == "rejected"
+    assert _case_errors(case_id) == ["unexpected-declaration-token: *"]
