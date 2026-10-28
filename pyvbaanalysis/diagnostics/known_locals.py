@@ -887,6 +887,12 @@ def _code_may_run(
     return _code_may_run_with(toks, proc.name.lower(), safe, symbols, leaves_alone)
 
 
+def tokens_may_run_code(toks: Sequence[VbaToken], proc: ProcedureNode, symbols: ModuleSymbols) -> bool:
+    """Whether the tokens may run code other than the procedure's own, with no
+    callee read through: what can change a variable of another module."""
+    return _code_may_run(toks, proc, symbols)
+
+
 def _code_may_run_with(
     toks: Sequence[VbaToken],
     own_name: str,

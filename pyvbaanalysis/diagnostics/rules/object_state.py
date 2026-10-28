@@ -44,7 +44,7 @@ from ...parser.nodes import (
     iter_body_nodes,
 )
 from ...symbols.name_resolution import BareIdentifierContext, BareIdentifierResolutionScope
-from ...symbols.symbol_model import ModuleSymbols, SymbolVisibility, VbaSymbol, VbaSymbolKind
+from ...symbols.symbol_model import ModuleSymbolKind, ModuleSymbols, SymbolVisibility, VbaSymbol, VbaSymbolKind
 from ...types.type_inference import (
     SourceDeclaredType,
     declared_type_for_source_binding,
@@ -65,6 +65,7 @@ from ..block_headers import block_header_statements
 from ..condition_operands import condition_operands
 from ..condition_value import ConditionFacts, condition_value
 from ..context import PushFn, statement_tokens
+from ..known_locals import tokens_may_run_code
 from ..dataflow import (
     Lattice,
     StraightLineDataflowHooks,
@@ -691,6 +692,234 @@ def _object_state_walk(
     return walk
 
 
+@dataclass(frozen=True, slots=True)
+class _QualifiedModuleObject:
+    """A standard module's object variable named through its module: `Module2.g`."""
+
+    display: str
+    # In the module's own code, the bare name a reset may use: `Set g = Nothing`.
+    bare: str | None = None
+
+
+# JavaScript's `\w` and `\b` are ASCII-only: re.ASCII keeps these scans the same.
+_QUALIFIED_RESET_RE = re.compile(
+    r"\bset\s+[\w[\]]+\s*\.\s*[\w[\]]+\s*=\s*nothing\b", re.IGNORECASE | re.ASCII
+)
+_BARE_RESET_RE = re.compile(r"\bset\s+[\w[\]]+\s*=\s*nothing\b", re.IGNORECASE | re.ASCII)
+
+
+def _qualified_reset_candidates(
+    source: str, member: ProcedureNode, symbols: ModuleSymbols, member_ctx: MemberCompletionContext
+) -> dict[str, _QualifiedModuleObject]:
+    """The qualified module variables a procedure may set to Nothing, for the
+    object walk to follow: none unless its text has a qualified reset, or a bare
+    one in code that names its own module."""
+    text = source[member.span.start : member.span.end]
+    qualified_reset = _QUALIFIED_RESET_RE.search(text) is not None
+    if not qualified_reset and not (
+        _BARE_RESET_RE.search(text) is not None and f"{symbols.module_name.lower()}." in text.lower()
+    ):
+        return {}
+    return _qualified_module_objects(symbols, member, member_ctx)
+
+
+def _qualified_module_objects(
+    symbols: ModuleSymbols, member: ProcedureNode, member_ctx: MemberCompletionContext
+) -> dict[str, _QualifiedModuleObject]:
+    """The standard modules' object variables a procedure can name through their
+    module, by `module.variable`: every Public one of the project's other standard
+    modules, and each of this module's own when it is a standard module. `As New`
+    ones are never Nothing at a read. None when a local, a parameter or a variable
+    of this module takes the module's name."""
+    proc_sym = procedure_symbol_for(symbols, member)
+    locals_ = {child.name.lower() for child in (proc_sym.children if proc_sym is not None else None) or []}
+    module_variables = {
+        child.name.lower()
+        for child in symbols.root.children or []
+        if child.kind is VbaSymbolKind.MODULE_VARIABLE
+    }
+
+    def shadowed(module_name: str) -> bool:
+        return module_name.lower() in locals_ or module_name.lower() in module_variables
+
+    def tracked(symbol: VbaSymbol) -> bool:
+        return (
+            symbol.kind is VbaSymbolKind.MODULE_VARIABLE
+            and not symbol.is_array
+            and not symbol.is_auto_instantiated
+            and bool(symbol.as_type)
+            and is_known_object_assignment_type(symbol.as_type, member_ctx)
+        )
+
+    out: dict[str, _QualifiedModuleObject] = {}
+    own = symbols.module_name.lower()
+    for symbol in member_ctx.project_symbols or []:
+        if symbol.module_name.lower() != own and tracked(symbol) and not shadowed(symbol.module_name):
+            out[f"{symbol.module_name.lower()}.{symbol.name.lower()}"] = _QualifiedModuleObject(
+                display=f"{symbol.module_name}.{symbol.name}"
+            )
+    if symbols.module_kind is ModuleSymbolKind.STANDARD and not shadowed(symbols.module_name):
+        for symbol in symbols.root.children or []:
+            if tracked(symbol):
+                lower = symbol.name.lower()
+                out[f"{own}.{lower}"] = _QualifiedModuleObject(
+                    display=f"{symbols.module_name}.{symbol.name}",
+                    bare=None if lower in locals_ else lower,
+                )
+    return out
+
+
+class _QualifiedModuleTracking:
+    """`Set Module2.g = Nothing` and then `Module2.g.Count`: the module variable is
+    Nothing at the read, which raises 91 (XLIDE issue #1411, measured in Excel,
+    Word, PowerPoint and Access 16.0, for Print, Call, a labelled line, With, an
+    If's condition and an assignment). Each variable is a `module2.g` key in the
+    walk's state, so blocks, If arms, loops and jumps treat it as they treat a
+    local. A statement that may run code, or names the variable other than to read
+    a member of it, may change it; so may an If whose condition names it, which
+    may be its guard."""
+
+    def __init__(
+        self,
+        source: str,
+        member: ProcedureNode,
+        symbols: ModuleSymbols,
+        objects: Mapping[str, _QualifiedModuleObject],
+        state: dict[str, ObjectVariableState],
+        report: PushFn,
+    ) -> None:
+        self._source = source
+        self._member = member
+        self._symbols = symbols
+        self._objects = objects
+        self._state = state
+        self._report = report
+
+    def _qualified_at(self, toks: Sequence[VbaToken], i: int) -> str | None:
+        """The followed name at token i, as its key."""
+        qualifier = token_name(_at(toks, i))
+        name = token_name(_at(toks, i + 2))
+        before = _raw(_at(toks, i - 1)) if i > 0 else None
+        if not qualifier or not name or _raw(_at(toks, i + 1)) != "." or before in (".", "!"):
+            return None
+        key = f"{qualifier.lower()}.{name.lower()}"
+        return key if key in self._objects else None
+
+    @staticmethod
+    def _member_read(toks: Sequence[VbaToken], i: int) -> bool:
+        return _raw(_at(toks, i + 3)) in (".", "!") and token_name(_at(toks, i + 4)) is not None
+
+    def _report_reads(self, toks: Sequence[VbaToken], offset: int, end: int) -> None:
+        i = 0
+        while i + 4 < end:
+            key = self._qualified_at(toks, i)
+            if key and self._state.get(key) == "unset" and self._member_read(toks, i):
+                self._report(
+                    "objectVariableNotSet",
+                    f"Object variable '{self._objects[key].display}' is Nothing before member access. "
+                    "This will raise Run-time error '91': Object variable or With block variable not set.",
+                    Span(offset + toks[i].start, offset + toks[i + 2].end),
+                )
+            i += 1
+
+    def _may_change(self, toks: Sequence[VbaToken]) -> bool:
+        rest: list[VbaToken] = []
+        named = False
+        i = 0
+        while i < len(toks):
+            if self._qualified_at(toks, i):
+                named = named or not self._member_read(toks, i)
+                i += 3
+                continue
+            rest.append(toks[i])
+            i += 1
+        return named or tokens_may_run_code(rest, self._member, self._symbols)
+
+    def _demote_all(self) -> None:
+        for key in self._objects:
+            if self._state.get(key) == "unset":
+                self._state[key] = "unknown"
+
+    def _reset_of(self, toks: Sequence[VbaToken]) -> tuple[str, list[VbaToken]] | None:
+        """`Set Module2.g = ...`, or `Set g = ...` in Module2's own code."""
+        if token_text(_at(toks, 0)) != "set":
+            return None
+        qualified = self._qualified_at(toks, 1)
+        bare_name = token_name(_at(toks, 1)) if qualified is None else None
+        bare = bare_name.lower() if bare_name is not None else None
+        key = qualified
+        if key is None and bare is not None:
+            key = next((k for k, obj in self._objects.items() if obj.bare == bare), None)
+        equals = 4 if qualified else 2
+        if not key or _raw(_at(toks, equals)) != "=":
+            return None
+        return key, [tok for tok in toks[equals + 1 :] if tok.kind is not TokenKind.COMMENT]
+
+    def on_statement(self, stmt: LeafStatementNode) -> None:
+        toks = statement_tokens_after_leading_label(self._source, stmt.span)
+        # A single-line If always reads its condition; its arms may not run.
+        then_index = (
+            next((i for i, tok in enumerate(toks) if token_text(tok) == "then"), -1)
+            if len(statement_and_branch_spans(stmt)) > 1
+            else -1
+        )
+        self._report_reads(toks, stmt.span.start, then_index if then_index > 0 else len(toks))
+        reset = None if then_index > 0 else self._reset_of(toks)
+        if reset is not None:
+            key, value = reset
+            nothing = len(value) == 1 and token_text(value[0]) == "nothing"
+            self._state[key] = "unset" if nothing else "unknown"
+            if tokens_may_run_code(value, self._member, self._symbols):
+                self._demote_all()
+            return
+        if self._may_change(toks):
+            self._demote_all()
+
+    def on_block(self, node: BodyNode) -> None:
+        source = self._source
+        if isinstance(node, WithBlockNode):
+            header = statement_tokens_after_leading_label(source, block_header_line_span(source, node.span))
+            key = (
+                self._qualified_at(header, 1)
+                if token_text(_at(header, 0)) == "with" and len(header) == 4
+                else None
+            )
+            if key and self._state.get(key) == "unset":
+                self._report(
+                    "objectVariableNotSet",
+                    f"Object variable '{self._objects[key].display}' is Nothing before With member access. "
+                    "This will raise Run-time error '91': Object variable or With block variable not set.",
+                    Span(node.span.start + header[1].start, node.span.start + header[3].end),
+                )
+            return
+        if isinstance(node, IfBlockNode):
+            for index, branch in enumerate(node.branches):
+                if branch.branch_kind is IfBranchKind.ELSE:
+                    continue
+                toks = statement_tokens(source, branch.header_span)
+                # The first condition always runs; a later one only when those before fail.
+                if index == 0:
+                    self._report_reads(toks, branch.header_span.start, len(toks))
+                if any(self._qualified_at(toks, i) is not None for i in range(len(toks))) or tokens_may_run_code(
+                    toks, self._member, self._symbols
+                ):
+                    self._demote_all()
+            return
+        if isinstance(node, (SelectBlockNode, DoBlockNode, WhileBlockNode, ForBlockNode)):
+            before, _after = block_header_statements(source, node)
+            if before is not None:
+                self.on_statement(before)
+
+    def touches(self, stmt: LeafStatementNode) -> list[str]:
+        """The followed variables a statement in a nested block may change."""
+        if any(
+            self._may_change(statement_tokens_after_leading_label(self._source, span))
+            for span in statement_and_branch_spans(stmt)
+        ):
+            return list(self._objects)
+        return []
+
+
 def _walk_object_state(
     source: str,
     facts: _ModuleObjectFacts,
@@ -703,9 +932,13 @@ def _walk_object_state(
 ) -> None:
     locals_ = _local_object_variables_for(source, symbols, member, member_ctx)
     elements = _object_array_elements(source, symbols, member, member_ctx, activity)
-    if not locals_ and not elements.keys:
+    qualified_objects = _qualified_reset_candidates(source, member, symbols, member_ctx)
+    if not locals_ and not elements.keys and not qualified_objects:
         return
     state: dict[str, ObjectVariableState] = {}
+    # What a module variable holds as the procedure starts is not known.
+    for key in qualified_objects:
+        state[key] = "unknown"
     for key, local in locals_.items():
         # A Variant starts Empty, which is no object and not Nothing; what a
         # module variable holds as the procedure starts is not known.
@@ -755,6 +988,11 @@ def _walk_object_state(
     nothing_after: set[int] = set()
     # A statement a known guard keeps from running (issue #273), by node identity.
     unreachable = unreachable_statements_in(source, member, symbols, activity)
+    qualified = (
+        _QualifiedModuleTracking(source, member, symbols, qualified_objects, state, reporter)
+        if qualified_objects
+        else None
+    )
 
     def on_statement(stmt: LeafStatementNode) -> None:
         _check_object_variable_not_set_statement(
@@ -763,8 +1001,12 @@ def _walk_object_state(
         # Code the statement runs may set a module variable (issue #618).
         for lower in module_touches(stmt):
             state[lower] = "unknown"
+        if qualified is not None:
+            qualified.on_statement(stmt)
 
     def on_block(node: BodyNode) -> None:
+        if qualified is not None:
+            qualified.on_block(node)
         # The header runs as the block is entered, with the state as it
         # stands: `For i = 1 To c.Count`, `Select Case c.Count` (issue #233).
         if isinstance(node, (SelectBlockNode, DoBlockNode, WhileBlockNode)) or (
@@ -903,6 +1145,8 @@ def _walk_object_state(
                 touched.add(key)
         for module_lower in module_touches(stmt):
             touched.add(module_lower)
+        if qualified is not None:
+            touched.update(qualified.touches(stmt))
         # A single-line If's branches Set too. A Let gives a Variant a value.
         for span in statement_and_branch_spans(stmt):
             target = set_assignment_target(source, span)

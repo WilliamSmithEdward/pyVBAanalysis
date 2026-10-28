@@ -175,7 +175,7 @@ def _check_procedure(
         first_call = extract_call(source, span)
         if first_call is not None:
             calls.append(first_call)
-        qualified_call = extract_qualified_call(source, span, signatures)
+        qualified_call = extract_qualified_call(source, span, signatures, source_names)
         if qualified_call is not None:
             calls.append(qualified_call)
         calls.extend(expression_calls(source, span, signatures, source_names))

@@ -80,7 +80,7 @@ def check_argument_count(
             project_qualified_call_spans: set[tuple[int, int]] = set()
             statement_call = extract_call(source, stmt.span)
             qualified_statement_call = (
-                None if statement_call else extract_qualified_call(source, stmt.span, module_signatures)
+                None if statement_call else extract_qualified_call(source, stmt.span, module_signatures, source_names)
             )
             effective = statement_call or qualified_statement_call
             if effective is not None:
@@ -113,7 +113,7 @@ def check_argument_count(
             # report the same call twice.
             for branch in statement_and_branch_spans(stmt)[1:]:
                 branch_call = extract_call(source, branch) or extract_qualified_call(
-                    source, branch, module_signatures
+                    source, branch, module_signatures, source_names
                 )
                 if (
                     branch_call is not None

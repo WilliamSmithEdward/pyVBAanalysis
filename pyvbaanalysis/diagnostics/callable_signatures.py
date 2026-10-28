@@ -60,6 +60,7 @@ from .call_extraction import (
     CallableTypeSignature,
     CallArguments,
     empty_arg_split,
+    module_qualifier_shadowed,
     split_arg_slots,
 )
 from .const_expr import collect_body_literal_integer_constants, external_integer_constant_value
@@ -212,6 +213,10 @@ def callable_type_signatures_for(
 class SourceNameScope:
     callable_shadows: frozenset[str]
     runtime_shadows: frozenset[str]
+    # The variables a `Name.` receiver can mean instead of the module called
+    # Name: the procedure's locals and parameters and the current module's
+    # variables. See module_qualifier_shadowed.
+    variable_shadows: frozenset[str] = frozenset()
 
 
 def is_non_callable_symbol(sym: VbaSymbol) -> bool:
@@ -265,14 +270,20 @@ def source_name_scope_for(
     cached = _SOURCE_NAME_SCOPE_CACHE.get(symbols, proc, project)
     if cached is not None:
         return cached  # type: ignore[no-any-return]
-    callable_shadows = set(module_non_callable_symbols(symbols))
+    module_non_callables = module_non_callable_symbols(symbols)
+    callable_shadows = set(module_non_callables)
+    variables = {lower for lower, sym in module_non_callables.items() if sym.kind is VbaSymbolKind.MODULE_VARIABLE}
     proc_sym = procedure_symbol_for(symbols, proc)
     runtime_shadows = source_identifier_names(symbols, proc_sym, project)
     for child in (proc_sym.children if proc_sym is not None else None) or []:
         if is_non_callable_symbol(child):
             callable_shadows.add(child.name.lower())
+        if child.kind in (VbaSymbolKind.LOCAL_VARIABLE, VbaSymbolKind.PARAMETER):
+            variables.add(child.name.lower())
     scope = SourceNameScope(
-        callable_shadows=frozenset(callable_shadows), runtime_shadows=frozenset(runtime_shadows)
+        callable_shadows=frozenset(callable_shadows),
+        runtime_shadows=frozenset(runtime_shadows),
+        variable_shadows=frozenset(variables),
     )
     return _SOURCE_NAME_SCOPE_CACHE.put(scope, symbols, proc, project)  # type: ignore[no-any-return]
 
@@ -430,7 +441,11 @@ def expression_calls(
             token_name(toks[i - 2]) if i >= 2 and toks[i - 1].raw_text == "." else None
         )
         lookup_key = qualified_procedure_key(qualifier, call_name.name) if qualifier else None
-        if qualifier and (lookup_key is None or lookup_key not in module_signatures):
+        if qualifier and (
+            lookup_key is None
+            or lookup_key not in module_signatures
+            or module_qualifier_shadowed(qualifier, source_names)
+        ):
             continue  # host/member calls need receiver binding before checking
         if not qualifier and i > 0 and toks[i - 1].raw_text == ".":
             continue

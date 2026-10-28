@@ -5,9 +5,10 @@ Each section names the upstream commit whose own tests it follows.
 
 import pytest
 
-from pyvbaanalysis import analyze_module, analyze_project
+from pyvbaanalysis import analyze_module, analyze_module_options_for, analyze_project
+from pyvbaanalysis.conditional import ConditionalCompilationEnvironment
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions
-from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind
+from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
 from oracle_support import CASES, case_codes  # type: ignore[attr-defined]
 
 
@@ -462,3 +463,94 @@ def test_collection_returning_default_member_is_kept(lines: list[str], host: str
     ]
     findings = analyze_project(modules, host=host)["Module1"]
     assert [d for d in findings if d.severity == "error"] == []
+
+
+# -- 28c839b1: module names a variable takes, and qualified Nothing reads ------
+# The oracle cases issue1411_* (measured in Excel, Word, PowerPoint and Access).
+
+_HOST_PREFIXES = ("", "word_", "powerpoint_", "access_")
+
+
+def _case_errors(case_id: str) -> list[str]:
+    """Each error finding as `code: spanned text`, analyzed in the case's host."""
+    case = CASES[case_id]
+    host = next((h.rstrip("_") for h in _HOST_PREFIXES[1:] if case_id.startswith(f"issue1411_{h}")), "excel")
+    index = ProjectIndex()
+    for module in case.modules:
+        index.set_module(ModuleInput(module.name, _ORACLE_KIND.get(module.module_type, ModuleSymbolKind.STANDARD), module.source))
+    out: list[str] = []
+    for module in case.modules:
+        opts = analyze_module_options_for(
+            index, module.name, _ORACLE_KIND.get(module.module_type, ModuleSymbolKind.STANDARD), host=host,
+            conditional_compilation=ConditionalCompilationEnvironment(project_constants={}),
+        )
+        out += [
+            f"{d.code}: {module.source[d.span.start:d.span.end]}"
+            for d in analyze_module(module.source, opts) if d.severity == "error"
+        ]
+    return out
+
+
+_ORACLE_KIND = {
+    "standard": ModuleSymbolKind.STANDARD,
+    "class": ModuleSymbolKind.CLASS,
+    "document": ModuleSymbolKind.DOCUMENT,
+    "userform": ModuleSymbolKind.USERFORM,
+}
+
+
+def _each_host(names: list[str], phase: str) -> list[str]:
+    return [f"issue1411_{host}{name}_{phase}" for name in names for host in _HOST_PREFIXES]
+
+
+_SHADOWED_1411 = [
+    f"b_{receiver}_{by}"
+    for receiver in ("strings", "math", "other")
+    for by in ("local", "parameter", "module", "variant_local", "current_module")
+    if by != "current_module" or receiver != "other"
+] + ["b_other_collection_local"] + [
+    f"d_{shape}_shadowed"
+    for shape in ("statement", "call_statement", "assignment", "nested_argument", "set_assignment")
+]
+_UNSHADOWED_1411 = ["b_strings_unshadowed", "b_math_unshadowed", "b_other_unshadowed"] + [
+    f"d_{shape}_unshadowed"
+    for shape in ("statement", "call_statement", "assignment", "nested_argument", "set_assignment")
+] + ["d_public_variable_named_like_module"]
+
+
+@pytest.mark.parametrize("case_id", _each_host(_SHADOWED_1411, "compile"))
+def test_module_name_a_variable_takes_is_that_variable(case_id: str) -> None:
+    assert CASES[case_id].expected == "accepted"
+    assert _case_errors(case_id) == []
+
+
+@pytest.mark.parametrize("case_id", _each_host(_UNSHADOWED_1411, "compile"))
+def test_unshadowed_module_call_is_still_checked(case_id: str) -> None:
+    assert CASES[case_id].expected == "rejected"
+    assert len([f for f in _case_errors(case_id) if f.startswith("argument-count:")]) == 1
+
+
+@pytest.mark.parametrize("case_id", _each_host(["b_other_long_local"], "compile"))
+def test_long_named_like_module_is_a_member_of_a_long(case_id: str) -> None:
+    findings = _case_errors(case_id)
+    assert any(f.startswith("scalar-member-access:") for f in findings)
+    assert not any(f.startswith("argument-count:") for f in findings)
+
+
+@pytest.mark.parametrize("case_id", _each_host(
+    [f"a_nothing_read_{form}" for form in ("print", "call", "label", "if", "assign", "with")]
+    + ["a_reset_unqualified_read_qualified"],
+    "runtime",
+))
+def test_module_variable_reset_through_its_module(case_id: str) -> None:
+    assert CASES[case_id].expected == "rejected"
+    assert _case_errors(case_id) == ["object-variable-not-set: Module2.g"]
+
+
+@pytest.mark.parametrize("case_id", _each_host([
+    "a_reset_then_new", "a_reset_then_call_init", "a_shadowed_own_module_receiver",
+    "e_block_guard", "e_line_guard", "e_exit_between", "e_as_new",
+], "runtime"))
+def test_module_variable_reset_controls_run(case_id: str) -> None:
+    assert CASES[case_id].expected == "accepted"
+    assert _case_errors(case_id) == []

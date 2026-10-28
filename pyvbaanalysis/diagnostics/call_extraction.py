@@ -12,7 +12,9 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from ..call.call_context import bare_call_statement_target
 from ..js_compat import js_trim
@@ -308,11 +310,32 @@ def extract_call(source: str, span: Span) -> CallArguments | None:
     )
 
 
+class VariableShadows(Protocol):
+    """What module_qualifier_shadowed reads of a SourceNameScope."""
+
+    @property
+    def variable_shadows(self) -> AbstractSet[str]: ...
+
+
+def module_qualifier_shadowed(qualifier: str, source_names: VariableShadows | None) -> bool:
+    """Whether `Qualifier.Member` reaches a variable rather than the standard
+    module named Qualifier. A local, a parameter or a variable of the current
+    module takes the name, even in that module itself, so `Other.Foo()` is a
+    member call on the variable and Other's Foo is never checked against it. A
+    Public variable of a third module does not take it. Both measured in Excel,
+    Word, PowerPoint and Access 16.0 (XLIDE issue #1411)."""
+    return source_names is not None and qualifier.lower() in source_names.variable_shadows
+
+
 def extract_qualified_call(
-    source: str, span: Span, module_signatures: Mapping[str, CallableTypeSignature]
+    source: str,
+    span: Span,
+    module_signatures: Mapping[str, CallableTypeSignature],
+    source_names: VariableShadows | None = None,
 ) -> CallArguments | None:
     """A module-qualified call statement (`ModuleName.Procedure ...`), proven by the
-    project signature map; host/object member calls stay out of the validator."""
+    project signature map, and no variable in `source_names` takes the module's
+    name; host/object member calls stay out of the validator."""
     slice_start = span.start
     toks = _significant_slice_tokens(source, span)
     if not toks:
@@ -329,7 +352,7 @@ def extract_qualified_call(
     if not qualifier or dot is None or dot.raw_text != "." or not name or callee is None:
         return None
     lookup_key = qualified_procedure_key(qualifier, name)
-    if lookup_key not in module_signatures:
+    if lookup_key not in module_signatures or module_qualifier_shadowed(qualifier, source_names):
         return None
 
     next_tok = toks[qualifier_idx + 3] if qualifier_idx + 3 < len(toks) else None
