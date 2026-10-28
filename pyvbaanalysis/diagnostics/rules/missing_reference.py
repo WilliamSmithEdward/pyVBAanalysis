@@ -49,7 +49,7 @@ _MODEL_LIBRARIES = IdentityLru()
 # The libraries a project can be given a reference to: lowercased name -> as written.
 _ADDABLE = {
     HOST_LIBRARY_NAMES[token].lower(): HOST_LIBRARY_NAMES[token]
-    for token in ("excel", "word", "powerpoint", "access")
+    for token in ("excel", "word", "powerpoint", "access", "outlook")
 }
 
 

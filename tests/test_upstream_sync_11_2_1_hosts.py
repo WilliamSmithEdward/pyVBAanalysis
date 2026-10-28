@@ -11,10 +11,15 @@ from typing import Any
 
 import pytest
 
-from pyvbaanalysis import analyze_module
+from pyvbaanalysis import analyze_module, analyze_module_options_for
+from pyvbaanalysis.conditional import ConditionalCompilationEnvironment
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions
+from pyvbaanalysis.diagnostics.model import DiagnosticSeverity
 from pyvbaanalysis.evidence import DATA_DIR
-from pyvbaanalysis.symbols import ModuleSymbolKind
+from pyvbaanalysis.host.host_libraries import host_token_for_libid
+from pyvbaanalysis.host.host_model import get_host_global_members, resolve_host_global_member
+from pyvbaanalysis.host.host_registry import host_object_model_for_tokens
+from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex, ProjectIndexOptions
 
 _ORACLE: list[dict[str, Any]] = json.loads((DATA_DIR / "vbe_oracle_cases.json").read_text(encoding="utf-8"))["cases"]
 
@@ -136,3 +141,127 @@ def test_reftype_fixture(case: dict[str, Any]) -> None:
 def test_reftype_silent_where_the_references_are_not_known() -> None:
     src = "Option Explicit\nSub Main()\n    Dim w As Worksheet\nEnd Sub\n"
     assert _codes(src, "invalid-as-type-name", host="access") == []
+
+
+# dc4cab57: the Outlook object library as a project reference (outlookReference.test.ts,
+# hostInterop.test.ts).
+
+_CASES_BY_ID = {case["id"]: case for case in _ORACLE}
+_HOST_PREFIXES = ("", "word_", "powerpoint_", "access_")
+
+
+def _each_host(name: str, prefixes: tuple[str, ...] = _HOST_PREFIXES) -> list[str]:
+    return [f"outlook_{prefix}{name}_compile" for prefix in prefixes]
+
+
+def _error_codes(case: dict[str, Any], referenced_libraries: list[str] | None = None) -> list[str]:
+    """Each error code, analyzed as the extension analyzes the case's host and
+    references. The port reports a missing reference only where the reference list
+    is known, so a case without references is given a known-empty list."""
+    index = ProjectIndex(ProjectIndexOptions(conditional_compilation=ConditionalCompilationEnvironment(project_constants={})))
+    for module in case["modules"]:
+        index.set_module(ModuleInput(module["name"], _KIND.get(module["type"], ModuleSymbolKind.STANDARD), module["source"]))
+    tokens = [token for ref in case.get("references", []) if (token := host_token_for_libid(ref["guid"])) is not None]
+    out: list[str] = []
+    for module in case["modules"]:
+        opts = analyze_module_options_for(
+            index, module["name"], _KIND.get(module["type"], ModuleSymbolKind.STANDARD),
+            host=case.get("host") or "excel", referenced_hosts=tokens,
+            referenced_libraries=referenced_libraries,
+            conditional_compilation=ConditionalCompilationEnvironment(project_constants={}),
+        )
+        out.extend(d.code for d in analyze_module(module["source"], opts) if d.severity is DiagnosticSeverity.ERROR)
+    return out
+
+
+_OUTLOOK_ACCEPTED = [
+    case_id
+    for name in (
+        "ref_dim_app", "ref_dim_mailitem", "ref_dim_bare_mailitem", "ref_new_app", "ref_constant",
+        "ref_qualified_constant", "ref_enum_constant", "ref_member_ok", "ref_member_missing",
+        "ref_item_member_ok", "ref_item_member_missing", "ref_bare_session", "ref_bare_createitem",
+        "ref_bare_getnamespace", "ref_module_level", "ref_withevents",
+    )
+    for case_id in _each_host(name)
+]
+
+
+@pytest.mark.parametrize("case_id", _OUTLOOK_ACCEPTED)
+def test_outlook_referenced_case_compiles_and_nothing_reports_it(case_id: str) -> None:
+    case = _CASES_BY_ID[case_id]
+    assert case["expected"] == "accepted"
+    assert len(case["references"]) == 1
+    assert _error_codes(case) == []
+
+
+_OUTLOOK_REJECTED = [
+    (case_id, code)
+    for name, code in (
+        ("noref_dim_app", "missing-library-reference"),
+        ("noref_constant", "undeclared-variable"),
+        ("ref_bare_unknown", "undeclared-variable"),
+        ("ref_wrong_arguments", "argument-count"),
+    )
+    for case_id in _each_host(name)
+]
+
+
+@pytest.mark.parametrize("case_id, code", _OUTLOOK_REJECTED)
+def test_outlook_case_is_refused_as(case_id: str, code: str) -> None:
+    case = _CASES_BY_ID[case_id]
+    assert case["expected"] == "rejected"
+    assert _error_codes(case) == [code]
+
+
+@pytest.mark.parametrize("case_id", _each_host("noref_dim_bare_mailitem"))
+def test_outlook_bare_type_waits_for_the_reference_list(case_id: str) -> None:
+    case = _CASES_BY_ID[case_id]
+    assert case["expected"] == "rejected"
+    assert _error_codes(case) == []
+    assert _error_codes(case, ["stdole", "Office"]) == ["invalid-as-type-name"]
+
+
+@pytest.mark.parametrize("case_id", _each_host("ref_dim_bare_mailitem"))
+def test_outlook_bare_type_resolves_once_the_list_holds_outlook(case_id: str) -> None:
+    assert _error_codes(_CASES_BY_ID[case_id], ["stdole", "Office", "Outlook"]) == []
+
+
+@pytest.mark.parametrize("case_id", _each_host("xlref_bare_activeworkbook", _HOST_PREFIXES[1:]))
+def test_referenced_excel_global_binds_bare(case_id: str) -> None:
+    case = _CASES_BY_ID[case_id]
+    assert case["expected"] == "accepted"
+    assert _error_codes(case) == []
+
+
+@pytest.mark.parametrize("case_id", _each_host("noxlref_bare_activeworkbook", _HOST_PREFIXES[1:]))
+def test_unreferenced_excel_global_is_not_defined(case_id: str) -> None:
+    case = _CASES_BY_ID[case_id]
+    assert case["expected"] == "rejected"
+    assert _error_codes(case) == ["undeclared-variable"]
+
+
+def test_outlook_unreferenced_carries_the_fix_and_resolves_referenced() -> None:
+    def found(hosts: list[str]) -> list[Any]:
+        source = "Dim o As Outlook.Application\n"
+        opts = AnalyzeModuleOptions(host=hosts[0], referenced_hosts=hosts[1:])
+        return [d for d in analyze_module(source, opts) if d.code == "missing-library-reference"]
+
+    [missing] = found(["word"])
+    assert missing.data is not None and missing.data.add_library_reference is not None
+    assert missing.data.add_library_reference.library == "outlook"
+    assert found(["word", "outlook"]) == []
+
+
+def test_outlook_library_and_globals_in_the_merged_model() -> None:
+    assert host_token_for_libid("{00062FFF-0000-0000-C000-000000000046}#9.6#0#C:\\x.olb#Outlook") == "outlook"
+    model = host_object_model_for_tokens(["excel", "outlook"])
+    assert model is not None
+    assert list(model.get("referencedGlobalTypes") or []) == ["Outlook.Application"]
+    # The host's own Global wins a name both have; Outlook's Session binds after it.
+    application = resolve_host_global_member("Application", model)
+    assert application is not None and "Outlook" not in json.dumps(application)
+    assert resolve_host_global_member("Session", model) is not None
+    names = {member["name"] for member in get_host_global_members(model)}
+    assert {"Session", "CreateItem", "GetNamespace", "ActiveWorkbook"} <= names
+    excel_only = host_object_model_for_tokens(["excel", "word"])
+    assert excel_only is not None and resolve_host_global_member("Session", excel_only) is None
