@@ -131,6 +131,10 @@ class AnalyzeModuleOptions:
     # or document module, Private ones included, bare and as `module.name` (XLIDE
     # issue #243). When omitted, Application.Run is not judged.
     project_runnable_procedures: AbstractSet[str] | None = None
+    # Every module of the project, lowercased (ProjectIndex.module_names): a module's
+    # name qualifies a type it declares, `Module1.Pair`. When omitted, an
+    # unreferenced qualifier is not judged (XLIDE issue #1413).
+    project_module_names: AbstractSet[str] | None = None
     # Lowercased names some module of the project may write (from
     # ProjectIndex.written_names). A Public variable none writes keeps its initial
     # value, which the runtime rules use (XLIDE issue #241). When omitted, a Public
@@ -177,6 +181,10 @@ class AnalyzeModuleOptions:
     # them (`Scripting`, `MSForms`). None where the project's references are not
     # known, which keeps the rules that read it silent.
     referenced_libraries: Sequence[str] | None = None
+    # The project's own name as its dir stream records it (`VBAProject`, `Project`,
+    # an Access database's), which qualifies its types the way a library's name
+    # does. Read with the references, and None with them.
+    project_name: str | None = None
     conditional_compilation: ConditionalCompilationEnvironment | None = None
     parsed_module: ModuleNode | None = None
 

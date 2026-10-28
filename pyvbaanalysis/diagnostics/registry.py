@@ -142,7 +142,11 @@ from .rules.local_declaration_order import check_local_declaration_order
 from .rules.locked_arrays import check_locked_arrays
 from .rules.long_long_narrowing import check_long_long_narrowing
 from .rules.malformed_lines import check_malformed_lines
-from .rules.missing_reference import check_missing_library_reference, check_missing_scripting_reference
+from .rules.missing_reference import (
+    ProjectNames,
+    check_missing_library_reference,
+    check_missing_scripting_reference,
+)
 from .rules.module_kind import (
     check_declare_ptr_safe_for_win64,
     check_event_declaration_module_kind,
@@ -325,6 +329,11 @@ def _missing_library_reference(ctx: RulePassContext, push: PushFn) -> None:
         },
         ctx.symbols,
         ctx.opts.project_visible_symbols,
+        ProjectNames(
+            referenced_libraries=ctx.opts.referenced_libraries,
+            project_name=ctx.opts.project_name,
+            project_module_names=ctx.opts.project_module_names,
+        ),
     )
 
 

@@ -248,6 +248,7 @@ def _read_access_project(
     libids = _reference_libids(info.references) if info is not None else None
     if metadata is not None and info is not None:
         metadata.referenced_libraries = _reference_library_names(info.references)
+        metadata.project_name = _project_name(info.project_name, metadata.referenced_libraries)
     return modules, libids, _project_constants(dir_raw)
 
 
@@ -376,9 +377,19 @@ def _reference_library_names(references: Iterable[Any]) -> list[str] | None:
     return names
 
 
+def _project_name(name: object, referenced_libraries: list[str] | None) -> str | None:
+    """The project's own name as the dir stream records it (`VBAProject`,
+    `Project`, an Access database's), which qualifies its types the way a
+    library's name does. Read with the references, and None with them."""
+    if referenced_libraries is None or not isinstance(name, str) or not name:
+        return None
+    return name
+
+
 @dataclass
 class _OfficeMetadata:
     referenced_libraries: list[str] | None = None
+    project_name: str | None = None
     workbook_sheets: list[WorkbookSheetInfo] | None = None
 
 
@@ -422,6 +433,7 @@ def _read_office_project(
             libids = _reference_libids(project.references)
             if metadata is not None:
                 metadata.referenced_libraries = _reference_library_names(project.references)
+                metadata.project_name = _project_name(project.name, metadata.referenced_libraries)
                 if suffix in EXCEL_EXTENSIONS:
                     metadata.workbook_sheets = workbook_sheets(container, suffix)
             constants = _project_constants(getattr(project, "dir_raw", None))
@@ -452,7 +464,8 @@ class OfficeProject:
     not been shown to lack any library.
 
     ``referenced_libraries`` contains the names of all referenced libraries;
-    ``workbook_sheets`` contains saved Excel sheet names and kinds in tab order.
+    ``workbook_sheets`` contains saved Excel sheet names and kinds in tab order;
+    ``project_name`` is the project's own name as its dir stream records it.
     Each is None when that metadata could not be read.
 
     ``project_constants`` are the project's Conditional Compilation Arguments
@@ -465,6 +478,7 @@ class OfficeProject:
     project_constants: Mapping[str, ConditionalValue] = field(default_factory=dict)
     referenced_libraries: list[str] | None = None
     workbook_sheets: list[WorkbookSheetInfo] | None = None
+    project_name: str | None = None
 
     def conditional_compilation(
         self, caller: ConditionalCompilationEnvironment | None = None
@@ -500,6 +514,7 @@ def read_office_project(path: str | Path) -> OfficeProject:
         project_constants=constants,
         referenced_libraries=metadata.referenced_libraries,
         workbook_sheets=metadata.workbook_sheets,
+        project_name=metadata.project_name,
     )
 
 
@@ -548,5 +563,6 @@ def analyze_office_file(
         # that references Excel is analyzed against both.
         referenced_hosts=project.referenced_hosts,
         referenced_libraries=project.referenced_libraries,
+        project_name=project.project_name,
         workbook_sheets=project.workbook_sheets,
     )

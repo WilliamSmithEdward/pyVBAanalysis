@@ -154,7 +154,7 @@ def _each_host(name: str, prefixes: tuple[str, ...] = _HOST_PREFIXES) -> list[st
     return [f"outlook_{prefix}{name}_compile" for prefix in prefixes]
 
 
-def _error_codes(case: dict[str, Any], referenced_libraries: list[str] | None = None) -> list[str]:
+def _error_codes(case: dict[str, Any], referenced_libraries: list[str] | None = None, project_name: str | None = None) -> list[str]:
     """Each error code, analyzed as the extension analyzes the case's host and
     references. The port reports a missing reference only where the reference list
     is known, so a case without references is given a known-empty list."""
@@ -167,7 +167,7 @@ def _error_codes(case: dict[str, Any], referenced_libraries: list[str] | None = 
         opts = analyze_module_options_for(
             index, module["name"], _KIND.get(module["type"], ModuleSymbolKind.STANDARD),
             host=case.get("host") or "excel", referenced_hosts=tokens,
-            referenced_libraries=referenced_libraries,
+            referenced_libraries=referenced_libraries, project_name=project_name,
             conditional_compilation=ConditionalCompilationEnvironment(project_constants={}),
         )
         out.extend(d.code for d in analyze_module(module["source"], opts) if d.severity is DiagnosticSeverity.ERROR)
@@ -265,3 +265,126 @@ def test_outlook_library_and_globals_in_the_merged_model() -> None:
     assert {"Session", "CreateItem", "GetNamespace", "ActiveWorkbook"} <= names
     excel_only = host_object_model_for_tokens(["excel", "word"])
     assert excel_only is not None and resolve_host_global_member("Session", excel_only) is None
+
+
+# 728291c6: a type qualified by a library the project does not reference
+# (unreferencedQualifiers1413.test.ts).
+
+# The names the cases' references go by, as the dir stream records them (measured).
+_LIBRARY_NAMES = {
+    "{420B2830-E718-11CF-893D-00A0C9054228}": "Scripting",
+    "{3F4DACA7-160D-11D2-A8E9-00104B365C9F}": "VBScript_RegExp_55",
+    "{B691E011-1797-432E-907A-4D8C69339129}": "ADODB",
+    "{F5078F18-C551-11D3-89B9-0000F81FE221}": "MSXML2",
+    "{0002E157-0000-0000-C000-000000000046}": "VBIDE",
+    "{662901FC-6951-4854-9EB2-D9A2570F2B2E}": "WinHttp",
+    "{50A7E9B0-70EF-11D1-B75A-00A0C90564FE}": "Shell32",
+    "{00062FFF-0000-0000-C000-000000000046}": "Outlook",
+}
+# What a new file of each host records before any reference is added, and its
+# project's name (measured).
+_DEFAULTS = {
+    "excel": ["stdole", "Office"],
+    "word": ["stdole", "Normal", "Office"],
+    "powerpoint": ["stdole", "Office"],
+    "access": ["stdole", "DAO"],
+}
+_PROJECT_NAMES = {"excel": "VBAProject", "word": "Project", "powerpoint": "VBAProject", "access": "Database1"}
+
+
+def _codes_1413(case: dict[str, Any], known: bool = True) -> list[str]:
+    """Each error code, with the project's references and name known, as the
+    extension has them."""
+    host = case.get("host") or "excel"
+    if not known:
+        return _error_codes(case)
+    libraries = [*_DEFAULTS[host], *(_LIBRARY_NAMES[ref["guid"]] for ref in case.get("references", []))]
+    return _error_codes(case, libraries, _PROJECT_NAMES[host])
+
+
+def _each_host_1413(names: list[str]) -> list[str]:
+    return [f"issue1413_{prefix}{name}_compile" for name in names for prefix in _HOST_PREFIXES]
+
+
+_LIBRARIES_1413 = ["scripting", "regexp", "adodb", "msxml", "vbide", "winhttp", "shell", "outlook"]
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    _each_host_1413([
+        *(f"noref_{name}" for name in _LIBRARIES_1413), "unknown_qualifier", "unknown_new",
+        "unknown_module_level", "unknown_parameter", "unknown_implements", "unknown_declare",
+    ]),
+)
+def test_unreferenced_qualifier_is_user_defined_type_not_defined(case_id: str) -> None:
+    case = _CASES_BY_ID[case_id]
+    assert case["expected"] == "rejected"
+    assert _codes_1413(case) == ["missing-library-reference"]
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    _each_host_1413([
+        *(f"ref_{name}" for name in _LIBRARIES_1413), "ref_lowercase_qualifier", "ref_declare_outlook",
+        "default_vba", "default_stdole", "module_type", "other_module_class", "string_holds_qualifier",
+    ]),
+)
+def test_referenced_qualifier_compiles_and_nothing_reports_it(case_id: str) -> None:
+    case = _CASES_BY_ID[case_id]
+    assert case["expected"] == "accepted"
+    assert _codes_1413(case) == []
+
+
+@pytest.mark.parametrize("case_id", _each_host_1413(["noref_adodb", "unknown_qualifier", "unknown_implements"]))
+def test_unreferenced_qualifier_waits_for_the_references(case_id: str) -> None:
+    assert _codes_1413(_CASES_BY_ID[case_id], known=False) == []
+
+
+@pytest.mark.parametrize(
+    "case_id, expected",
+    [
+        ("issue1413_default_office_compile", "accepted"),
+        ("issue1413_word_default_office_compile", "accepted"),
+        ("issue1413_powerpoint_default_office_compile", "accepted"),
+        ("issue1413_access_default_office_compile", "rejected"),
+        # The project's own name qualifies its types, and only it.
+        ("issue1413_project_vbaproject_class_compile", "accepted"),
+        ("issue1413_word_project_vbaproject_class_compile", "rejected"),
+        ("issue1413_powerpoint_project_vbaproject_class_compile", "accepted"),
+        ("issue1413_access_project_vbaproject_class_compile", "rejected"),
+        ("issue1413_project_project_class_compile", "rejected"),
+        ("issue1413_word_project_project_class_compile", "accepted"),
+        ("issue1413_powerpoint_project_project_class_compile", "rejected"),
+        ("issue1413_access_project_project_class_compile", "rejected"),
+    ],
+)
+def test_default_references_and_project_name_qualify(case_id: str, expected: str) -> None:
+    case = _CASES_BY_ID[case_id]
+    assert case["expected"] == expected
+    assert _codes_1413(case) == ([] if expected == "accepted" else ["missing-library-reference"])
+
+
+def test_unreferenced_qualifier_message_span_and_once_per_library() -> None:
+    source = "Option Explicit\r\nPrivate a As Nowhere.Thing\r\nPrivate b As Nowhere.Other\r\nPrivate c As Elsewhere.Thing\r\n"
+    index = ProjectIndex(ProjectIndexOptions(conditional_compilation=ConditionalCompilationEnvironment(project_constants={})))
+    index.set_module(ModuleInput("Module1", ModuleSymbolKind.STANDARD, source))
+    opts = analyze_module_options_for(
+        index, "Module1", ModuleSymbolKind.STANDARD,
+        referenced_libraries=["stdole", "Office"], project_name="VBAProject",
+    )
+    found = [d for d in analyze_module(source, opts) if d.code == "missing-library-reference"]
+    assert [source[d.span.start:d.span.end] for d in found] == ["Nowhere.Thing", "Elsewhere.Thing"]
+    assert "'Nowhere' is no library this project references and none of its modules" in found[0].message
+    assert "User-defined type not defined" in found[0].message
+    assert all(d.data is None or d.data.add_library_reference is None for d in found)
+
+
+def test_missing_scripting_reference_is_reported_once() -> None:
+    assert _codes_1413(_CASES_BY_ID["issue1413_noref_scripting_compile"]) == ["missing-library-reference"]
+
+
+def test_qualified_runtime_function_name_is_another_librarys_type() -> None:
+    src = "Option Explicit\nSub Main()\n    Dim s As Shell32.Shell\n    Dim v As VBA.Shell\n    Dim w As Shell\nEnd Sub\n"
+    found = _codes(src, "invalid-as-type-name")
+    # VBA.Shell and the bare Shell are the runtime function; Shell32.Shell is not.
+    assert [d.span.start for d in found] == [src.index("VBA.Shell") + 4, src.rindex("Shell")]
