@@ -170,8 +170,11 @@ def _reserved_member_type(words: list[str]) -> str:
 
 
 def test_reserved_word_type_member_with_as_clause_is_accepted() -> None:
-    findings = analyze_module(_reserved_member_type(_RESERVED_MEMBER_WORDS))
-    for code in ("invalid-declaration-name", "unexpected-declaration-token", "type-member-without-type"):
+    findings = analyze_module(_reserved_member_type(_RESERVED_MEMBER_WORDS + ["As", "Implements"]))
+    for code in (
+        "invalid-declaration-name", "unexpected-declaration-token", "invalid-as-type-name",
+        "type-member-without-type",
+    ):
         assert [d for d in findings if d.code == code] == []
 
 
@@ -188,3 +191,42 @@ def test_reserved_array_suffixed_and_incomplete_type_members_still_rejected() ->
     enum_source = "Private Enum Mode\n    Next\n    Loop = 2\nEnd Enum\n"
     hits = _hits(enum_source, "invalid-declaration-name")
     assert [enum_source[d.span.start:d.span.end] for d in hits] == ["Next", "Loop"]
+
+
+# -- 31ff586f, 90a0641f: Type members named As or Implements -----------------
+
+_AS_E = "As" + chr(0xE9)
+_AS_BETA = "As" + chr(0x3B2) + "eta"
+_IMPLEMENTS_SOURCE = (
+    "Implements As_Foo\nImplements Asx\n"
+    f"Implements {_AS_E}\nImplements {_AS_BETA}\n"
+    "Private Type Rec\n    As As Long\n    Implements As Long\nEnd Type\n"
+)
+
+
+@pytest.mark.parametrize("line, name", [
+    ("Implements As_Foo", "As_Foo"),
+    ("  implements Asx", "Asx"),
+    (f"Implements {_AS_E}", _AS_E),
+    (f"Implements {_AS_BETA}", _AS_BETA),
+    ("Implements Lib.IShape", "Lib.IShape"),
+    ("Implements Lib.", "Lib"),
+    ("Implements As Long", None),
+    ("Implements As", None),
+    ("Implements AS", None),
+    ("Implements 1x", None),
+])
+def test_implements_statement_name(line: str, name: str | None) -> None:
+    from pyvbaanalysis.lexer.token_helpers import implements_statement_name
+
+    assert implements_statement_name(line) == name
+
+
+def test_type_members_named_as_and_implements_implement_nothing() -> None:
+    from pyvbaanalysis.symbols import ProjectIndex
+
+    index = ProjectIndex()
+    index.set_module(ModuleInput("Widget", ModuleSymbolKind.CLASS, _IMPLEMENTS_SOURCE))
+    assert index.implemented_interface_names() == frozenset(
+        name.lower() for name in ("As_Foo", "Asx", _AS_E, _AS_BETA)
+    )

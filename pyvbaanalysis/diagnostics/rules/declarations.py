@@ -34,6 +34,7 @@ from ...conditional import (
 from ...host.library_type_names import library_type_names
 from ...js_compat import JS_WHITESPACE, js_trim
 from ...lexer.keyword_table import OPERATOR_IDENTIFIERS, is_reserved_identifier
+from ...lexer.token_helpers import implements_statement_name
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize
 from ...parser.fixed_length_string import parse_fixed_length_string_type
@@ -746,12 +747,6 @@ def _type_names_after_typeof_is(source: str, span: Span) -> list[_TypeNameRef]:
     return out
 
 
-_IMPLEMENTS_RE = re.compile(
-    r"^\s*Implements\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\b",
-    re.IGNORECASE,
-)
-
-
 def _collect_implements_refs(source: str, scan_end: int) -> list[_TypeNameRef]:
     out: list[_TypeNameRef] = []
     line_start = 0
@@ -764,10 +759,9 @@ def _collect_implements_refs(source: str, scan_end: int) -> list[_TypeNameRef]:
         if line.endswith("\r"):
             line = line[:-1]
         code = re.sub(r"'.*$", "", line)
-        match = _IMPLEMENTS_RE.match(code)
-        if match:
-            raw_name = match.group(1)
-            column = line.find(raw_name, match.start())
+        raw_name = implements_statement_name(code)
+        if raw_name is not None:
+            column = line.find(raw_name)
             dot = raw_name.find(".")
             if column >= 0 and dot > 0:
                 out.append(
@@ -823,7 +817,9 @@ def _collect_type_name_references(source: str, mod: ModuleNode) -> list[_TypeNam
         elif isinstance(member, TypeNode):
             for field_node in member.fields:
                 if field_node.as_type:
-                    ref = _type_name_after_as(source, field_node.span)
+                    # Scan after the name: a member may be named As (`As As Long`).
+                    start = field_node.name_span.end if field_node.name_span is not None else field_node.span.start
+                    ref = _type_name_after_as(source, Span(start, field_node.span.end))
                     if ref is not None:
                         out.append(ref)
         elif isinstance(member, ProcedureNode):
@@ -1240,7 +1236,9 @@ def check_unexpected_declaration_tokens(source: str, mod: ModuleNode, activity: 
             )
         elif isinstance(member, TypeNode):
             for field_node in member.fields:
-                inspect(field_node.span, False)
+                # Scan after the name: a member may be named As (`As As Long`).
+                start = field_node.name_span.end if field_node.name_span is not None else field_node.span.start
+                inspect(Span(start, field_node.span.end), False)
         elif isinstance(member, ProcedureNode):
             for param in member.params:
                 if _parameter_array_as_type_syntax_hit(source, param) is None:

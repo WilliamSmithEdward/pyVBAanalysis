@@ -21,7 +21,7 @@ from ..constants.integer_constant_expression import (
     parse_vba_integer_literal,
     resolve_raw_integer_constants,
 )
-from ..lexer.token_helpers import identifier_words
+from ..lexer.token_helpers import identifier_words, implements_statement_name
 from ..lexer.token_kinds import TokenKind
 from ..lexer.tokenize import tokenize_cached
 from ..parser.nodes import Span
@@ -389,19 +389,15 @@ def _merge_member_attributes(
     return out
 
 
-_IMPLEMENTS_RE = re.compile(
-    r"^\s*Implements\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\b", re.IGNORECASE
-)
-
-
 def _module_implements(source: str) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for line in re.split(r"\r?\n", source):
-        match = _IMPLEMENTS_RE.match(line)
-        if match is None:
+        # Any letter names an interface (a Cyrillic or Thai one too), and
+        # `Implements As Long` is a Type member named Implements, not a statement.
+        name = implements_statement_name(line)
+        if name is None:
             continue
-        name = match.group(1)
         lower = name.lower()
         if lower not in seen:
             seen.add(lower)
