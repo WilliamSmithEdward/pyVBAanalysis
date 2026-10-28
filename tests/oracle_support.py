@@ -68,6 +68,13 @@ _RAW_MODULES: dict[str, list[dict[str, Any]]] = {
     if "modules" in raw
 }
 
+# The host each case was measured in; a case that names none ran in Excel.
+_HOSTS: dict[str, str] = {
+    raw["id"]: raw["host"]
+    for raw in json.loads((DATA_DIR / "vbe_oracle_cases.json").read_text(encoding="utf-8"))["cases"]
+    if raw.get("host")
+}
+
 _KIND = {
     "standard": ModuleSymbolKind.STANDARD,
     "class": ModuleSymbolKind.CLASS,
@@ -110,7 +117,7 @@ def case_codes(case: OracleCase) -> frozenset[str]:
     out: set[str] = set()
     for module in case.modules:
         opts = analyze_module_options_for(
-            index, module.name, _kind(module.module_type), host="excel",
+            index, module.name, _kind(module.module_type), host=_HOSTS.get(case.id, "excel"),
             referenced_hosts=_REFERENCED_HOSTS.get(case.id, []),
             conditional_compilation=ConditionalCompilationEnvironment(project_constants={}),
         )
