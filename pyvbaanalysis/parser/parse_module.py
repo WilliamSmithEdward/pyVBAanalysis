@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from ..lexer.token_helpers import (
+    colon_directive_starts,
     match_paren_from,
     rem_block_directive_starts,
     split_top_level_token_groups,
@@ -229,6 +230,8 @@ class _Parser:
     # The #If, #ElseIf, #Else and #End If lines holding a Rem (XLIDE issue
     # #1321), found once.
     _rem_directive_starts: frozenset[int] | None
+    # The directive lines a statement colon follows (XLIDE issue #1323), found once.
+    _colon_directive_starts: frozenset[int] | None
 
     __slots__ = (
         "_source",
@@ -238,6 +241,7 @@ class _Parser:
         "_pending_next",
         "_directive_chains",
         "_rem_directive_starts",
+        "_colon_directive_starts",
     )
 
     def __init__(self, source: str, tokens: Sequence[VbaToken]) -> None:
@@ -248,6 +252,7 @@ class _Parser:
         self._pending_next = None
         self._directive_chains = []
         self._rem_directive_starts = None
+        self._colon_directive_starts = None
 
     def parse(self) -> ModuleNode:
         members: list[ModuleMember] = []
@@ -478,10 +483,16 @@ class _Parser:
     ) -> ConditionalDirectiveNode:
         # An #If, #ElseIf, #Else or #End If line holding a Rem is no directive
         # to the VBE (XLIDE issue #1321): it opens, continues and closes nothing.
+        # So is any directive line a statement colon follows, a #Const too,
+        # which then defines nothing even in a skipped arm (XLIDE issue #1323).
         if self._rem_directive_starts is None:
             self._rem_directive_starts = rem_block_directive_starts(self._source)
+        if self._colon_directive_starts is None:
+            self._colon_directive_starts = colon_directive_starts(self._source)
         directive_word = (
-            "" if stmt.start in self._rem_directive_starts else token_word(_at(tokens, 1))
+            ""
+            if stmt.start in self._rem_directive_starts or stmt.start in self._colon_directive_starts
+            else token_word(_at(tokens, 1))
         )
         span = Span(stmt.start, stmt.end)
         if directive_word == "const":

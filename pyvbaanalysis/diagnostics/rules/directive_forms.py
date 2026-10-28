@@ -22,7 +22,12 @@ from ...conditional.conditional_compilation import (
     ConditionalCompilationEnvironment,
     null_condition_directives,
 )
-from ...lexer.token_helpers import first_token_at_or_after
+from ...lexer.token_helpers import (
+    colon_directive_starts,
+    directive_colon,
+    first_token_at_or_after,
+    token_word,
+)
 from ...lexer.token_kinds import TokenKind
 from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import (
@@ -40,25 +45,15 @@ from ..context import PushFn
 _LINE_TERMINATOR_RE = re.compile(r"[\r\n]")
 
 
-def _comment_tail_compiled(
-    directive: ConditionalDirectiveNode, activity: ConditionalActivityTracker | None
-) -> bool:
-    """Whether the VBE reads a comment after a directive's colon, and so
-    refuses it (XLIDE issue #1321, measured in Excel 16.0): always after #If
-    and #End If, even inside a skipped arm; after #Else or #ElseIf only when the
-    arm before it is compiled; after #Const only where the #Const is compiled."""
-    kind = directive.directive_kind
-    if kind is ConditionalDirectiveKind.IF or kind is ConditionalDirectiveKind.END_IF:
-        return True
-    if kind in (
-        ConditionalDirectiveKind.ELSE,
-        ConditionalDirectiveKind.ELSE_IF,
-        ConditionalDirectiveKind.CONST,
-    ):
-        # At the directive's start the tracker answers for the code before it.
-        start = directive.span.start
-        return not (activity is not None and activity.is_inactive(Span(start, start)))
-    return False
+# What a directive line a colon follows fails to do, by its keyword (XLIDE issue #1323).
+_COLON_DIRECTIVE_EFFECT: dict[str, str] = {
+    "if": "opens no #If block, so the #Else, #ElseIf or #End If after it has no #If",
+    "elseif": "starts no new arm: it belongs to the arm above it",
+    "else": "starts no new arm: it belongs to the arm above it",
+    "end": "closes no #If block",
+    "endif": "closes no #If block",
+    "const": "defines no constant",
+}
 
 
 def check_directive_forms(
@@ -95,46 +90,39 @@ def check_directive_forms(
                 )
             else:
                 defined[lower] = directive
-    # A directive line that a colon continues: the tokens after the colon on
-    # the directive's own physical line.
-    tokens = tokenize_cached(source)
-    for directive in directives:
-        line_end = _line_end_at_or_after(source, directive.span.end)
-        colon = -1
-        for i in range(first_token_at_or_after(tokens, directive.span.end), len(tokens)):
-            tok = tokens[i]
-            if tok.start >= line_end:
-                break
-            if tok.kind is TokenKind.COLON:
-                colon = i
-                break
-        if colon < 0:
-            continue
-        following = tokens[colon + 1] if colon + 1 < len(tokens) else None
-        if (
-            following is not None
-            and following.kind is not TokenKind.NEWLINE
-            and following.kind is not TokenKind.COMMENT
-            and following.start < line_end
-        ):
-            push(
-                "directiveTrailingStatement",
-                "A compiler directive takes the whole line: nothing may follow the ':' after it. "
-                'This is a VBE compile error (the VBE reports "An # ElseIf, # Else, or # EndIf '
-                'must be preceded by an # If clause").',
-                Span(following.start, line_end),
+    # A directive line a statement colon follows is no directive: the VBE
+    # reads the whole line as code, refused where it is compiled and skipped
+    # with a skipped arm (XLIDE issue #1323). The parser reads the same lines.
+    starts = colon_directive_starts(source)
+    if len(starts) > 0:
+        tokens = tokenize_cached(source)
+        # Upstream's Set iterates in insertion order, which is source order.
+        for start in sorted(starts):
+            if activity is not None and activity.is_inactive(Span(start, start)):
+                continue
+            hash_index = first_token_at_or_after(tokens, start)
+            colon = directive_colon(tokens, hash_index)
+            if colon is None:
+                continue
+            keyword = token_word(tokens[hash_index + 1] if hash_index + 1 < len(tokens) else None)
+            effect = _COLON_DIRECTIVE_EFFECT.get(keyword, _COLON_DIRECTIVE_EFFECT["if"])
+            # What follows the colon, or the colon itself when nothing does.
+            line_end = _line_end_at_or_after(source, colon.start)
+            after_index = tokens.index(colon, hash_index) + 1
+            after = tokens[after_index] if after_index < len(tokens) else None
+            from_offset = (
+                after.start
+                if after is not None
+                and after.kind is not TokenKind.NEWLINE
+                and after.start < line_end
+                else colon.start
             )
-        elif (
-            following is not None
-            and following.kind is TokenKind.COMMENT
-            and following.start < line_end
-            and _comment_tail_compiled(directive, activity)
-        ):
             push(
                 "directiveTrailingStatement",
-                "A comment may not follow the ':' after a compiler directive. Drop the ':' to "
-                "keep the comment. This is a VBE compile error.",
-                Span(following.start, line_end),
+                f"A ':' after a compiler directive makes the whole line no directive, so it "
+                f"{effect}. A directive takes its line alone: drop the ':', and start any "
+                "comment with '. This is a VBE compile error.",
+                Span(from_offset, colon.end if from_offset == colon.start else line_end),
             )
     for null_directive in null_condition_directives(mod, conditional_compilation):
         push(

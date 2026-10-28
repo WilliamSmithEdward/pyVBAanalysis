@@ -433,3 +433,44 @@ def rem_block_directive_starts(source: str) -> frozenset[int]:
     )
     _rem_directive_starts_by_tokens.put(starts, tokens)
     return starts
+
+
+def directive_colon(tokens: Sequence[VbaToken], hash_index: int) -> VbaToken | None:
+    """The statement colon after the compiler directive whose `#` is
+    ``tokens[hash_index]``, on its own line."""
+    for i in range(hash_index + 1, len(tokens)):
+        tok = tokens[i]
+        if tok.kind is TokenKind.COLON:
+            return tok
+        if tok.kind is TokenKind.NEWLINE or tok.kind is TokenKind.COMMENT:
+            return None
+    return None
+
+
+_COLON_DIRECTIVE_WORDS = _BLOCK_DIRECTIVE_WORDS | {"const"}
+_colon_directive_starts_by_tokens = IdentityLru()
+
+
+def colon_directive_starts(source: str) -> frozenset[int]:
+    """The start offsets of the `#` of every #If, #ElseIf, #Else, #End If or
+    #Const line a statement colon follows, with nothing, a comment or code
+    after it. The VBE does not read such a line as a directive at all: it
+    opens, divides, closes and defines nothing, is skipped with a skipped arm,
+    and is an error where it is compiled (XLIDE issue #1323, measured in Excel
+    16.0). As for a Rem, only a `#` that starts its physical line counts."""
+    if ":" not in source:
+        return _NO_STARTS
+    tokens = tokenize_cached(source)
+    cached: frozenset[int] | None = _colon_directive_starts_by_tokens.get(tokens)
+    if cached is not None:
+        return cached
+    starts = frozenset(
+        tokens[i].start
+        for i in range(len(tokens))
+        if tokens[i].kind is TokenKind.DIRECTIVE
+        and (i == 0 or tokens[i - 1].kind is TokenKind.NEWLINE)
+        and token_word(tokens[i + 1] if i + 1 < len(tokens) else None) in _COLON_DIRECTIVE_WORDS
+        and directive_colon(tokens, i) is not None
+    )
+    _colon_directive_starts_by_tokens.put(starts, tokens)
+    return starts
