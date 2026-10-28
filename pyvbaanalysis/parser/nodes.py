@@ -218,6 +218,8 @@ class MemberAccessExpr(Expr):
     member: str
     member_span: Span
     access_kind: MemberAccessKind | None = None
+    # Type-declaration character glued to the member (`VBA.Mid$`): $, % or @.
+    type_suffix: str | None = None
 
 
 @dataclass(slots=True)

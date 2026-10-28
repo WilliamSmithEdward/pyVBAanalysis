@@ -95,6 +95,7 @@ from ..const_expr import (
     collect_module_literal_integer_constants,
     fold_integer_expression_tokens,
 )
+from ...runtime.vba_value_results import TYPEOF_KEYWORD_OPERANDS
 from ..context import PushFn, statement_tokens
 from ..function_results import FunctionResult, function_integer_result, known_function_results
 from ..known_locals import KnownLocalValue
@@ -2063,6 +2064,37 @@ _TYPEOF_VALUE_TYPES = frozenset(
 )
 
 
+_TYPEOF_LITERAL_KINDS = frozenset(
+    {TokenKind.INTEGER_LITERAL, TokenKind.FLOAT_LITERAL, TokenKind.STRING_LITERAL, TokenKind.DATE_LITERAL}
+)
+_TYPEOF_LITERAL_WORDS = frozenset({"true", "false", "nothing", "null", "empty"})
+
+
+def _type_of_value_operand(toks: Sequence[VbaToken], at: int) -> tuple[int, str] | None:
+    """`TypeOf 1 Is Collection`, `TypeOf -1`, `TypeOf Nothing`, and a bare
+    keyword-named function, `TypeOf CDbl(1)` or `TypeOf Len("x")`: each is a
+    Syntax error (XLIDE issue #1416, measured in Excel, Word, PowerPoint and
+    Access 16.0). `TypeOf VBA.CDbl(1)` parses, and is a Type mismatch instead.
+    Returns (index of the operand's last token, what it is)."""
+    tok = _at(toks, at)
+    if tok is None:
+        return None
+    if tok.kind in _TYPEOF_LITERAL_KINDS or token_text(tok) in _TYPEOF_LITERAL_WORDS:
+        return (at, f"{tok.raw_text} is a literal")
+    if tok.raw_text in ("-", "+"):
+        return (at, f"'{tok.raw_text}' starts a value")
+    following = _at(toks, at + 1)
+    suffix = 1 if following is not None and following.raw_text == "$" and following.start == tok.end else 0
+    name = f"{token_text(tok)}{'$' if suffix else ''}"
+    if tok.kind is TokenKind.KEYWORD and name in TYPEOF_KEYWORD_OPERANDS:
+        return (
+            at + suffix,
+            f"{tok.raw_text}{'$' if suffix else ''} is one of VBA's own functions, which the VBE reads as a "
+            "keyword here",
+        )
+    return None
+
+
 def _malformed_type_of(toks: Sequence[VbaToken], offset: int) -> tuple[Span, str] | None:
     """`TypeOf (o) Is Collection`, with its operand in parentheses, and
     `TypeOf o Is Long`, testing for a value type: both are Syntax errors
@@ -2076,6 +2108,13 @@ def _malformed_type_of(toks: Sequence[VbaToken], offset: int) -> tuple[Span, str
             return (
                 Span(offset + following.start, offset + following.end),
                 "TypeOf takes its operand without parentheses: 'TypeOf o Is Collection'.",
+            )
+        operand = _type_of_value_operand(toks, i + 1)
+        if operand is not None:
+            assert following is not None
+            return (
+                Span(offset + following.start, offset + toks[operand[0]].end),
+                f"TypeOf tests an object, and {operand[1]}.",
             )
         depth = 0
         for j in range(i + 1, len(toks)):

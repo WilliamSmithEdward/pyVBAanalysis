@@ -25,6 +25,7 @@ from __future__ import annotations
 import dataclasses
 import re
 from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from typing import cast
 
 from ...completion.member_access import (
@@ -57,16 +58,24 @@ from ...parser.nodes import (
     Span,
     StatementNode,
     TypeOfIsExpr,
+    UnaryExpr,
     WhileBlockNode,
     iter_body_nodes,
 )
 from ...parser.parse_expression import parse_expression
+from ...runtime.vba_value_results import (
+    ARGUMENT_TYPED_FUNCTIONS,
+    BARE_VALUE_RESULT_FUNCTIONS,
+    TYPEOF_KEYWORD_OPERANDS,
+    VALUE_RESULT_FUNCTIONS,
+)
 from ...identity_cache import IdentityLru
 from ...symbols.symbol_model import (
     ModuleSymbolKind,
     ModuleSymbols,
     VbaProcedureSignature,
     VbaSymbol,
+    VbaSymbolKind,
     qualified_procedure_key,
 )
 from ...types.type_inference import SCALAR_OBJECT_ASSIGNMENT_REASON, type_environment_for
@@ -141,6 +150,8 @@ def _non_object_operand(
             article = "an" if element[0].lower() in "aeiou" else "a"
             return (expr.span, f"an element of '{expr.callee.name}' is {article} {element}")
     result = call_result(expr) if call_result is not None else None
+    if result is not None and result[0] == "value":
+        return (expr.span, f"VBA's '{result[1]}' returns a value")
     if result is not None and is_known_scalar_type(_TRAILING_ARRAY_RE.sub("", result[0]).strip().lower()):
         return (expr.span, f"'{result[1]}' returns {result[0]}")
     if isinstance(expr, LiteralExpr):
@@ -196,6 +207,116 @@ def _call_result_type(
     return None
 
 
+def _enum_type_names(symbols: ModuleSymbols, project_visible_symbols: Sequence[VbaSymbol] | None) -> frozenset[str]:
+    """The Enums this module and the project make visible, lowercase. A name
+    another kind of symbol of the project also takes is left out."""
+    enums: set[str] = set()
+    others: set[str] = set()
+    for sym in [*(symbols.root.children or []), *(project_visible_symbols or [])]:
+        (enums if sym.kind is VbaSymbolKind.ENUM else others).add(sym.name.lower())
+    return frozenset(enums - others)
+
+
+def _enum_operand(operand: ExprNode, env: dict[str, str], enums: AbstractSet[str]) -> tuple[Span, str] | None:
+    """`n Is Nothing` and `TypeOf n Is Collection` with n declared As an Enum,
+    of this module or another: Type mismatch (XLIDE issue #1416, measured in
+    Excel, Word, PowerPoint and Access 16.0)."""
+    expr = operand
+    while isinstance(expr, ParenExpr):
+        expr = expr.inner
+    if not isinstance(expr, IdentifierExpr):
+        return None
+    declared = env.get(expr.name.lower())
+    if declared and js_trim(declared).lower() in enums:
+        return (expr.span, f"'{expr.name}' is declared As {declared}, an Enum")
+    return None
+
+
+def _runtime_value_result(
+    expr: ExprNode,
+    form: str,
+    env: dict[str, str],
+    source_names: SourceNameScope,
+) -> tuple[str, str] | None:
+    """A call to one of VBA's own functions whose result is a value under `Is`
+    (form "is") or `TypeOf` (form "typeof"), vba_value_results.py, XLIDE issue
+    #1416: `CDbl(1)`, `VBA.Mid$(s, 1)`, `Erl`. None when a source name takes the
+    function's name or `VBA`'s, and for a bare keyword-named TypeOf operand,
+    which is a Syntax error reported in expressions.py. The result's type is
+    "value"."""
+    target = expr.callee if isinstance(expr, IndexExpr) else expr
+    args = expr.args if isinstance(expr, IndexExpr) else []
+    if isinstance(target, IdentifierExpr):
+        if target.name.lower() in env or bare_callable_source_shadowed(target.name, source_names):
+            return None
+        display = target.name
+        qualified = False
+        if target.type_suffix and target.type_suffix != "$":
+            return None
+        name = target.name + (target.type_suffix or "")
+    elif (
+        isinstance(target, MemberAccessExpr)
+        and target.access_kind is not MemberAccessKind.BANG
+        and isinstance(target.object_, IdentifierExpr)
+        and target.object_.name.lower() == "vba"
+        and "vba" not in env
+        and "vba" not in source_names.callable_shadows
+    ):
+        if target.type_suffix and target.type_suffix != "$":
+            return None
+        name = f"{target.member}{target.type_suffix or ''}"
+        display = f"VBA.{name}"
+        qualified = True
+    else:
+        return None
+    lower = name.lower()
+    if not qualified and form == "typeof" and lower in TYPEOF_KEYWORD_OPERANDS:
+        return None
+    value = (
+        lower in VALUE_RESULT_FUNCTIONS
+        or (not qualified and lower in BARE_VALUE_RESULT_FUNCTIONS)
+        or (
+            not qualified
+            and form == "is"
+            and lower in ARGUMENT_TYPED_FUNCTIONS
+            and len(args) > 0
+            and all(arg.value is not None and _provably_scalar(arg.value, env, source_names) for arg in args)
+        )
+    )
+    if not value:
+        return None
+    return ("value", f"{display}{'(...)' if args or isinstance(expr, IndexExpr) else ''}")
+
+
+# Arithmetic and `&`, which give a value when both sides are values.
+_SCALAR_OPERATORS = frozenset({"+", "-", "*", "/", "\\", "^", "Mod", "&"})
+
+
+def _provably_scalar(expr: ExprNode, env: dict[str, str], source_names: SourceNameScope) -> bool:
+    """An argument that is provably a value: a literal, a typed variable or
+    element, a value call, or arithmetic on those. Upstream recurses through the
+    operands; an explicit stack does the same here, every operand having to be
+    a value."""
+    pending = [expr]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ParenExpr):
+            pending.append(node.inner)
+            continue
+        if isinstance(node, UnaryExpr) and node.operator == "-":
+            pending.append(node.operand)
+            continue
+        if isinstance(node, BinaryExpr):
+            if node.operator not in _SCALAR_OPERATORS:
+                return False
+            pending.append(node.right)
+            pending.append(node.left)
+            continue
+        if _non_object_operand(node, env, lambda inner: _runtime_value_result(inner, "is", env, source_names)) is None:
+            return False
+    return True
+
+
 def check_is_operator_operands(
     symbols: ModuleSymbols,
     push: PushFn,
@@ -205,21 +326,41 @@ def check_is_operator_operands(
     """The `Is` operator requires object operands; a provably-scalar operand is an error."""
 
     module_signatures = callable_type_signatures_for(symbols, project_procedures)
+    enums: list[frozenset[str]] = []
+
+    def enum_names() -> frozenset[str]:
+        if not enums:
+            enums.append(_enum_type_names(symbols, project_visible_symbols))
+        return enums[0]
 
     def factory(member: ProcedureNode) -> Callable[[ExprNode], None]:
         env = type_environment_for(symbols, member)
         source_names = source_name_scope_for(symbols, member, project_visible_symbols)
 
-        def calls(expr: ExprNode) -> tuple[str, str] | None:
-            return _call_result_type(expr, env, module_signatures, source_names)
+        def result_of(form: str) -> Callable[[ExprNode], tuple[str, str] | None]:
+            def results(expr: ExprNode) -> tuple[str, str] | None:
+                return _call_result_type(expr, env, module_signatures, source_names) or _runtime_value_result(
+                    expr, form, env, source_names
+                )
+
+            return results
+
+        calls = result_of("is")
+        type_of_calls = result_of("typeof")
+
+        def operand(
+            side: ExprNode, results: Callable[[ExprNode], tuple[str, str] | None]
+        ) -> tuple[Span, str] | None:
+            return _non_object_operand(side, env, results) or _enum_operand(side, env, enum_names())
 
         def visitor(expr: ExprNode) -> None:
             # `TypeOf n Is Collection` with n a Long is the same compile error,
             # Type mismatch (XLIDE issue #1411, measured in Excel, Word,
-            # PowerPoint and Access 16.0). A literal operand there was not measured.
+            # PowerPoint and Access 16.0). A literal operand is a Syntax error,
+            # which expressions.py reports (XLIDE issue #1416).
             if isinstance(expr, TypeOfIsExpr):
                 type_of_offender = (
-                    None if isinstance(expr.operand, LiteralExpr) else _non_object_operand(expr.operand, env, calls)
+                    None if isinstance(expr.operand, LiteralExpr) else operand(expr.operand, type_of_calls)
                 )
                 if type_of_offender is not None:
                     push(
@@ -230,7 +371,7 @@ def check_is_operator_operands(
                 return
             if not isinstance(expr, BinaryExpr) or expr.operator != "Is":
                 return
-            offender = _non_object_operand(expr.left, env, calls) or _non_object_operand(expr.right, env, calls)
+            offender = operand(expr.left, calls) or operand(expr.right, calls)
             if offender is not None:
                 span, detail = offender
                 push(

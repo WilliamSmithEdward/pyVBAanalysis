@@ -8,6 +8,7 @@ extension analyzes the case's host.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -16,6 +17,12 @@ from pyvbaanalysis import analyze_module, analyze_module_options_for
 from pyvbaanalysis.conditional import ConditionalCompilationEnvironment
 from pyvbaanalysis.diagnostics.model import DiagnosticSeverity
 from pyvbaanalysis.evidence import DATA_DIR
+from pyvbaanalysis.runtime.vba_value_results import (
+    ARGUMENT_TYPED_FUNCTIONS,
+    BARE_VALUE_RESULT_FUNCTIONS,
+    TYPEOF_KEYWORD_OPERANDS,
+    VALUE_RESULT_FUNCTIONS,
+)
 from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
 
 _ORACLE: dict[str, dict[str, Any]] = {
@@ -334,3 +341,73 @@ def test_array_as_for_bound_is_type_mismatch(case_id: str) -> None:
 @pytest.mark.parametrize("case_id", _ids1417("e_else_if_is", "e_if_is", "e2_then_if_is"))
 def test_is_in_nested_single_line_if_is_judged(case_id: str) -> None:
     _expect_1417(case_id, "rejected", ["is-operator-non-object"])
+
+
+# -- 8373ca74: Is and TypeOf judge VBA's own function results ------------------
+
+_CASES_1416 = [case for case_id, case in _ORACLE.items() if case_id.startswith("issue1416_")]
+
+# The analyzer's code for each compile error the VBE gave.
+_CODE_FOR_MESSAGE = {
+    "Type mismatch": "is-operator-non-object",
+    "Syntax error": "invalid-expression-syntax",
+    "Method or data member not found": "member-not-found",
+}
+
+# Refused by the VBE and not reported: `DoEvents Is Nothing`, since the
+# expression parser does not read a keyword-named function without parentheses
+# as a call, and an Enum member, `ShadeOne Is Nothing`, since the rule does not
+# resolve constants.
+_KNOWN_QUIET_1416 = re.compile(r"^issue1416_(word_|powerpoint_|access_)?(is_doevents|enum3_member_is)_compile$")
+_MESSAGE_1416 = re.compile(r" is rejected: Compile error: (.+?)\. Measured in ")
+
+
+def test_function_result_cases_cover_every_host() -> None:
+    assert len(_CASES_1416) == 3088
+    for host in (None, "word", "powerpoint", "access"):
+        assert len([case for case in _CASES_1416 if case.get("host") == host]) == 772
+
+
+@pytest.mark.parametrize(
+    "case_id", [case["id"] for case in _CASES_1416 if not _KNOWN_QUIET_1416.match(case["id"])]
+)
+def test_function_result_case_gets_the_vbe_error(case_id: str) -> None:
+    case = _case(case_id)
+    found = _MESSAGE_1416.search(case["description"])
+    expected = [] if case["expected"] == "accepted" else [_CODE_FOR_MESSAGE.get(found.group(1) if found else "")]
+    assert None not in expected
+    assert _codes_of(_errors_for(case)) == expected
+
+
+def test_function_result_tables_stay_apart() -> None:
+    assert not ARGUMENT_TYPED_FUNCTIONS & VALUE_RESULT_FUNCTIONS
+    assert not BARE_VALUE_RESULT_FUNCTIONS & VALUE_RESULT_FUNCTIONS
+    assert "cvar" in TYPEOF_KEYWORD_OPERANDS
+    assert "cvar" not in VALUE_RESULT_FUNCTIONS
+
+
+def _inline_errors(*body: str) -> list[str]:
+    source = "\r\n".join(["Option Explicit", *body, ""])
+    return _codes_of(_errors_for({"modules": [{"name": "Module1", "type": "standard", "source": source}]}))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        ("Function Sqr(x) As Object", "End Function", "Sub Main()", "    Debug.Print Sqr(1) Is Nothing", "End Sub"),
+        ("Sub Main()", "    Dim VBA As Variant", '    Debug.Print VBA.Mid$("ab", 1) Is Nothing', "End Sub"),
+        ("Sub Main()", "    Dim v As Variant", "    Debug.Print Abs(v) Is Nothing", "End Sub"),
+        ("Sub Main()", '    Debug.Print Right("ab", 1) Is Nothing', "End Sub"),
+    ],
+)
+def test_shadows_and_variants_leave_function_results_alone(body: tuple[str, ...]) -> None:
+    assert _inline_errors(*body) == []
+
+
+def test_deeply_nested_argument_typed_calls_do_not_overflow() -> None:
+    # The argument walk runs on an explicit stack; nested calls stay bounded by
+    # the expression parser's depth cap.
+    call = "1"
+    for _ in range(200):
+        call = f"Abs({call})"
+    assert isinstance(_inline_errors("Sub Main()", f"    Debug.Print {call} Is Nothing", "End Sub"), list)
