@@ -406,11 +406,11 @@ def _check_for(
         )
     variable = _variable_named(ctx, proc_sym, name)
     for bound in node.bound_expressions or []:
-        array = _array_variable_value(ctx, proc_sym, bound)
-        if array is not None:
+        bound_array = _array_variable_value(ctx, proc_sym, bound)
+        if bound_array is not None:
             ctx.push(
                 "forBoundArray",
-                f"'{array}' is an array, and a For start, end or Step value must be a single value. "
+                f"'{bound_array}' is an array, and a For start, end or Step value must be a single value. "
                 "This is a VBE compile error: Type mismatch.",
                 bound.span,
             )
