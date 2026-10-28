@@ -10,12 +10,15 @@ in Excel 16.0 (build 20326, 2026-09-26):
   preceded by an # If clause" (the colon ends the directive, and what follows is no
   longer part of it).
 - null-directive-condition: `#If Null Then`, `#If Null = 1 Then`, or `#If N` after
-  `#Const N = Null` -> "Invalid use of Null" (issue #208).
+  `#Const N = Null` -> "Invalid use of Null" (issue #208), also in an arm the
+  VBE skips and after a taken arm (issue #1351).
 - directive-type-mismatch: a condition that is a string VBA cannot read as
   True or False (`#If "abc"`, `#If ""`, `#If " True "`), or that hands such a
   string to an operator (`#If Not "abc"`, `#If "abc" = 1`) -> "Type mismatch",
   even in an arm the VBE skips (Excel 16.0, 2026-10-12); and a `#Const` value
   that does the same (`#Const A = "abc" + 1`), even unread.
+- nothing-directive-condition: `#If Nothing Then`, `#If Not Nothing Then` ->
+  "Invalid use of object" (issue #1351), wherever the line is.
 """
 
 from __future__ import annotations
@@ -137,6 +140,13 @@ def check_directive_forms(
                 "nullDirectiveCondition",
                 f"This #{kind} condition is Null, which is neither True nor False. This is a VBE "
                 "compile error: Invalid use of Null.",
+                directive.span,
+            )
+        elif item.reason == "nothing":
+            push(
+                "nothingDirectiveCondition",
+                f"This #{kind} condition uses the literal Nothing where VBA requires True or "
+                "False. This is a VBE compile error: Invalid use of object.",
                 directive.span,
             )
         elif item.mismatch is not None:

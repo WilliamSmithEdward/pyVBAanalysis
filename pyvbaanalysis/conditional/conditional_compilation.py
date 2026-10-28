@@ -442,33 +442,50 @@ class StringMismatch:
 @dataclass(frozen=True, slots=True)
 class InvalidConditionDirective:
     """An `#If`, `#ElseIf` or `#Const` expression the VBE refuses to compile,
-    and why: ``reason`` is "null" or "type-mismatch"; ``mismatch`` is set for
-    a Type mismatch only."""
+    and why: ``reason`` is "null", "nothing" or "type-mismatch"; ``mismatch``
+    is set for a Type mismatch only."""
 
     reason: str
     directive: ConditionalDirectiveNode
     mismatch: StringMismatch | None = None
 
 
+_NULL_OR_NOTHING_RE = re.compile(r"\b(?:null|nothing)\b", re.IGNORECASE | re.ASCII)
+
+
 def invalid_condition_directives(
     module: ModuleNode, env: ConditionalCompilationEnvironment | None = None
 ) -> list[InvalidConditionDirective]:
-    """The `#If` and `#ElseIf` lines whose condition the VBE refuses, in one replay:
+    """The `#If` and `#ElseIf` lines whose condition the VBE refuses, wherever
+    the line is: the VBE refuses each of these in an arm it skips too, and as
+    an `#ElseIf` after a taken arm, so no arm is replayed; only the `#Const`
+    lines are read, in order, since every one defines its constant (XLIDE
+    issue #192).
 
-    - Null: "Invalid use of Null" (XLIDE issue #208, Excel 16.0). `#If Null`,
-      `#If Null = 1`, `#If Not Null` and a `#Const N = Null` read by `#If N`
-      all are. Only a line the VBE is sure to evaluate is listed: one in code
-      that is compiled, and for `#ElseIf`, after arms that were all False.
+    - Null: "Invalid use of Null" (XLIDE issues #208 and #1351, Excel 16.0).
+      `#If Null`, `#If Null = 1`, `#If Not Null` and a `#Const N = Null` read
+      by `#If N` all are. Null that three-valued logic decides (`Null Or True`,
+      `Null And False`) is no Null condition. A line is read for it only when
+      it names Null or a constant has held Null.
+    - The literal Nothing: "Invalid use of object" (XLIDE issue #1351, Excel
+      16.0). `#If Nothing`, `#If (Nothing)` and `#If Not Nothing` are; `#If
+      Nothing Is Nothing` is not, and nor is a constant set to Nothing (`#If O`
+      after `#Const O = Nothing` compiles), so a condition whose value is such
+      a constant is not listed, a choice the measurements support only for the
+      constant alone; a literal Nothing beside one still is. A line is read for
+      it only when it names Nothing.
     - A string VBA cannot convert: "Type mismatch" (Excel 16.0). A condition
       that is a string no locale reads as True or False (`#If "abc"`, `#If ""`,
       `#If " True "`, `#If S` after `#Const S = "x"`), or that hands one to an
       operator needing a number or a Boolean (`#If Not "abc"`,
       `#If UNDEFINED_X - "abc"`, `#If "abc" = 1`). A `#Const` value that hands
       one to an operator is refused too (`#Const A = "abc" + 1`), even when
-      nothing reads it; one that is a string is not (`#Const S = "x"`). Unlike
-      Null, the VBE refuses these in an arm it skips as well, and an `#ElseIf`
-      after a taken arm, so a line the VBE does not evaluate is read too, when
-      it can hold a string at all: a quote, an `&`, or a constant that is one.
+      nothing reads it; one that is a string is not (`#Const S = "x"`). A line
+      is read for it only when it can hold a string at all: a quote, an `&`, or
+      a constant that is one.
+
+    A line the parser cannot read (a value missing, a `(` or a string left
+    open) reports no Type mismatch and no Nothing; those are left to the syntax.
     """
     if not module_has_conditional_directives(module):
         return []
@@ -485,8 +502,6 @@ def invalid_condition_directives(
             expression, effective_env, project_constants, host_strings=host_strings
         )
 
-    stack: list[_ConditionalFrame] = []
-    current = ConditionalActivity.ACTIVE
     out: list[InvalidConditionDirective] = []
     # Whether any constant holds a string, so a condition with no quote and no
     # `&` can still be one.
@@ -495,6 +510,13 @@ def invalid_condition_directives(
     def may_hold_string(raw: str) -> bool:
         return string_constant or '"' in raw or "&" in raw
 
+    # Whether any constant holds Null, so a condition that does not name it can
+    # still be Null.
+    null_constant = any(_is_null(value) for table in tables for value in (table or {}).values())
+
+    def may_be_invalid(raw: str) -> bool:
+        return may_hold_string(raw) or null_constant or _NULL_OR_NOTHING_RE.search(raw) is not None
+
     for occ in collect_conditional_directives(module):
         directive = occ.directive
         kind = directive.directive_kind
@@ -502,26 +524,16 @@ def invalid_condition_directives(
             operator_mismatch = read(directive.value_raw).operator_mismatch
             if operator_mismatch is not None:
                 out.append(InvalidConditionDirective("type-mismatch", directive, operator_mismatch))
-        if kind is ConditionalDirectiveKind.IF or kind is ConditionalDirectiveKind.ELSE_IF:
-            frame = stack[-1] if stack else None
-            if kind is ConditionalDirectiveKind.IF:
-                evaluated = current is ConditionalActivity.ACTIVE
-            else:
-                evaluated = (
-                    frame is not None
-                    and frame.parent is ConditionalActivity.ACTIVE
-                    and not frame.seen_true
-                    and not frame.seen_unknown
-                )
-            raw = directive.condition_raw or ""
-            if not evaluated and not may_hold_string(raw):
-                current = _apply_conditional_directive(directive, effective_env, project_constants, stack, current)
-                continue
+        if (
+            kind is ConditionalDirectiveKind.IF or kind is ConditionalDirectiveKind.ELSE_IF
+        ) and may_be_invalid(directive.condition_raw or ""):
             reading = read(directive.condition_raw)
             if reading.mismatch is not None:
                 out.append(InvalidConditionDirective("type-mismatch", directive, reading.mismatch))
-            elif evaluated and reading.value is not None and _is_null(reading.value):
+            elif reading.value is not None and _is_null(reading.value):
                 out.append(InvalidConditionDirective("null", directive))
+            elif reading.nothing:
+                out.append(InvalidConditionDirective("nothing", directive))
         # A #Const that gives its name a value replaces a host string; one that
         # fails (`#Const FLAG = 1 / 0`) leaves it.
         replaces_host = (
@@ -531,13 +543,18 @@ def invalid_condition_directives(
             and _evaluate_with_project_constants(directive.value_raw, effective_env, project_constants)
             is not None
         )
-        current = _apply_conditional_directive(directive, effective_env, project_constants, stack, current)
         if kind is ConditionalDirectiveKind.CONST and directive.name:
+            _apply_conditional_directive(
+                directive, effective_env, project_constants, [], ConditionalActivity.ACTIVE
+            )
             lower = directive.name.lower()
             if replaces_host:
                 host_strings.discard(lower)
-            if isinstance(project_constants.get(lower), str):
+            value = project_constants.get(lower)
+            if isinstance(value, str):
                 string_constant = True
+            if value is not None and _is_null(value):
+                null_constant = True
     return out
 
 
@@ -725,6 +742,9 @@ class _ConditionalReading:
     operator_mismatch: StringMismatch | None = None
     # The expression is well formed and read a name with no value.
     unknown_name: bool = False
+    # The value is the literal Nothing, or `Not` was applied to one: not a
+    # constant set to Nothing, which the VBE reads as a condition.
+    nothing: bool = False
 
 
 def _read_with_project_constants(
@@ -892,6 +912,9 @@ class _ConditionalExpressionParser:
         "_host_string",
         "_broken",
         "_read_unknown_name",
+        "_not_of_nothing",
+        "_read_nothing_constant",
+        "_literal_nothing_reads",
     )
 
     def __init__(
@@ -924,10 +947,16 @@ class _ConditionalExpressionParser:
         self._host_string = False
         # A value was missing where the expression needs one, a `(` or a
         # string was not closed, or a keyword stood for a value. Only the
-        # mismatch depends on it.
+        # mismatch and the literal Nothing depend on it.
         self._broken = False
         # An identifier with no value was read.
         self._read_unknown_name = False
+        # `Not` was applied to a literal Nothing.
+        self._not_of_nothing = False
+        # A constant holding Nothing was read.
+        self._read_nothing_constant = False
+        # How many literal `Nothing` tokens were read.
+        self._literal_nothing_reads = 0
 
     def parse(self) -> ConditionalValue | None:
         try:
@@ -940,7 +969,8 @@ class _ConditionalExpressionParser:
     def read(self) -> _ConditionalReading:
         """The value, and the string the expression could not convert, if any.
         An expression the parser cannot read, missing a value or a `)` or with
-        tokens left over, reports no mismatch, and no name with no value."""
+        tokens left over, reports no mismatch, no literal Nothing, and no name
+        with no value."""
         from ..diagnostics.string_conversion import is_invalid_boolean_string
 
         try:
@@ -950,17 +980,20 @@ class _ConditionalExpressionParser:
         if self._index < len(self._tokens):
             return _ConditionalReading(None)
         if self._broken:
-            # The value is as `parse` gives it; only the mismatch is withheld.
+            # The value is as `parse` gives it; only what it was refused for is withheld.
             return _ConditionalReading(value)
         unknown_name = self._read_unknown_name
+        nothing = self._not_of_nothing or (
+            value is not None and _is_special(value, "nothing") and not self._read_nothing_constant
+        )
         if self._host_string:
             # A host string's reading was not measured: the mismatch is withheld.
-            return _ConditionalReading(value, unknown_name=unknown_name)
+            return _ConditionalReading(value, unknown_name=unknown_name, nothing=nothing)
         operator_mismatch = self.mismatch
         mismatch = operator_mismatch
         if mismatch is None and isinstance(value, str) and is_invalid_boolean_string(value):
             mismatch = StringMismatch(value, "boolean")
-        return _ConditionalReading(value, mismatch, operator_mismatch, unknown_name)
+        return _ConditionalReading(value, mismatch, operator_mismatch, unknown_name, nothing)
 
     def _parse_logical(self, level: int) -> Generator[Any, Any, ConditionalValue | None]:
         """Imp, Eqv, Xor, Or, And, loosest first; each level is left-associative."""
@@ -980,9 +1013,17 @@ class _ConditionalExpressionParser:
         count = 0
         while self._match_word("not"):
             count += 1
+        literal_nothing_reads = self._literal_nothing_reads
         value = (cast("ConditionalValue | None", (yield self._parse_comparison())))
         if count > 0:
             self._require_convertible(value, "boolean")
+            # `Not O` after `#Const O = Nothing` is not known to be refused.
+            if (
+                value is not None
+                and _is_special(value, "nothing")
+                and self._literal_nothing_reads > literal_nothing_reads
+            ):
+                self._not_of_nothing = True
         for _ in range(count):
             if isinstance(value, bool):
                 value = not value
@@ -1166,11 +1207,14 @@ class _ConditionalExpressionParser:
         if word == "null":
             return _NULL
         if word == "nothing":
+            self._literal_nothing_reads += 1
             return _NOTHING
         if token.kind is not TokenKind.IDENTIFIER:
             # A keyword where a value belongs (`"abc" - Not`).
             self._broken = True
         value = self._constants.get(word)
+        if value is not None and _is_special(value, "nothing"):
+            self._read_nothing_constant = True
         if isinstance(value, str) and self._host_strings is not None and word in self._host_strings:
             self._host_string = True
         if value is None and self._undefined_is_zero and token.kind is TokenKind.IDENTIFIER:

@@ -735,3 +735,100 @@ def test_duplicate_const_across_arms(condition: str) -> None:
         "Function Main() As Variant\n    Main = 1\nEnd Function\n"
     )
     assert len(_by_code(src, "duplicate-const-directive")) == 1
+
+
+# -- Null and Nothing directive conditions (XLIDE issue #1351, commit
+#    92280ded) -----------------------------------------------------------------
+
+
+def _skipped(condition: str, before: str = "") -> str:
+    return before + _sfn("#If False Then", f"#If {condition} Then", "#End If", "#End If")
+
+
+def _nulls(src: str) -> list[Diagnostic]:
+    return _by_code(src, "null-directive-condition")
+
+
+def _nothings(src: str) -> list[Diagnostic]:
+    return _by_code(src, "nothing-directive-condition")
+
+
+@pytest.mark.parametrize(
+    "directive, src",
+    [
+        ("#If Null", _skipped("Null")),
+        ("#If 1 = Null", _skipped("1 = Null")),
+        ("#If Not Null", _skipped("Not Null")),
+        ("#If Null Or False", _skipped("Null Or False")),
+        ("#If Null And True", _skipped("Null And True")),
+        ('#If "abc" = Null', _skipped('"abc" = Null')),
+        ("#If N", _skipped("N", "#Const N = Null\n")),
+        ('#If N = "abc"', _skipped('N = "abc"', "#Const N = Null\n")),
+    ],
+)
+def test_null_condition_in_skipped_arm(directive: str, src: str) -> None:
+    found = _nulls(src)
+    assert [_span_text(src, d) for d in found] == [f"{directive} Then"]
+    assert "Invalid use of Null" in found[0].message
+
+
+def test_null_elseif_after_taken_arm_and_in_skipped_arm() -> None:
+    taken = _sfn("#If True Then", "#ElseIf Null Then", "#End If")
+    assert [_span_text(taken, d) for d in _nulls(taken)] == ["#ElseIf Null Then"]
+    nested = _sfn("#If False Then", "#If False Then", "#ElseIf Null Then", "#End If", "#End If")
+    assert len(_nulls(nested)) == 1
+    reached = (
+        "Function Main() As Variant\n#If False Then\n    Main = 1\n#ElseIf Null Then\n"
+        "    Main = 2\n#End If\nEnd Function\n"
+    )
+    assert len(_nulls(reached)) == 1
+    assert len(_nulls(reached.replace("#If False", "#If True"))) == 1
+
+
+def test_null_condition_quiet_where_excel_compiles() -> None:
+    assert _nulls(_skipped("Null Or True")) == []
+    assert _nulls(_skipped("Null And False")) == []
+    assert _nulls("#Const N = Null\n" + _sfn()) == []
+    assert _nulls(_skipped("Missing + 1")) == []
+    # A constant holding Null makes every later condition a candidate.
+    assert len(_nulls(_skipped("N + 1", "#Const N = Null\n"))) == 1
+    assert len(_nulls(_sfn("#If False Then", "#If Null Then", "#End If", "#End If"))) == 1
+
+
+@pytest.mark.parametrize(
+    "directive, src",
+    [
+        ("#If Nothing Then", _sfn("#If Nothing Then", "#End If")),
+        ("#If (Nothing) Then", _sfn("#If (Nothing) Then", "#End If")),
+        ("#If Not Nothing Then", _sfn("#If Not Nothing Then", "#End If")),
+        ("#If Nothing Then", _skipped("Nothing")),
+        ("#If Not Nothing Then", _skipped("Not Nothing")),
+        ("#ElseIf Nothing Then", _sfn("#If False Then", "#ElseIf Nothing Then", "#End If")),
+    ],
+)
+def test_nothing_condition(directive: str, src: str) -> None:
+    found = _nothings(src)
+    assert [_span_text(src, d) for d in found] == [directive]
+    assert found[0].severity is DiagnosticSeverity.ERROR
+    assert "Invalid use of object" in found[0].message
+
+
+def test_nothing_condition_quiet_for_is_and_constants() -> None:
+    assert _nothings(_skipped("Nothing Is Nothing")) == []
+    assert _nothings("#Const O = Nothing\n" + _sfn("#If O Then", "#End If")) == []
+    assert _nothings(_skipped("O", "#Const O = Nothing\n")) == []
+    assert _nothings("#Const O = Nothing\n" + _sfn()) == []
+
+
+@pytest.mark.parametrize(
+    "condition",
+    ["Not Nothing Or (Nothing Is Nothing", "Not Nothing Or",
+     "(" * 300 + "Not Nothing" + ")" * 300],
+)  # fmt: skip
+def test_nothing_condition_unreadable_line(condition: str) -> None:
+    assert _nothings(_sfn(f"#If {condition} Then", "#End If")) == []
+
+
+def test_literal_nothing_beside_nothing_constant() -> None:
+    src = "#Const O = Nothing\n" + _sfn("#If Not Nothing Or (O Is Nothing) Then", "#End If")
+    assert len(_nothings(src)) == 1
