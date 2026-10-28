@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 
 from ...conditional.conditional_compilation import (
+    ConditionalActivityTracker,
     ConditionalCompilationEnvironment,
     null_condition_directives,
 )
@@ -39,11 +40,33 @@ from ..context import PushFn
 _LINE_TERMINATOR_RE = re.compile(r"[\r\n]")
 
 
+def _comment_tail_compiled(
+    directive: ConditionalDirectiveNode, activity: ConditionalActivityTracker | None
+) -> bool:
+    """Whether the VBE reads a comment after a directive's colon, and so
+    refuses it (XLIDE issue #1321, measured in Excel 16.0): always after #If
+    and #End If, even inside a skipped arm; after #Else or #ElseIf only when the
+    arm before it is compiled; after #Const only where the #Const is compiled."""
+    kind = directive.directive_kind
+    if kind is ConditionalDirectiveKind.IF or kind is ConditionalDirectiveKind.END_IF:
+        return True
+    if kind in (
+        ConditionalDirectiveKind.ELSE,
+        ConditionalDirectiveKind.ELSE_IF,
+        ConditionalDirectiveKind.CONST,
+    ):
+        # At the directive's start the tracker answers for the code before it.
+        start = directive.span.start
+        return not (activity is not None and activity.is_inactive(Span(start, start)))
+    return False
+
+
 def check_directive_forms(
     source: str,
     mod: ModuleNode,
     conditional_compilation: ConditionalCompilationEnvironment | None,
     push: PushFn,
+    activity: ConditionalActivityTracker | None = None,
 ) -> None:
     directives: list[ConditionalDirectiveNode] = []
     for member in mod.members:
@@ -99,6 +122,18 @@ def check_directive_forms(
                 "A compiler directive takes the whole line: nothing may follow the ':' after it. "
                 'This is a VBE compile error (the VBE reports "An # ElseIf, # Else, or # EndIf '
                 'must be preceded by an # If clause").',
+                Span(following.start, line_end),
+            )
+        elif (
+            following is not None
+            and following.kind is TokenKind.COMMENT
+            and following.start < line_end
+            and _comment_tail_compiled(directive, activity)
+        ):
+            push(
+                "directiveTrailingStatement",
+                "A comment may not follow the ':' after a compiler directive. Drop the ':' to "
+                "keep the comment. This is a VBE compile error.",
                 Span(following.start, line_end),
             )
     for null_directive in null_condition_directives(mod, conditional_compilation):

@@ -785,10 +785,13 @@ def _check_const_name(toks: Sequence[VbaToken], hash_index: int, push: PushFn) -
     """`#Const Empty = 1`: a reserved word cannot name a #Const (XLIDE issue
     #1321). True when reported, which is then the line's one error."""
     name = _at(toks, hash_index + 2)
+    # The lexer reads the attribute names and LineInput as identifiers, but
+    # the VBE refuses them too: `#Const vb_name = 1`. A bracketed name is
+    # allowed, `#Const [Rem] = 1` (both measured in Excel 16.0).
     if (
         token_text(_at(toks, hash_index + 1)) != "const"
         or name is None
-        or name.kind is not TokenKind.KEYWORD
+        or (name.kind is not TokenKind.KEYWORD and name.kind is not TokenKind.IDENTIFIER)
         or not is_reserved_identifier(name.raw_text)
     ):
         return False

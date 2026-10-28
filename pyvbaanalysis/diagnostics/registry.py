@@ -660,7 +660,9 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     ),
     DiagnosticRuleEntry(
         name="directiveForms",
-        run=lambda ctx, push: check_directive_forms(ctx.source, ctx.mod, ctx.opts.conditional_compilation, push),
+        run=lambda ctx, push: check_directive_forms(
+            ctx.source, ctx.mod, ctx.opts.conditional_compilation, push, ctx.activity
+        ),
     ),
     DiagnosticRuleEntry(
         name="optionPlacement",

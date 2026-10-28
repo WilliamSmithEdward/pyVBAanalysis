@@ -189,3 +189,20 @@ def test_reserved_const_name_reported_once_with_rem() -> None:
 )  # fmt: skip
 def test_allowed_const_names(line: str) -> None:
     assert _malformed(_mod(line)) == []
+
+
+# -- Reserved names the lexer reads as identifiers (commit 475b0215) ---------
+
+
+@pytest.mark.parametrize("name", ["vb_name", "VB_Description", "lineinput", "attribute", "local"])
+def test_reserved_const_name_read_as_identifier(name: str) -> None:
+    src = _mod(f"#Const {name} = 1")
+    found = _malformed(src)
+    assert len(found) == 1
+    assert _span_text(src, found[0]) == name
+    assert "Expected: identifier" in found[0].message
+
+
+@pytest.mark.parametrize("name", ["[vb_name]", "vb_foo", "lineinputx", "Local2"])
+def test_near_reserved_const_names_are_quiet(name: str) -> None:
+    assert _malformed(_mod(f"#Const {name} = 1")) == []
