@@ -8,7 +8,7 @@
 #   uv pip compile test.in --universal --generate-hashes --python-version 3.10 -o test.txt
 # Dependabot proposes each new release.
 pytest==9.1.1
-ruff==0.17.1
+ruff==0.17.2
 mypy==2.4.0
 pyopenvba==6.5.0
 defusedxml==0.7.1
