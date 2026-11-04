@@ -306,9 +306,9 @@ pyopenvba==6.6.0 \
     --hash=sha256:3c1f370d21f0c57d1f11a69d78896209a14b32da389e7c12b88016ff809b6a47 \
     --hash=sha256:8c8617f9ffa01002d658efbf10ce6e98d86a521af113101a4ae6653d61b099a5
     # via -r test.in
-pytest==9.1.1 \
-    --hash=sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313 \
-    --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
+pytest==9.2.0 \
+    --hash=sha256:07acdcf88ec174f907dc01af70bf52d49b014bbab03faeeade31c96b18c2e588 \
+    --hash=sha256:97c4f3b1f3c7414aa36465e09b8220f1d03627993bd51b1282e193753c80557b
     # via -r test.in
 ruff==0.17.3 \
     --hash=sha256:029c37cbd3de48ca37aa12117bead2d065f15da17d66bf84e0d4274013705db2 \
