@@ -9,7 +9,7 @@
 # Dependabot proposes each new release.
 pytest==9.2.0
 ruff==0.17.3
-mypy==2.4.0
+mypy==2.4.1
 pyopenvba==6.6.0
 defusedxml==0.7.1
 hatchling==1.32.4
