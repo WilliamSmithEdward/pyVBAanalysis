@@ -2,7 +2,9 @@ version: 2
 # Every pin keeps an updater. A new version is proposed once it is a week old
 # (the cooldown), and each proposal runs CI, Security and Malware scan before merge.
 # Not followed here: the YARA-X and YARA Forge release downloads, which
-# update-yara-rules.yml moves in .github/security/yara.json, and the exact
+# update-yara-rules.yml moves in .github/security/yara.json, the ClamAV and
+# Semgrep images, which update-images.yml moves because GitHub refuses
+# Dependabot's image updates, and the exact
 # Python and runner versions in the workflows, which are moved by hand.
 updates:
   # The GitHub Actions, pinned by commit SHA in the workflows.
@@ -43,20 +45,6 @@ updates:
     cooldown:
       default-days: 7
       exclude: [pyopenvba, pyofficeeditor, pyprettyvba, vba-reference, pyvbaanalysis, pyvbaharness, xlide-mcp]
-    groups:
-      minor-and-patch:
-        patterns: ["*"]
-        update-types: [minor, patch]
-
-  # The ClamAV and Semgrep engine images, pinned by digest.
-  - package-ecosystem: docker
-    directories:
-      - /.github/security/clamav
-      - /.github/security/semgrep
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
     groups:
       minor-and-patch:
         patterns: ["*"]
