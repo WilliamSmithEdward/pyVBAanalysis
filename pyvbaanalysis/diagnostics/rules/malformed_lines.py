@@ -88,6 +88,18 @@ _STATEMENT_KEYWORDS = frozenset(
 
 _PARAMETER_MODIFIERS = frozenset({"optional", "byval", "byref", "paramarray"})
 
+
+def _is_member_name(words: Sequence[VbaToken], k: int) -> bool:
+    """True for a member's name, `o.To`, `o!In`: the word after a `.`, or after a `!` touching it."""
+    previous = _at(words, k - 1)
+    return previous is not None and (
+        previous.raw_text == "." or (previous.raw_text == "!" and previous.end == words[k].start)
+    )
+
+
+# The operators `Case Is` takes before its value.
+_CASE_IS_OPERATORS = frozenset({"=", "<>", "<", ">", "<=", ">="})
+
 _TYPE_CHARACTER_RE = re.compile(r"^[$%&!#@]$")
 
 _Place = Literal["procedure", "top", "after"]
@@ -294,7 +306,10 @@ def _check_statement_forms(
                     "Syntax error",
                 )
             else:
-                to = next((t for t in item if token_text(t) == "to"), None)
+                to = next(
+                    (t for k, t in enumerate(item) if token_text(t) == "to" and not _is_member_name(item, k)),
+                    None,
+                )
                 if to is not None:
                     report(
                         item[0],
@@ -302,6 +317,64 @@ def _check_statement_forms(
                         "Case Is takes one value: a range with To is a Case of its own.",
                         "Syntax error",
                     )
+                elif (_raw_at(item, 1) or "") not in _CASE_IS_OPERATORS:
+                    second = _at(item, 1)
+                    report(
+                        item[0],
+                        second if second is not None else item[0],
+                        "Case Is takes a comparison operator before its value: Case Is > 5.",
+                        "Syntax error",
+                    )
+
+    def check_condition(words: Sequence[VbaToken], at_index: int) -> None:
+        """`Do While` or `Loop Until` at `words[at_index]` with no condition after it."""
+        kind = token_text(_at(words, at_index))
+        if (kind == "while" or kind == "until") and len(words) == at_index + 1:
+            report(
+                words[0],
+                words[at_index],
+                f"{words[0].raw_text} {words[at_index].raw_text} needs a condition.",
+                "Syntax error",
+            )
+
+    def check_for_header(words: Sequence[VbaToken]) -> None:
+        """A For or For Each header without one of its parts: `For n = 1`, `For Each v`."""
+        last = words[-1]
+
+        def find(word: str) -> int:
+            depth = 0
+            for k in range(1, len(words)):
+                raw = words[k].raw_text
+                if raw == "(":
+                    depth += 1
+                elif raw == ")":
+                    depth -= 1
+                elif (
+                    depth == 0
+                    and words[k].kind is TokenKind.KEYWORD
+                    and not _is_member_name(words, k)
+                    and token_text(words[k]) == word
+                ):
+                    return k
+            return -1
+
+        if token_text(_at(words, 1)) == "each":
+            in_at = find("in")
+            if in_at == 2:
+                report(words[0], words[2], "For Each needs its loop variable before In: For Each v In c.", "Syntax error")
+            elif in_at < 0:
+                report(words[0], last, "For Each needs In and what it walks: For Each v In c.", "Syntax error")
+            elif in_at == len(words) - 1:
+                report(words[0], last, "For Each ... In needs the collection or array it walks.", "Syntax error")
+            return
+        to_at = find("to")
+        step_at = find("step")
+        if to_at < 0:
+            report(words[0], last, "A For loop needs To and its end value: For n = 1 To 10.", "Syntax error")
+        elif to_at == len(words) - 1:
+            report(words[0], words[to_at], "For ... To needs the loop's end value.", "Syntax error")
+        elif step_at == len(words) - 1:
+            report(words[0], words[step_at], "Step needs a value: Step 2.", "Syntax error")
 
     def check_statement(words: Sequence[VbaToken]) -> None:
         head = token_text(words[0])
@@ -371,10 +444,16 @@ def _check_statement_forms(
                 len(words) > 1
                 and (token_text(words[1]) == "while" or token_text(words[1]) == "until")
             )
+            check_condition(words, 1)
         elif head == "loop":
             conditioned = dos.pop() if dos else None
+            # A member named While or Until, `o.Until`, is no condition keyword.
             kinds = [
-                tok for tok in words[1:] if token_text(tok) == "while" or token_text(tok) == "until"
+                tok
+                for k, tok in enumerate(words)
+                if k > 0
+                and not _is_member_name(words, k)
+                and (token_text(tok) == "while" or token_text(tok) == "until")
             ]
             if len(kinds) > 1:
                 report(
@@ -390,6 +469,12 @@ def _check_statement_forms(
                     "A Loop with a condition closes a Do with none; this Do has its own.",
                     "Loop without Do",
                 )
+            else:
+                check_condition(words, 1)
+        elif head == "while" and len(words) == 1:
+            report(words[0], words[0], "While needs a condition: While n < 10.", "Syntax error")
+        elif head == "for":
+            check_for_header(words)
 
     line: list[VbaToken] = []
 
@@ -430,6 +515,9 @@ def _split_statements(words: Sequence[VbaToken]) -> list[list[VbaToken]]:
             out.append([])
         else:
             out[-1].append(tok)
+    # A line number is no part of the statement after it: `10 For n = 1`.
+    if is_decimal_line_number(_at(out[0], 0)):
+        out[0].pop(0)
     return [statement for statement in out if len(statement) > 0]
 
 

@@ -12,7 +12,8 @@ import pytest
 
 from pyvbaanalysis import analyze_module, analyze_module_options_for
 from pyvbaanalysis.conditional import ConditionalCompilationEnvironment
-from pyvbaanalysis.diagnostics.model import DiagnosticSeverity
+from pyvbaanalysis.diagnostics import AnalyzeModuleOptions, diagnostic_metadata_for_code
+from pyvbaanalysis.diagnostics.model import DiagnosticEvidenceKind, DiagnosticSeverity, VbaDiagnostic
 from pyvbaanalysis.evidence import OracleCase
 from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
 from oracle_support import _RAW_MODULES, _HOSTS, CASES, oracle_module_input  # type: ignore[attr-defined]
@@ -20,6 +21,35 @@ from oracle_support import _RAW_MODULES, _HOSTS, CASES, oracle_module_input  # t
 
 def _measured(prefix: str) -> list[OracleCase]:
     return [case for case in CASES.values() if case.id.startswith(prefix)]
+
+
+def _by_code(source: str, code: str, host: str = "excel") -> list[VbaDiagnostic]:
+    return [d for d in analyze_module(source, AnalyzeModuleOptions(host=host)) if d.code == code]
+
+
+def _compile_errors(source: str, host: str = "excel") -> list[str]:
+    out = []
+    for d in analyze_module(source, AnalyzeModuleOptions(host=host)):
+        meta = diagnostic_metadata_for_code(d.code)
+        if meta is not None and meta.diagnostic_kind == DiagnosticEvidenceKind.COMPILE_ERROR:
+            out.append(f"{d.code}: {d.message}")
+    return out
+
+
+def _span_text(source: str, d: VbaDiagnostic) -> str:
+    return source[d.span.start : d.span.end]
+
+
+def _procedure(*lines: str) -> str:
+    """Upstream's procedure(): a Main with the usual locals around the lines."""
+    return "\r\n".join([
+        "Option Explicit",
+        "Sub Main()",
+        "    Dim v As Variant, n As Long, o As Object, c As New Collection",
+        *("    " + line for line in lines),
+        "End Sub",
+        "",
+    ])
 
 
 def _project_errors(inputs: list[ModuleInput], host: str | None = None) -> list[str]:
@@ -121,3 +151,82 @@ def test_issue_1553_agrees_with_the_vbe(case: OracleCase) -> None:
     else:
         reason = "Syntax error" if "procedure_" in case.id else "Expected: type name"
     assert reason in found[0]
+
+
+# -- 091fcd77: a block header without one of its parts -----------------------
+
+_BLOCK_HEADERS = _measured("block_header_")
+
+
+def test_block_headers_cover_every_host() -> None:
+    assert {_HOSTS.get(case.id, "excel") for case in _BLOCK_HEADERS} == {"excel", "word", "powerpoint", "access"}
+
+
+@pytest.mark.parametrize("case", _BLOCK_HEADERS, ids=lambda case: case.id)
+def test_block_header_agrees_with_the_vbe(case: OracleCase) -> None:
+    # `10 Case Is > o.To` is refused for the line number before the first Case,
+    # which another check reports; its member o.To is no To of a range.
+    source = case.modules[0].source
+    host = _HOSTS.get(case.id, "excel")
+    assert (len(_compile_errors(source, host)) > 0) == (case.expected == "rejected")
+    own = 1 if case.expected == "rejected" and "_numbered_case_member_to_" not in case.id else 0
+    assert len(_by_code(source, "malformed-statement", host)) == own
+
+
+@pytest.mark.parametrize("lines, span, message", [
+    (["Select Case n", "Case Is 5", "End Select"], "Is 5", "Case Is takes a comparison operator before its value"),
+    (["Select Case n", "Case 1, Is", "End Select"], "Is", "Case Is takes a comparison operator"),
+    (["Do Until", "Loop"], "Do Until", "Do Until needs a condition."),
+    (["Do", "Loop While"], "Loop While", "Loop While needs a condition."),
+    (["While", "Wend"], "While", "While needs a condition"),
+    (["For Each v", "Next"], "For Each v", "needs In and what it walks"),
+    (["For Each v In", "Next"], "For Each v In", "needs the collection or array it walks"),
+    (["For Each In c", "Next"], "For Each In", "its loop variable before In"),
+    (["For n = 1", "Next"], "For n = 1", "needs To and its end value"),
+    (["For n = 1 To", "Next"], "For n = 1 To", "needs the loop's end value"),
+    (["For n = 1 To 2 Step", "Next"], "For n = 1 To 2 Step", "Step needs a value"),
+])
+def test_block_header_reports(lines: list[str], span: str, message: str) -> None:
+    source = _procedure(*lines)
+    found = _by_code(source, "malformed-statement")
+    assert len(found) == 1
+    assert _span_text(source, found[0]) == span
+    assert message in found[0].message
+
+
+@pytest.mark.parametrize("lines", [
+    ["10 For n = 1", "Next"], ["Select Case n", "10 Case Is 5", "End Select"], ["10 Do Until", "Loop"],
+    ["10 While", "Wend"], ["L: For Each v", "Next"],
+])
+def test_block_header_after_a_line_number_or_a_label(lines: list[str]) -> None:
+    assert len(_by_code(_procedure(*lines), "malformed-statement")) == 1
+
+
+def test_block_header_member_named_like_a_keyword() -> None:
+    assert len(_by_code(_procedure("For n = o.To To", "Next"), "malformed-statement")) == 1
+    for lines in [
+        ["10 Do", "20 Loop While o.Until"], ["For n = o.To To 3", "Next"], ["For Each v In o.In", "Next"],
+        ["Do Until o!While", "Loop"], ["Select Case n", "10 Case Is > o.To", "End Select"],
+        ["Select Case n", "Case Is > o!To", "End Select"],
+    ]:
+        assert _by_code(_procedure(*lines), "malformed-statement") == [], lines
+
+
+@pytest.mark.parametrize("lines", [
+    ["Select Case n", "Case Is = 1, Is <> 2, Is < 3, Is > 4, Is <= 5, Is >= 6", "End Select"],
+    ["Select Case n", "Case 1 To 3, Is > 7: Beep", "End Select"],
+    ["Select Case n", "Case Is _", "    > 1", "End Select"],
+    ["Do Until n > 3", "    n = n + 1", "Loop"], ["Do", "    n = n + 1", "Loop Until (n > 3)"], ["Do: Loop While n < 0"],
+    ["While (n < 3)", "    n = n + 1", "Wend"],
+    ["For Each v In c", "Next"], ["For Each v In Array(1, 2)", "Next v"], ["For Each v _", "    In c", "Next"],
+    ["For n = 1 To 3", "Next"], ["For n = LBound(Array(1)) To UBound(Array(1, 2)) Step -1", "Next n"],
+    ["For n = 1 To _", "    3", "Next"],
+    ["10 Do While n < 3", "    n = n + 1", "20 Loop"], ["10 For n = 1 To 2", "20 Next"],
+])
+def test_block_headers_that_compile_are_left_alone(lines: list[str]) -> None:
+    assert _compile_errors(_procedure(*lines)) == []
+
+
+def test_block_header_in_an_inactive_arm_is_left_alone() -> None:
+    source = _procedure("#If False Then", "For Each v", "Next", "Do Until", "Loop", "#End If")
+    assert _by_code(source, "malformed-statement") == []
