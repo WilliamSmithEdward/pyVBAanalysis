@@ -676,3 +676,146 @@ def test_def_dec_label_gets_one_report_with_any_line_end(source: str) -> None:
 def test_def_dec_label_is_left_to_the_reserved_label_check() -> None:
     messages = [d.message for d in _compile_diagnostics(_module("Function Main() As Variant", "DefDec:", "    Main = 1", "End Function"))]
     assert messages == ["'DefDec' is a reserved word, so 'DefDec:' cannot be a line label. This is a VBE compile error: Syntax error."]
+
+
+# -- 5b603c43: an Erase of one element of an array ---------------------------
+
+
+def _spans(source: str, code: str) -> list[str]:
+    return [source[d.span.start : d.span.end] for d in analyze_module(source) if d.code == code]
+
+
+def _hits(source: str, code: str) -> list[VbaDiagnostic]:
+    return [d for d in analyze_module(source) if d.code == code]
+
+
+def test_erase_elements_of_measured_cases() -> None:
+    cases = _measured("erase_element_")
+    assert len(cases) == 280
+    for case in cases:
+        source = case.modules[0].source
+        found = _by_code(source, "erase-requires-array", _HOSTS.get(case.id, "excel"))
+        if case.expected == "accepted":
+            assert found == [], case.id
+
+
+def test_erase_of_one_element_of_an_array_whose_elements_are_no_variant() -> None:
+    source = (
+        "Private Type T\n    x() As Long\nEnd Type\nPrivate ModuleValues(2) As Long\nSub Main(p() As Long)\n"
+        "    Dim a(2) As Long, d() As String, m(1, 1) As Object, u(2) As T, i As Long\n"
+        "    Static s(2) As Collection\n    Dim t As T\n    Erase a(1), d(i), m(0, 1)\n"
+        "    Erase u(1): Erase s(1) ' note\n10  Erase ModuleValues(1), p(1)\n    Erase a _\n        (1)\n"
+        "    Erase t.x(1)\nEnd Sub\n"
+    )
+    hits = _hits(source, "erase-requires-array")
+    # The Type member rule reports first.
+    assert [_span_text(source, d) for d in hits] == [
+        "t.x(1)", "a(1)", "d(i)", "m(0, 1)", "u(1)", "s(1)", "ModuleValues(1)", "p(1)", "a _\n        (1)",
+    ]
+    assert "Erase target 't.x(1)' is one element of the array member 't.x'" in hits[0].message
+    assert "Erase target 'a(1)' is one element of the array 'a'" in hits[1].message
+    assert hits[1].severity == DiagnosticSeverity.ERROR
+    assert all("Expected array" in d.message for d in hits)
+    assert "Erase target 'a (1)'" in hits[-1].message
+
+
+def test_erase_of_a_scalar_given_a_subscript() -> None:
+    source = (
+        "Sub Main()\n    Dim n As Long, s As String, d As Date, b As Boolean, x As Double, c As Currency\n"
+        "    Erase n(1), s(1), d(1), b(1), x(1), c(1)\nEnd Sub\n"
+    )
+    hits = _hits(source, "erase-requires-array")
+    assert [_span_text(source, d) for d in hits] == ["n(1)", "s(1)", "d(1)", "b(1)", "x(1)", "c(1)"]
+    assert "'n', which is declared As Long and is no array" in hits[0].message
+
+
+def test_erase_of_an_element_of_another_modules_array() -> None:
+    from pyvbaanalysis import analyze_project
+
+    caller = "Sub Main()\n    Erase SharedValues(1)\nEnd Sub\n"
+    diagnostics = analyze_project([
+        ModuleInput("Caller", ModuleSymbolKind.STANDARD, caller),
+        ModuleInput("Globals", ModuleSymbolKind.STANDARD, "Public SharedValues(2) As Long\n"),
+    ])["Caller"]
+    assert [caller[d.span.start : d.span.end] for d in diagnostics if d.code == "erase-requires-array"] == [
+        "SharedValues(1)"
+    ]
+
+
+def test_erase_element_through_with_deflng_type_character_and_subscript_members() -> None:
+    source = (
+        "DefLng A-Z\nPrivate Type T\n    x() As Long\nEnd Type\nSub Main()\n"
+        "    Dim a(2), n As Long, o As Object, t As T, b&(2)\n"
+        "    Erase a(1), a(o.To), a(n + 1), a(-1), b&(1), b(1)\n    With t\n        Erase .x(1)\n    End With\n"
+        "End Sub\n"
+    )
+    hits = _hits(source, "erase-requires-array")
+    assert [_span_text(source, d) for d in hits] == [".x(1)", "a(1)", "a(o.To)", "a(n + 1)", "a(-1)", "b&(1)", "b(1)"]
+    assert "Erase target 't.x(1)'" in hits[0].message
+    # The element is reported once, not also as an arbitrary expression.
+    assert _spans(source, "invalid-erase-target") == [".x(1)"]
+
+
+def test_erase_element_keeps_the_dimension_count_report() -> None:
+    source = "Sub Main()\n    Dim a(2) As Long, m(1, 1) As Long\n    Erase a(1, 2), m(1)\nEnd Sub\n"
+    assert _spans(source, "erase-requires-array") == ["a(1, 2)", "m(1)"]
+    assert len(_hits(source, "wrong-number-of-dimensions")) == 2
+
+
+def test_erase_element_leaves_an_empty_subscript_and_a_named_argument_alone() -> None:
+    source = (
+        "Private Type T\n    x() As Long\nEnd Type\nSub Main()\n    Dim a(2) As Long, t As T, n As Long\n"
+        "    Erase a(1,), a(,), a(,1), a(x:=1), n(1,)\n    Erase t.x(1,), t.x(,), t.x(i:=1)\nEnd Sub\n"
+    )
+    assert _hits(source, "erase-requires-array") == []
+
+
+def test_erase_element_reads_a_named_argument_inside_a_call() -> None:
+    source = (
+        "Private Type T\n    x() As Long\nEnd Type\nSub Main()\n    Dim a(2) As Long, t As T\n"
+        "    Erase a(F(x:=1)), t.x(F(x:=1))\nEnd Sub\nFunction F(ByVal x As Long) As Long\nEnd Function\n"
+    )
+    assert _spans(source, "erase-requires-array") == ["t.x(F(x:=1))", "a(F(x:=1))"]
+
+
+def test_erase_element_leaves_a_member_of_another_rank_alone() -> None:
+    source = "Private Type T\n    f(2) As Long\nEnd Type\nSub Main()\n    Dim t As T\n    Erase t.f(1, 2)\nEnd Sub\n"
+    assert _hits(source, "erase-requires-array") == []
+
+
+def test_erase_element_leaves_the_procedures_own_name_alone() -> None:
+    source = (
+        "Function G(ByVal i As Long) As Long()\n    Erase G(1)\nEnd Function\n"
+        "Property Get P(ByVal i As Long) As String\n    Erase P(1)\nEnd Property\n"
+    )
+    assert _hits(source, "erase-requires-array") == []
+
+
+def test_erase_element_quotes_a_member_subscript_as_written() -> None:
+    source = (
+        "Private Type T\n    x() As Long\nEnd Type\nSub Main()\n    Dim t As T, n As Long\n"
+        "    Erase t.x(n Mod 2)\n    Erase t.x(n + 1)\nEnd Sub\n"
+    )
+    hits = _hits(source, "erase-requires-array")
+    assert [_span_text(source, d) for d in hits] == ["t.x(n Mod 2)", "t.x(n + 1)"]
+    assert "Erase target 't.x(n Mod 2)'" in hits[0].message
+    assert "Erase target 't.x(n + 1)'" in hits[1].message
+    # The arbitrary-expression check reads a member's subscript as before.
+    assert _spans(source, "invalid-erase-target") == ["t.x(n + 1)"]
+
+
+def test_erase_element_accepts_what_compiles() -> None:
+    source = (
+        "Private Type T\n    x() As Long\n    y() As Variant\nEnd Type\nPrivate a(2) As Long\nSub Main(q As Variant)\n"
+        "    Dim v As Variant, w(2) As Variant, z(2), o As Object, c As New Collection, t As T, u(2) As T\n"
+        "    Erase v(1), w(1), z(1), q(1), o(1), c(1), o.x(1), F(1), G(1)\n"
+        "    Erase t.y(1), u(1).x, t.x, a(), a\n    Erase a(1 To 2), t.x(1 To 2)\nEnd Sub\n"
+        "Sub Shadowed()\n    Dim a As Variant\n    Erase a(1)\nEnd Sub\n"
+        "Function F(ByVal i As Long) As Variant\nEnd Function\nFunction G(ByVal i As Long) As Long\nEnd Function\n"
+    )
+    assert _hits(source, "erase-requires-array") == []
+
+
+def test_erase_element_in_an_inactive_arm_is_left_alone() -> None:
+    source = "Sub Main()\n    Dim a(2) As Long\n#If False Then\n    Erase a(1)\n#End If\nEnd Sub\n"
+    assert _hits(source, "erase-requires-array") == []

@@ -123,6 +123,7 @@ from ..walker import (
     statement_tokens_after_leading_label,
     token_name,
     token_text,
+    top_level_operator_index,
 )
 from .overflow import constant_number_folder
 from .shared import is_bare_or_vba_qualified_intrinsic_call, source_expression_syntax_problem
@@ -1993,8 +1994,35 @@ def check_erase_targets(
                 symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.ASSIGNMENT_TARGET
             )
 
+        def element_shape(name: str) -> DeclaredValueShape | None:
+            # Only a variable or parameter: what a call returns is left alone.
+            binding = source_identifier_binding(
+                symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.EXPRESSION
+            )
+            if (
+                binding.scope is not BareIdentifierResolutionScope.AMBIGUOUS
+                and len(binding.definitions) > 0
+                and all(definition.kind in _ERASE_ELEMENT_KINDS for definition in binding.definitions)
+            ):
+                return resolve_shape(name).shape
+            return None
+
         def visitor(stmt: LeafStatementNode) -> None:
+            elements = _erase_element_targets(source, stmt.span, member.name, element_shape)
+            for hit in elements:
+                push(
+                    "eraseRequiresArray",
+                    f"Erase target '{hit.text}' is one element of the array '{hit.name}', and Erase takes "
+                    f"the whole array, as in Erase {hit.name}. This is a VBE compile error: Expected array."
+                    if hit.is_array
+                    else f"Erase target '{hit.text}' gives a subscript to '{hit.name}', which is declared As "
+                    f"{hit.as_type} and is no array. This is a VBE compile error: Expected array.",
+                    hit.span,
+                )
+            # An element the check above reports is no arbitrary expression.
             for span in _invalid_erase_targets(source, stmt.span):
+                if any(element.span.start == span.start for element in elements):
+                    continue
                 push(
                     "invalidEraseTarget",
                     "Erase target must be a variable or array name, not an arbitrary expression.",
@@ -2010,6 +2038,98 @@ def check_erase_targets(
         return visitor
 
     return factory
+
+
+# What an Erase target's name may be for its subscript to be read as an element's.
+_ERASE_ELEMENT_KINDS = frozenset(
+    {VbaSymbolKind.LOCAL_VARIABLE, VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.PARAMETER}
+)
+
+_ERASE_TYPE_CHARACTER_RE = re.compile(r"^[%&^@!#$]\Z")
+_ONE_LINE_CONTINUATION_RE = re.compile(r"[ \t]+_[ \t]*\r?\n[ \t]*")
+
+
+@dataclass(frozen=True, slots=True)
+class _EraseElement:
+    text: str
+    name: str
+    span: Span
+    as_type: str
+    is_array: bool
+
+
+def _erase_element_targets(
+    source: str,
+    span: Span,
+    procedure_name: str,
+    variable_shape: Callable[[str], DeclaredValueShape | None],
+) -> list[_EraseElement]:
+    """`Erase a(1)` with `a(2) As Long`, and `Erase n(1)` with `n As Long`: Erase
+    takes a whole array, and an element of an array whose elements are no
+    Variant, or a number, string, date or Boolean given a subscript, is the VBE
+    compile error Expected array (XLIDE issue #1690, measured in Excel, Word,
+    PowerPoint and Access 16.0). A Variant's element may hold an array and
+    compiles, and so do an Object's default member and members: `Erase v(1)`,
+    `Erase o(1)`, `Erase c(1)`, `Erase o.x(1)`. A call, `Erase F(1)`, is left
+    alone, and so is the procedure's own name, which is a call there.
+    MS-VBAL 5.4.3.4."""
+    toks = statement_tokens_after_leading_label(source, span)
+    if token_text(_at(toks, 0)) != "erase":
+        return []
+    out: list[_EraseElement] = []
+    for group in split_top_level_token_groups(toks, 1, ","):
+        content = _without_comments(group)
+        first = _at(content, 0)
+        name = token_name(first)
+        # The name, a type character if any (`a&(1)`), then one subscript that is
+        # not empty and ends the target. `Erase a(1 To 2)`, `Erase a(1,)` and
+        # `Erase a(,)` are Syntax errors instead, and `Erase a(x:=1)` Named
+        # arguments not allowed: left to the VBE.
+        second = _at(content, 1)
+        open_ = (
+            2
+            if first is not None
+            and second is not None
+            and second.start == first.end
+            and _ERASE_TYPE_CHARACTER_RE.match(second.raw_text)
+            else 1
+        )
+        if (
+            not name
+            or _raw_at(content, open_) != "("
+            or len(content) < open_ + 3
+            or match_paren_from(content, open_) != len(content) - 1
+            or any(_is_keyword_at(content, i, "to") for i in range(len(content)))
+            or any(
+                len(slot) == 0 or top_level_operator_index(slot, ":=") >= 0
+                for slot in split_top_level_token_groups(content[open_ + 1 : -1], 0, ",")
+            )
+            or name.lower() == procedure_name.lower()
+        ):
+            continue
+        shape = variable_shape(name)
+        normalized = normalize_type(shape.as_type) if shape is not None and shape.as_type else None
+        if (
+            shape is None
+            or not normalized
+            or normalized == "variant"
+            or (not shape.is_array and not is_known_scalar_type(normalized))
+        ):
+            continue
+        at = _token_group_span(span, content)
+        out.append(_EraseElement(_one_line_text(source, at), name, at, shape.as_type or "", shape.is_array))
+    return out
+
+
+def _is_keyword_at(toks: Sequence[VbaToken], i: int, word: str) -> bool:
+    """`word` at `toks[i]` as a keyword: a member's name, `o.To` or `o!As`, is none."""
+    previous = _raw_at(toks, i - 1)
+    return token_text(_at(toks, i)) == word and previous != "." and previous != "!"
+
+
+def _one_line_text(source: str, span: Span) -> str:
+    """The text at `span` for a message, a line continuation read as a space."""
+    return _ONE_LINE_CONTINUATION_RE.sub(" ", source[span.start : span.end])
 
 
 def _invalid_erase_targets(source: str, span: Span) -> list[Span]:
