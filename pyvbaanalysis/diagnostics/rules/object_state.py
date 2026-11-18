@@ -44,6 +44,7 @@ from ...parser.nodes import (
     iter_body_nodes,
 )
 from ...symbols.name_resolution import BareIdentifierContext, BareIdentifierResolutionScope
+from ...symbols.referenced_projects import declared_type_is_referenced_enum
 from ...symbols.symbol_model import ModuleSymbolKind, ModuleSymbols, SymbolVisibility, VbaSymbol, VbaSymbolKind
 from ...types.type_inference import (
     SourceDeclaredType,
@@ -149,6 +150,34 @@ def check_scalar_member_access(
         for surface in ctx.project_class_members or []
         if surface.kind == "standardModule" and surface.name.lower() != symbols.module_name.lower()
     }
+    # The project's own Types, Enums and modules come before a referenced one's.
+    # Built only once a referenced project's Enum might be the type.
+    own_types: list[frozenset[str]] = []
+
+    def own_type_or_enum(as_type: str) -> bool:
+        if "." in as_type:
+            return False
+        if not own_types:
+            own_types.append(
+                frozenset(
+                    [
+                        *(
+                            symbol.name.lower()
+                            for symbol in [*(symbols.root.children or ()), *(project_visible_symbols or ())]
+                            if symbol.kind in (VbaSymbolKind.TYPE, VbaSymbolKind.ENUM)
+                        ),
+                        *(surface.name.lower() for surface in ctx.project_class_members or ()),
+                    ]
+                )
+            )
+        return as_type.strip().lower() in own_types[0]
+
+    def referenced_enum(as_type: str) -> bool:
+        return declared_type_is_referenced_enum(
+            as_type, ctx.referenced_project_surfaces, ctx.referenced_lookup_order
+        ) and not own_type_or_enum(as_type)
+
+    is_referenced_enum = referenced_enum if ctx.referenced_project_surfaces else None
 
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
         env = type_environment_for(symbols, member)
@@ -177,7 +206,13 @@ def check_scalar_member_access(
 
         def visitor(stmt: LeafStatementNode) -> None:
             for name, as_type, span, vbe_error in _scalar_member_accesses(
-                source, stmt.span, env, resolve_declared_type
+                source,
+                stmt.span,
+                env,
+                resolve_declared_type,
+                # A referenced project's Enum is a Long too (XLIDE issue #1623),
+                # unless the project has a type of the name itself.
+                is_referenced_enum,
             ):
                 push(
                     "scalarMemberAccess",
@@ -196,6 +231,7 @@ def _scalar_member_accesses(
     span: Span,
     env: Mapping[str, str],
     resolve_declared_type: Callable[[str], SourceDeclaredType] | None = None,
+    is_referenced_enum: Callable[[str], bool] | None = None,
 ) -> list[tuple[str, str, Span, str]]:
     toks = statement_tokens(source, span)
     out: list[tuple[str, str, Span, str]] = []
@@ -214,7 +250,14 @@ def _scalar_member_accesses(
             else env.get(name.lower())
         )
         normalized = normalize_type(as_type)
-        if not as_type or not normalized or not is_known_scalar_type(normalized):
+        if (
+            not as_type
+            or not normalized
+            or not (
+                is_known_scalar_type(normalized)
+                or (is_referenced_enum is not None and is_referenced_enum(as_type))
+            )
+        ):
             continue
         member_name = token_name(toks[i + 2]) if i + 2 < len(toks) else None
         vbe_error = "Invalid qualifier" if member_name else "Syntax error"

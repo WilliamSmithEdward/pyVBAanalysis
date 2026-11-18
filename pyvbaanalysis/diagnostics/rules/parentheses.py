@@ -137,6 +137,9 @@ def _check_statement(source: str, span: Span, needs_index: _NeedsIndex, push: Pu
             return True
         if prev.raw_text in (")", "]") or prev.kind in (TokenKind.IDENTIFIER, TokenKind.BRACKETED_IDENTIFIER):
             return False
+        # `o.Is()`: a member spelled like a keyword is still called (XLIDE issue #1602).
+        if _raw(toks, i - 2 if prev is _at(toks, i - 1) else i - 3) in (".", "!"):
+            return False
         return prev.kind is not TokenKind.KEYWORD or token_text(prev) in _OPERAND_KEYWORDS
 
     # A single group is already linear; avoid index allocation on the common path.

@@ -71,6 +71,7 @@ from ...runtime import (
     resolve_vba_library_qualifier,
 )
 from ...runtime.vba_runtime import VbaRuntimeFunction
+from ...symbols.referenced_projects import ReferencedProjectSurface, referenced_project_names
 from ...symbols.name_resolution import (
     BareIdentifierContext,
     BareIdentifierResolutionScope,
@@ -86,7 +87,6 @@ from ...symbols.symbol_model import (
 )
 from ...types.type_names import is_known_scalar_type, normalize_type
 from ..call_extraction import (
-    CallableTypeSignature,
     CallArguments,
     extract_call,
     is_named_slot,
@@ -111,7 +111,6 @@ from ..walker import (
 )
 from ...completion import MemberCompletionContext
 from .shared import (
-    ValueReadReference,
     for_each_undeclared_reference_span,
     resolve_exhaustive_member_surface,
     value_read_references,
@@ -550,6 +549,7 @@ def check_unknown_call_statement(
     push: PushFn,
     project_types: Sequence[VbaProjectClassMembers] | None = None,
     own_members: AbstractSet[str] = frozenset(),
+    unread_project: bool = False,
 ) -> ProcedureStatementVisitor:
     """A bare call statement whose callee resolves to nothing: "Sub or Function not
     defined". Resolution covers project procedures, source bindings, Application
@@ -602,6 +602,8 @@ def check_unknown_call_statement(
             or resolve_host_enum(name, host_model) is not None
             or resolve_runtime_object(name) is not None
             or resolve_runtime_function(name) is not None
+            # A referenced project that was not read may hold it (XLIDE issue #1621).
+            or unread_project
         )
 
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
@@ -836,18 +838,40 @@ def check_undeclared_variables(
     referenced_hosts: Sequence[str] | None,
     push: PushFn,
     own_members: AbstractSet[str] = frozenset(),
+    project: ProjectQualifiers | None = None,
 ) -> None:
     """With Option Explicit, a variable must be declared before it is assigned or
     read. Self-gated on the caller supplying the project-visible identifier set, so
     cross-module globals and enum members never false-positive."""
     if not _has_option_explicit(mod, activity) or known_identifiers is None:
         return
+    project = project if project is not None else ProjectQualifiers()
     # A library name or the project name qualifies a global in an expression as it
     # does in an As clause: `Set app = Excel.Application`, `Word.Application`,
     # `VBAProject.Module2.Twice(4)` (XLIDE issue #101; each runs in its host). The
     # libraries are the host's own, those merged into its model (Office, MSForms),
-    # the ones the project references, and VBA, which is_known already accepts.
-    library_qualifiers = _library_qualifier_names(host_model, referenced_hosts)
+    # the ones the project references, and VBA.
+    #
+    # Such a name stands only before a dot. Bare, `v = stdole`, `v = Excel` and
+    # `v = VBA` are "Expected variable or procedure, not project", and
+    # `stdole.Checked`, `Scripting.BinaryCompare` and `DAO.dbOpenDynaset` with their
+    # references compile, in any case, bracketed or continued (XLIDE issue #1495,
+    # measured in Excel, Word, PowerPoint and Access 16.0).
+    library_qualifiers = _library_qualifier_names(host_model, referenced_hosts, project)
+
+    def is_library_name(lower: str) -> bool:
+        return lower == "vba" or lower in library_qualifiers
+
+    referenced_names = _referenced_project_bare_names(project.referenced_project_surfaces)
+    # Behind a referenced project that was not read, a name the rule cannot place is
+    # left unjudged: the project may supply it (XLIDE issue #1621).
+    unread_project = has_unread_project_reference(
+        project.referenced_projects, project.referenced_project_surfaces
+    )
+
+    def stands_before_dot(span: Span) -> bool:
+        return _BEFORE_DOT.match(source, span.end, span.end + 256) is not None
+
     # A form's controls are declared by its DESIGNER, not its text. No control list
     # at all is not an empty one: reading it as empty claimed every control the
     # form's own code-behind names was undeclared (XLIDE issue #48). An Access form
@@ -870,17 +894,21 @@ def check_undeclared_variables(
     # in Excel 16.0). Per procedure, below.
     redim_declared: AbstractSet[str] = frozenset()
 
+    # Without a span the question is only whether the name is known at all, as the
+    # walk that finds the references asks it.
     def is_known(
-        name: str, proc_sym: VbaSymbol | None, context: BareIdentifierContext
+        name: str,
+        proc_sym: VbaSymbol | None,
+        context: BareIdentifierContext,
+        span: Span | None = None,
     ) -> bool:
         lower = name.lower()
         return (
-            lower == "vba"
+            (is_library_name(lower) and (span is None or stands_before_dot(span)))
             # `Me = 1` in an object module assigns Me's default member: it
             # compiles, and raises 438 only if there is none (measured in
             # Excel 16.0). In a standard module Me has its own rule.
             or (lower == "me" and module_kind is not None and module_kind is not ModuleSymbolKind.STANDARD)
-            or lower in library_qualifiers
             or lower in redim_declared
             # A UserForm's controls are members the designer declared, not the
             # module's text; referring to one is correct VBA.
@@ -906,6 +934,9 @@ def check_undeclared_variables(
             # VBA's own enums and modules qualify their members the same way:
             # `VbMsgBoxResult.vbYes`, `ColorConstants.vbRed`, `Strings.Left`.
             or resolve_vba_library_qualifier(name) is not None
+            # A read referenced project's modules and members (XLIDE issue #1503).
+            or lower in referenced_names
+            or unread_project
         )
 
     for member in active_module_members(mod, activity):
@@ -921,9 +952,17 @@ def check_undeclared_variables(
                 name: str, ref_span: Span, mode: str, context: BareIdentifierContext
             ) -> None:
                 key = f"{ref_span.start}:{ref_span.end}"
-                if key in reported or is_known(name, proc_sym, context):
+                if key in reported or is_known(name, proc_sym, context, ref_span):
                     return
                 reported.add(key)
+                if is_library_name(name.lower()):
+                    push(
+                        "undeclaredVariable",
+                        f"'{name}' names a library or project, which stands only before a dot. "
+                        "This is a VBE compile error: Expected variable or procedure, not project.",
+                        ref_span,
+                    )
+                    return
                 push(
                     "undeclaredVariable",
                     f"Variable not defined: '{name}'. Declare it before {mode}, "
@@ -938,13 +977,15 @@ def check_undeclared_variables(
                 report(
                     target[0], target[1], "assigning to it", BareIdentifierContext.ASSIGNMENT_TARGET
                 )
-            for ref in _undeclared_read_references(
+            for ref in value_read_references(
                 source,
                 span,
                 lambda name: is_known(name, proc_sym, BareIdentifierContext.EXPRESSION),
                 module_signatures,
                 project_members,
             ):
+                if is_known(ref.name, proc_sym, BareIdentifierContext.EXPRESSION, ref.span):
+                    continue
                 if ref.bracketed and bracket_names_evaluate:
                     continue
                 report(ref.name, ref.span, "using it", BareIdentifierContext.EXPRESSION)
@@ -1067,16 +1108,39 @@ def _redim_target_names_in(
     return out
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectQualifiers:
+    """What the project's dir stream says qualifies a name, where it was read."""
+
+    # Every reference's name, type libraries and VBA projects alike.
+    referenced_libraries: Sequence[str] | None = None
+    # Which of those are VBA projects.
+    referenced_projects: Sequence[str] | None = None
+    # The project's own name: `VBAProject`, `Project`, an Access database's.
+    project_name: str | None = None
+    # What each referenced VBA project that was read offers this one.
+    referenced_project_surfaces: Sequence[ReferencedProjectSurface] | None = None
+
+
+# A dot after a name, across spaces and line continuations.
+_BEFORE_DOT = re.compile(r"[ \t]*(?:_[ \t]*\r?\n[ \t]*)*\.")
+
+
 def _library_qualifier_names(
-    host_model: HostObjectModel | None, referenced_hosts: Sequence[str] | None
+    host_model: HostObjectModel | None,
+    referenced_hosts: Sequence[str] | None,
+    project: ProjectQualifiers,
 ) -> set[str]:
     """Lower-cased names that may qualify a global in an expression: the libraries
     whose types the host model carries (its own and the shared ones merged into it),
-    the libraries the project references, and the project itself, which is
-    `VBAProject` unless renamed. An absent model is Excel's by default."""
+    the libraries the project references, and the project itself. An absent model
+    is Excel's by default."""
     from ...host.host_model import get_excel_object_model
     model = host_model if host_model is not None else get_excel_object_model()
-    out = {"vbaproject"}
+    # The project's own name qualifies its modules, and only it: Word's is
+    # `Project`, where `VBAProject.Module1.Helper()` is "Variable not defined"
+    # (XLIDE issue #1495). `VBAProject` stands in while the name is unread.
+    out = {(project.project_name if project.project_name is not None else "VBAProject").lower()}
     for qualified in model.get("types") or {}:
         dot = qualified.find(".")
         if dot > 0:
@@ -1089,7 +1153,35 @@ def _library_qualifier_names(
         name = HOST_LIBRARY_NAMES.get(token)
         if name:
             out.add(name.lower())
+    # A reference's recorded name vouches for what follows it: a type library's,
+    # and another VBA project's, read or not. Read, the referenced-project rule
+    # judges what follows its dot. Unread, the VBE accepts `ProbeLibrary.WidgetColor`
+    # as it does for a read one, so the name is no undeclared variable (XLIDE issue
+    # #1621).
+    for name in project.referenced_libraries or ():
+        out.add(name.lower())
     return out
+
+
+def has_unread_project_reference(
+    referenced_projects: Sequence[str] | None,
+    referenced_project_surfaces: Sequence[ReferencedProjectSurface] | None,
+) -> bool:
+    """Whether the project references a VBA project that was not read: one on a
+    network path, missing, locked or protected. Its names are unknown, so a bare name
+    or call the analyzer cannot place may be one of them, and the VBE accepts it as
+    such in every host (XLIDE issue #1621)."""
+    read = {surface.name.lower() for surface in referenced_project_surfaces or ()}
+    return any(name.lower() not in read for name in referenced_projects or ())
+
+
+def _referenced_project_bare_names(
+    surfaces: Sequence[ReferencedProjectSurface] | None,
+) -> frozenset[str]:
+    """The names a read referenced project offers unqualified, lowercased: its
+    visible modules' names, and every member of its visible standard modules (XLIDE
+    issue #1503). `Service.Value()` and `Value()` compile."""
+    return frozenset(name for surface in surfaces or () for name in referenced_project_names(surface).bare_names)
 
 
 _DESIGNER_CLASS_MEMBER_NAMES = IdentityLru(capacity=8)
@@ -1114,20 +1206,6 @@ def designer_class_member_names(
         names = frozenset(member["name"].lower() for member in get_host_members(designer_class, model))
         by_type[key] = names
     return names
-
-
-def _undeclared_read_references(
-    source: str,
-    span: Span,
-    is_known: Callable[[str], bool],
-    module_signatures: Mapping[str, CallableTypeSignature],
-    project_members: Sequence[VbaProjectClassMembers] | None,
-) -> list[ValueReadReference]:
-    return [
-        ref
-        for ref in value_read_references(source, span, is_known, module_signatures, project_members)
-        if not is_known(ref.name)
-    ]
 
 
 def _has_option_explicit(

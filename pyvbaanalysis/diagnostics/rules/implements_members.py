@@ -36,6 +36,13 @@ from ...symbols.symbol_model import (
     is_procedure_kind,
     procedure_params_from_symbol,
 )
+from ...symbols.referenced_projects import (
+    ReferencedLookupOrder,
+    ReferencedObjectMember,
+    ReferencedProjectSurface,
+    referenced_project_names,
+    referenced_project_reached,
+)
 from ...types.type_names import is_known_scalar_type, normalize_type
 from ..context import PushFn, is_object_module_kind
 from ..walker import (
@@ -91,15 +98,24 @@ def check_implements_members(
     project_class_members: Sequence[VbaProjectClassMembers] | None,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    referenced_surfaces: Sequence[ReferencedProjectSurface] | None = None,
+    referenced_order: ReferencedLookupOrder | None = None,
 ) -> None:
     """Report each interface member an `Implements` class leaves out or declares
-    with another signature."""
-    if (
-        not is_object_module_kind(module_kind)
-        or project_class_members is None
-        or len(project_class_members) == 0
+    with another signature.
+
+    The interface is read from the project index, or from a read referenced
+    project's exposed class (XLIDE issue #1623, measured in Excel, Word, PowerPoint
+    and Access 16.0: `Implements ProbeLibrary.Widget` with none of Widget's members
+    is "Object module needs to implement 'Value' for interface 'Widget'"). A
+    referenced class's surface keeps its members' names, not their signatures, so
+    only that each one is implemented is judged. An interface from a type library is
+    not judged."""
+    if not is_object_module_kind(module_kind) or (
+        (project_class_members is None or len(project_class_members) == 0) and not referenced_surfaces
     ):
         return
+    project_types = project_class_members or ()
     procedures: dict[str, list[VbaSymbol]] = {}
     for symbol in symbols.root.children or []:
         if is_procedure_kind(symbol.kind):
@@ -115,8 +131,41 @@ def check_implements_members(
         interface_name = token_name(name_token) if name_token is not None else None
         if not interface_name or name_token is None:
             continue
-        contract = _contract_named(project_class_members, interface_name)
+        # `Implements ProbeLibrary.Widget` names a referenced project's class;
+        # otherwise the project's own class of the name comes first.
+        qualifier = _qualifier_of(toks, name_token)
+        referenced_qualifier = qualifier is not None and any(
+            surface.name.lower() == qualifier.lower() for surface in referenced_surfaces or ()
+        )
+        contract = None if referenced_qualifier else _contract_named(project_types, interface_name)
         if contract is None:
+            foreign = (
+                _referenced_interface(
+                    interface_name,
+                    qualifier if referenced_qualifier else None,
+                    referenced_surfaces,
+                    referenced_order,
+                )
+                if referenced_qualifier
+                or not any(candidate.name.lower() == interface_name.lower() for candidate in project_types)
+                else None
+            )
+            # The VBE names the first member missing; the rest are listed with it.
+            missing = [
+                required
+                for required in (foreign[1] if foreign is not None else ())
+                if foreign is not None and not procedures.get(f"{foreign[0]}_{required.name}".lower())
+            ]
+            if foreign is not None and missing:
+                first, *rest = missing
+                listed = ", ".join(f"'{foreign[0]}_{required.name}'" for required in rest)
+                push(
+                    "implementsMemberMissing",
+                    f"Object module needs to implement '{first.name}' for interface '{foreign[0]}': add a "
+                    f"{'Property' if first.kind == 'property' else 'Sub or Function'} '{foreign[0]}_{first.name}'"
+                    + (f", and {listed}." if rest else "."),
+                    absolute_span(member.span, name_token),
+                )
             continue
         for required in contract.members:
             # A Friend member is no part of the interface (issue #291, measured).
@@ -185,6 +234,46 @@ def check_implements_members(
                         "implements.",
                         implementation.name_span,
                     )
+
+
+def _qualifier_of(toks: Sequence[VbaToken], name_token: VbaToken) -> str | None:
+    """The name before the interface's in `Implements Lib.IFoo`, or None for a bare
+    name."""
+    at = next((i for i, tok in enumerate(toks) if tok is name_token), -1)
+    return token_name(toks[at - 2]) if at >= 2 and toks[at - 1].raw_text == "." else None
+
+
+def _referenced_interface(
+    interface_name: str,
+    qualifier: str | None,
+    surfaces: Sequence[ReferencedProjectSurface] | None,
+    order: ReferencedLookupOrder | None,
+) -> tuple[str, Sequence[ReferencedObjectMember]] | None:
+    """A read referenced project's exposed class an Implements names, with the
+    members an implementing class must define: its Public procedures and variables.
+    Qualified, the named project's; bare, the first the lookup reaches. None for
+    anything else, which is not judged."""
+    lower = interface_name.lower()
+    if not surfaces:
+        return None
+    project: ReferencedProjectSurface | None
+    if qualifier is not None:
+        project = next((surface for surface in surfaces if surface.name.lower() == qualifier.lower()), None)
+    else:
+        project = (
+            referenced_project_reached(lower, surfaces, order, lambda offered: lower in offered.types)
+            if order is not None
+            else None
+        )
+    module = referenced_project_names(project).modules.get(lower) if project is not None else None
+    if (
+        module is None
+        or module.kind is not ModuleSymbolKind.CLASS
+        or not module.visible
+        or module.object_members is None
+    ):
+        return None
+    return (module.name, module.object_members)
 
 
 def _contract_named(

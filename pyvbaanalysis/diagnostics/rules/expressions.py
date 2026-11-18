@@ -2395,7 +2395,8 @@ def _invalid_operator_sequence(source: str, span: Span) -> tuple[str, Span, str 
                 Span(span.start + tok.start, span.start + tok.end),
                 "'Not' has nothing after it to negate. This is a VBE compile error: Syntax error.",
             )
-        if not is_non_unary_binary_operator(tok):
+        # `o.Is`: a member spelled like an operator is a name (XLIDE issue #1602).
+        if not is_non_unary_binary_operator(tok) or (i > 0 and toks[i - 1].raw_text in (".", "!")):
             i += 1
             continue
         # `total& = 3`: an `&` glued to the name before it is the Long

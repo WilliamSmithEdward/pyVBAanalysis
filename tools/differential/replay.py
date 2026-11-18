@@ -31,6 +31,12 @@ from pyvbaanalysis.symbols import (
     ProjectIndexOptions,
 )
 from pyvbaanalysis.symbols.project_index import FormControlInfo
+from pyvbaanalysis.symbols.referenced_projects import (
+    ReferencedEnum,
+    ReferencedObjectMember,
+    ReferencedProjectModule,
+    ReferencedProjectSurface,
+)
 from pyvbaanalysis.symbols.sheet_changes import SheetChanges, WorkbookSheetInfo
 
 _KIND = {kind.value: kind for kind in ModuleSymbolKind}
@@ -47,6 +53,8 @@ _PLAIN_KEYS = frozenset(
         "documentType",
         "referencedHosts",
         "referencedLibraries",
+        "referencedProjects",
+        "referencedProjectSurfaces",
         "workbookSheets",
         "severityOverrides",
         "designerClass",
@@ -132,6 +140,54 @@ def _implicit_members(recorded: list[Mapping[str, Any]] | None) -> list[FormCont
     ]
 
 
+def _object_members(recorded: list[Mapping[str, Any]] | None) -> tuple[ReferencedObjectMember, ...] | None:
+    if recorded is None:
+        return None
+    return tuple(
+        ReferencedObjectMember(
+            name=member["name"],
+            kind=member["kind"],
+            takes_arguments=member.get("takesArguments", False),
+            returns_class=member.get("returnsClass"),
+        )
+        for member in recorded
+    )
+
+
+def _referenced_project_surfaces(
+    recorded: list[Mapping[str, Any]] | None,
+) -> list[ReferencedProjectSurface] | None:
+    """The surfaces upstream's engine built, as the recorder wrote them."""
+    if recorded is None:
+        return None
+    return [
+        ReferencedProjectSurface(
+            name=surface["name"],
+            modules=tuple(
+                ReferencedProjectModule(
+                    name=module["name"],
+                    kind=_KIND[module["kind"]],
+                    visible=module["visible"],
+                    members=tuple(module.get("members", ())),
+                    types=tuple(module.get("types", ())),
+                    enums=(
+                        tuple(ReferencedEnum(decl["name"], tuple(decl["members"])) for decl in module["enums"])
+                        if module.get("enums") is not None
+                        else None
+                    ),
+                    predeclared=module.get("predeclared"),
+                    object_members=_object_members(module.get("objectMembers")),
+                    module_members=_object_members(module.get("moduleMembers")),
+                    default_member=module.get("defaultMember"),
+                    default_member_class=module.get("defaultMemberClass"),
+                )
+                for module in surface["modules"]
+            ),
+        )
+        for surface in recorded
+    ]
+
+
 def _workbook_sheets(recorded: list[Mapping[str, Any]] | None) -> list[WorkbookSheetInfo] | None:
     if recorded is None:
         return None
@@ -150,6 +206,8 @@ def _plain_options(opts: Mapping[str, Any], **project: Any) -> AnalyzeModuleOpti
         # as unknown and stays silent, so the replay passes what upstream assumed.
         referenced_hosts=opts.get("referencedHosts", []),
         referenced_libraries=opts.get("referencedLibraries"),
+        referenced_projects=opts.get("referencedProjects"),
+        referenced_project_surfaces=_referenced_project_surfaces(opts.get("referencedProjectSurfaces")),
         workbook_sheets=_workbook_sheets(opts.get("workbookSheets")),
         severity_overrides=opts.get("severityOverrides"),
         designer_class=opts.get("designerClass"),

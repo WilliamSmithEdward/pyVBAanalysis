@@ -31,6 +31,7 @@ from ...conditional import (
     collect_conditional_directives,
 )
 from ...host.library_type_names import library_type_names
+from ...identity_cache import IdentityLru
 from ...js_compat import JS_WHITESPACE, js_trim
 from ...lexer.keyword_table import OPERATOR_IDENTIFIERS, is_reserved_identifier
 from ...lexer.token_helpers import implements_statement_name
@@ -44,6 +45,7 @@ from ...parser.nodes import (
     DeclareNode,
     EnumNode,
     EventNode,
+    IfBlockNode,
     LeafStatementNode,
     ModuleMember,
     ModuleNode,
@@ -57,9 +59,17 @@ from ...parser.nodes import (
     TypeNode,
     VariableDeclNode,
     VariableGroupNode,
+    is_leaf_statement,
+    iter_body_nodes,
 )
 from ...parser.type_declaration_suffix import is_type_declaration_suffix
 from ...runtime import resolve_runtime_function
+from ...symbols.referenced_projects import (
+    ReferencedLookupOrder,
+    ReferencedProjectSurface,
+    referenced_project_names,
+    referenced_project_reached,
+)
 from ...symbols.symbol_model import ModuleSymbolKind, VbaProjectTypeKind
 from ...types.type_names import is_known_scalar_type, normalize_type
 from ..const_expr import (
@@ -660,6 +670,7 @@ class _TypeNameRef:
     span: Span
     kind: _TypeNameReferenceKind
     qualifier: str | None = None
+    qualifier_span: Span | None = None
 
 
 def _type_reference_lookup_name(ref: _TypeNameRef) -> str:
@@ -688,6 +699,7 @@ def _type_name_ref_from_tokens(
         span=Span(base + member_tok.start, base + member_tok.end),
         kind=kind,
         qualifier=first_name,
+        qualifier_span=Span(base + first.start, base + first.end),
     )
 
 
@@ -741,17 +753,39 @@ def _type_names_after_typeof_is(source: str, span: Span) -> list[_TypeNameRef]:
     toks = statement_tokens(source, span)
     out: list[_TypeNameRef] = []
     saw_typeof = False
+    # What was pending outside each open parenthesis: the operand may call or index,
+    # `TypeOf F(a Is b) Is Type`, and an `Is` inside belongs to no outer TypeOf,
+    # though a TypeOf there has its own (XLIDE issue #1602).
+    pending: list[bool] = []
     for i, tok in enumerate(toks):
         lower = token_text(tok)
-        if lower == "typeof":
+        after_access = i > 0 and toks[i - 1].raw_text in (".", "!")
+        if lower == "(":
+            pending.append(saw_typeof)
+            saw_typeof = False
+            continue
+        if lower == ")":
+            saw_typeof = pending.pop() if pending else False
+            continue
+        if lower == "typeof" and not after_access:
             saw_typeof = True
             continue
-        if not saw_typeof or lower != "is":
+        if not saw_typeof:
             continue
-        ref = _type_name_ref_from_tokens(toks, i + 1, span.start, "typeOfIs")
-        if ref is not None:
-            out.append(ref)
-        saw_typeof = False
+        # `TypeOf o.Is Is Type`: a member named Is is part of the operand.
+        if lower == "is" and not after_access:
+            ref = _type_name_ref_from_tokens(toks, i + 1, span.start, "typeOfIs")
+            if ref is not None:
+                out.append(ref)
+            saw_typeof = False
+            continue
+        # `TypeOf expr Is Type` only allows the operand's chain of names, joined by
+        # '.' or '!', between TypeOf and Is, with its arguments handled above. Any
+        # other significant token means this is a malformed/non-TypeOf use; clear
+        # the flag so a later unrelated `Is` in the same statement is not
+        # misclassified.
+        if lower not in (".", "!") and not token_name(tok):
+            saw_typeof = False
     return out
 
 
@@ -778,6 +812,7 @@ def _collect_implements_refs(source: str, scan_end: int) -> list[_TypeNameRef]:
                         span=Span(line_start + column + dot + 1, line_start + column + len(raw_name)),
                         kind="implements",
                         qualifier=raw_name[:dot],
+                        qualifier_span=Span(line_start + column, line_start + column + dot),
                     )
                 )
             elif column >= 0:
@@ -794,7 +829,19 @@ def _collect_implements_refs(source: str, scan_end: int) -> list[_TypeNameRef]:
     return out
 
 
+# Source-only facts follow the parsed module's lifetime, as upstream's WeakMap does.
+_TYPE_REFERENCES = IdentityLru(capacity=4)
+
+
 def _collect_type_name_references(source: str, mod: ModuleNode) -> list[_TypeNameRef]:
+    """Source-ordered type references. Callers must not mutate the shared list."""
+    cached = _TYPE_REFERENCES.get(mod)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+    return _TYPE_REFERENCES.put(_collect_type_name_references_uncached(source, mod), mod)  # type: ignore[no-any-return]
+
+
+def _collect_type_name_references_uncached(source: str, mod: ModuleNode) -> list[_TypeNameRef]:
     out: list[_TypeNameRef] = []
     # Implements is only legal in the declarations section, so the line scan
     # stops at the first procedure (typeSemanticTokens.ts). A line inside a
@@ -815,9 +862,30 @@ def _collect_type_name_references(source: str, mod: ModuleNode) -> list[_TypeNam
         out.extend(_type_names_after_new(source, span))
         out.extend(_type_names_after_typeof_is(source, span))
 
+    def collect_block_header(node: BodyNode) -> None:
+        # The leading `If` condition lives in branches[0].header_span; ElseIf/Else
+        # headers are walked as body statements, so only the opener is missed.
+        # Other blocks keep their opener as the block's first physical line, bounded
+        # by the first body statement so a continued header is covered whole.
+        if isinstance(node, IfBlockNode):
+            if node.branches:
+                collect_statement(node.branches[0].header_span)
+            return
+        block_body = getattr(node, "body", None) or []
+        end = block_body[0].span.start if block_body else node.span.end
+        collect_statement(Span(node.span.start, end))
+        # What follows the body, a Do block's `Loop Until TypeOf o Is T`
+        # (XLIDE issue #1602).
+        if block_body and block_body[-1].span.end < node.span.end:
+            collect_statement(Span(block_body[-1].span.end, node.span.end))
+
     def collect_body(body: Sequence[BodyNode]) -> None:
         for_each_variable_group(list(body), collect_group)
-        for_each_body_statement(list(body), lambda stmt: collect_statement(stmt.span))
+        for node in iter_body_nodes(body):
+            if is_leaf_statement(node):
+                collect_statement(node.span)
+            elif isinstance(getattr(node, "body", None), list):
+                collect_block_header(node)
 
     for member in mod.members:
         if isinstance(member, VariableGroupNode):
@@ -950,6 +1018,35 @@ def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: Conditio
             continue
         if resolved is not None:
             continue
+        referenced = _referenced_project_type(ref, opts)
+        # `New ProbeLibrary.Widget` and `New Widget`, an exposed class another project
+        # can name but not create (XLIDE issue #1602, measured in Excel, Word,
+        # PowerPoint and Access 16.0). `WithEvents w As New` is the WithEvents rule's.
+        if (
+            referenced is not None
+            and referenced[2]
+            and _is_new_type_reference(ref.kind)
+            and not (
+                ref.kind == "newDeclaration" and any(_contains_span(span, ref.span) for span in with_events_new_spans)
+            )
+        ):
+            push(
+                "invalidNewTypeName",
+                f"'{lookup_name}' is a class of the VBA project {referenced[0].name}, which another "
+                "project cannot create. This is a VBE compile error: Invalid use of New keyword.",
+                ref.span,
+            )
+            continue
+        # `TypeOf o Is ProbeLibrary.Thing`, a class the project does not expose. A
+        # declaration or New there is missing-library-reference's.
+        if ref.kind == "typeOfIs" and ref.qualifier and referenced is not None and not referenced[1]:
+            push(
+                "invalidAsTypeName",
+                f"'{referenced[0].name}' is a VBA project this project references, and it offers no "
+                f"type '{ref.name}'. This is a VBE compile error: User-defined type not defined.",
+                ref.span,
+            )
+            continue
         # A Private Type or Enum of another module, bare or qualified, and any
         # name qualified by a variable, are no type here (XLIDE issue #490,
         # measured in Excel 16.0).
@@ -1003,7 +1100,7 @@ def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: Conditio
         # names the reference to add.
         libraries = (
             [
-                cast("AbstractSet[str] | None", library_type_names(library))
+                _library_or_read_project_type_names(library, opts.referenced_project_surfaces)
                 for library in (dict.fromkeys(["VBA", (opts.host_model or {}).get("hostName", opts.host or "Excel"), *opts.referenced_libraries]) if opts.referenced_libraries else opts.referenced_libraries)
             ]
             if opts.referenced_libraries is not None
@@ -1030,6 +1127,59 @@ def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: Conditio
                 f"'{ref.name}'. This is a VBE compile error: User-defined type not defined.",
                 ref.span,
             )
+
+
+def _referenced_project_type(
+    ref: _TypeNameRef, opts: AnalyzeModuleOptions
+) -> tuple[ReferencedProjectSurface, bool, bool] | None:
+    """The referenced VBA project XLIDE read that a type reference reaches: the one
+    its qualifier names, or for a bare name the first in reference order that offers
+    it. Returned with whether it offers the name, and whether the name is the
+    exposed class itself, not an Enum."""
+    lower = ref.name.lower()
+    surfaces = opts.referenced_project_surfaces
+    project: ReferencedProjectSurface | None
+    if ref.qualifier:
+        qualifier = ref.qualifier.lower()
+        project = next((surface for surface in surfaces or () if surface.name.lower() == qualifier), None)
+    else:
+        project = referenced_project_reached(
+            lower,
+            surfaces,
+            ReferencedLookupOrder(
+                opts.referenced_libraries, (opts.host_model or {}).get("hostName") or opts.host or "Excel"
+            ),
+            lambda names: lower in names.types,
+        )
+    if project is None:
+        return None
+    module = referenced_project_names(project).types.get(lower)
+    return (
+        project,
+        module is not None,
+        module is not None and module.kind is ModuleSymbolKind.CLASS and module.name.lower() == lower,
+    )
+
+
+def _library_or_read_project_type_names(
+    library: str, surfaces: Sequence[ReferencedProjectSurface] | None
+) -> AbstractSet[str] | None:
+    """The types a read referenced project offers, lowercased, or else the library's
+    own known type names."""
+    key = library.lower()
+    project = next((surface for surface in surfaces or () if surface.name.lower() == key), None)
+    if project is not None:
+        return frozenset(referenced_project_names(project).types)
+    return cast("AbstractSet[str] | None", library_type_names(library))
+
+
+def type_name_qualifier_starts(source: str, mod: ModuleNode) -> frozenset[int]:
+    """Where each qualifier of a name in a type position starts: `TypeOf o Is
+    ProbeLibrary.Widget`, `New ProbeLibrary.Widget` (upstream's qualifierSpan of
+    collectTypeNameReferences)."""
+    return frozenset(
+        ref.qualifier_span.start for ref in _collect_type_name_references(source, mod) if ref.qualifier_span is not None
+    )
 
 
 def _declared_variable_names(mod: ModuleNode, activity: ConditionalActivityTracker | None) -> set[str]:

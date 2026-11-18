@@ -16,6 +16,7 @@ from pyvbaanalysis.diagnostics import analyze_module
 from pyvbaanalysis.evidence import DATA_DIR, OracleCase, load_audit, load_oracle_cases
 from pyvbaanalysis.host.host_libraries import host_token_for_libid
 from pyvbaanalysis.symbols import ImplicitMember, ModuleInput, ModuleSymbolKind, ProjectIndex
+from pyvbaanalysis.symbols.referenced_projects import ReferencedProjectModuleSource, referenced_project_surface
 
 AUDIT = {a.code: a for a in load_audit()}
 CASES = {c.id: c for c in load_oracle_cases()}
@@ -41,6 +42,7 @@ LIBRARY_NAMES = {
     "{50A7E9B0-70EF-11D1-B75A-00A0C90564FE}": "Shell32",
     "{00062FFF-0000-0000-C000-000000000046}": "Outlook",
     "{00020813-0000-0000-C000-000000000046}": "Excel",
+    "{4AC9E1DA-5BAD-4AC7-86E3-24F4CDCECA28}": "DAO",
 }
 # What a new file of each host records before any reference is added, and its
 # project's name (measured).
@@ -61,6 +63,57 @@ _REFERENCED_LIBRARIES: dict[str, list[str]] = {
     ]
     for raw in json.loads((DATA_DIR / "vbe_oracle_cases.json").read_text(encoding="utf-8"))["cases"]
 }
+
+_RAW_CASES: dict[str, dict[str, Any]] = {
+    raw["id"]: raw for raw in json.loads((DATA_DIR / "vbe_oracle_cases.json").read_text(encoding="utf-8"))["cases"]
+}
+
+# The document modules a new file of each host has before a fixture's own modules
+# are added (upstream oracleDefaultDocumentModules).
+_DEFAULT_DOCUMENT_MODULES = {
+    "excel": ["ThisWorkbook", "Sheet1"],
+    "word": ["ThisDocument"],
+    "powerpoint": [],
+    "access": [],
+}
+
+
+def oracle_project_references(case_id: str) -> dict[str, Any]:
+    """The references and project name the extension reads from the file the oracle
+    compiled a fixture in (upstream oracleProjectReferences): the host's defaults,
+    what the fixture's `references` add, a VBA project it references, and MSForms
+    where it has a UserForm, which adding one adds (measured upstream)."""
+    raw = _RAW_CASES[case_id]
+    host = raw.get("host") or "excel"
+    project = raw.get("projectReference")
+    user_form = ["MSForms"] if any(module.get("type") == "userform" for module in raw.get("modules", [])) else []
+    out: dict[str, Any] = {
+        "referenced_libraries": list(
+            dict.fromkeys(
+                [*_REFERENCED_LIBRARIES[case_id], *([project["name"]] if project else []), *user_form]
+            )
+        ),
+        "project_name": PROJECT_NAMES[host],
+    }
+    if project:
+        # A VBA project the oracle referenced, read as the engine reads one
+        # (upstream issue #1503).
+        out["referenced_projects"] = [project["name"]]
+        out["referenced_project_surfaces"] = [
+            referenced_project_surface(
+                project["name"],
+                [
+                    ReferencedProjectModuleSource(
+                        module["name"],
+                        ModuleSymbolKind.CLASS if module.get("type") == "class" else ModuleSymbolKind.STANDARD,
+                        module["source"],
+                    )
+                    for module in project["modules"]
+                ],
+            )
+        ]
+    return out
+
 
 _PROG_ID_RE = re.compile(r"^Forms\.(\w+)\.\d+$")
 
@@ -156,28 +209,31 @@ def case_codes(case: OracleCase) -> frozenset[str]:
         else ModuleInput(module.name, _kind(module.module_type), module.source)
         for module in case.modules
     ]
-    for module_input in inputs:
+    host = _HOSTS.get(case.id, "excel")
+    # The project is the file's: the host's own document modules too, which the
+    # extension reads with the fixture's (upstream oracleDefaultDocumentModules).
+    named = {module_input.module_name.lower() for module_input in inputs} | {
+        module.name.lower() for module in case.modules
+    }
+    for module_input in [
+        *inputs,
+        *(
+            oracle_module_input({"name": name, "type": "document", "source": ""})
+            for name in _DEFAULT_DOCUMENT_MODULES[host]
+            if name.lower() not in named
+        ),
+    ]:
         index.set_module(module_input)
     out: set[str] = set()
     for module_input in inputs:
         opts = analyze_module_options_for(
             index, module_input.module_name, module_input.module_kind,
-            host=_HOSTS.get(case.id, "excel"),
+            host=host,
             referenced_hosts=_REFERENCED_HOSTS.get(case.id, []),
-            # A rejected case is judged as the extension runs it, with the
-            # project's references and name known (upstream's dedicated tests,
-            # e.g. unreferencedQualifiers1413.test.ts). An accepted case is swept
-            # as upstream's oracleAcceptedNoFalsePositives.test.ts sweeps it,
-            # with the reference list unknown: a single-module case omits the
-            # fresh file's document modules, which a known list would then miss.
-            **(
-                {
-                    "referenced_libraries": _REFERENCED_LIBRARIES[case.id],
-                    "project_name": PROJECT_NAMES[_HOSTS.get(case.id, "excel")],
-                }
-                if case.expected == "rejected"
-                else {}
-            ),
+            # Every case is judged as the extension runs it, with the project's
+            # references and name known, as upstream's dedicated tests and its
+            # oracleAcceptedNoFalsePositives.test.ts sweep (since 6a261810) do.
+            **oracle_project_references(case.id),
             conditional_compilation=ConditionalCompilationEnvironment(project_constants={}),
         )
         for diag in analyze_module(module_input.source, opts):

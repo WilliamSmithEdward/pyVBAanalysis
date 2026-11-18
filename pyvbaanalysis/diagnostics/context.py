@@ -34,6 +34,7 @@ from .model import VbaDeclareVariableData, VbaDiagnosticData
 
 if TYPE_CHECKING:
     from ..symbols.project_index import FormControlInfo
+    from ..symbols.referenced_projects import ReferencedProjectSurface
     from ..symbols.sheet_changes import SheetChanges, WorkbookSheetInfo
     from .opened_file_numbers import OpenedFileNumbers
 
@@ -182,6 +183,15 @@ class AnalyzeModuleOptions:
     # them (`Scripting`, `MSForms`). None where the project's references are not
     # known, which keeps the rules that read it silent.
     referenced_libraries: Sequence[str] | None = None
+    # Which of `referenced_libraries` are other VBA projects rather than type
+    # libraries. Their members are not known until the referenced project is read,
+    # so a name of one does not yet vouch for what follows its dot.
+    referenced_projects: Sequence[str] | None = None
+    # What each of `referenced_projects` that was read offers this project: its
+    # modules, which it can see, and their public names (XLIDE issue #1503). A
+    # referenced project missing here was not read. Build one with
+    # symbols.referenced_projects.referenced_project_surface.
+    referenced_project_surfaces: Sequence[ReferencedProjectSurface] | None = None
     # The project's own name as its dir stream records it (`VBAProject`, `Project`,
     # an Access database's), which qualifies its types the way a library's name
     # does. Read with the references, and None with them.

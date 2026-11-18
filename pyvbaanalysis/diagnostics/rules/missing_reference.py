@@ -44,6 +44,7 @@ from ...symbols.build_module_symbols import build_module_symbols
 from ...symbols.symbol_model import ModuleSymbols, ModuleSymbolKind, VbaSymbol, is_procedure_kind
 from ...symbols.name_resolution import BareIdentifierContext, BareIdentifierResolutionInput, BareIdentifierResolutionScope, resolve_bare_identifier_binding
 from ...identity_cache import IdentityLru
+from ...symbols.referenced_projects import ReferencedProjectSurface, referenced_project_names
 
 _MODEL_LIBRARIES = IdentityLru()
 
@@ -67,7 +68,7 @@ def _libraries_in_model(model: HostObjectModel) -> set[str]:
     return _MODEL_LIBRARIES.put(out, model)  # type: ignore[no-any-return]
 
 
-def _qualified_names_in(source: str, symbols: ModuleSymbols | None = None, project_visible_symbols: Sequence[VbaSymbol] | None = None) -> list[tuple[str, Span, bool]]:
+def _qualified_names_in(source: str, symbols: ModuleSymbols | None = None, project_visible_symbols: Sequence[VbaSymbol] | None = None) -> list[tuple[str, str, Span, bool]]:
     """Every `Library.Member` in the module where the compiler has to resolve
     `Library`: in an As clause, after New, or standing as a value.
 
@@ -101,14 +102,25 @@ def _qualified_names_in(source: str, symbols: ModuleSymbols | None = None, proje
         for t in tokens
         if t.kind is not TokenKind.COMMENT and t.kind is not TokenKind.NEWLINE
     ]
-    out: list[tuple[str, Span, bool]] = []
+    out: list[tuple[str, str, Span, bool]] = []
+    # Where each logical line ends; a ` _` continuation is trivia, not one.
+    newlines = [t.start for t in tokens if t.kind is TokenKind.NEWLINE]
+    next_newline = 0
     for i in range(len(toks) - 2):
         library = token_name(toks[i])
         if toks[i].kind is not TokenKind.IDENTIFIER or not library:
             continue
         if toks[i + 1].raw_text != ".":
             continue
-        if toks[i + 2].kind not in (TokenKind.IDENTIFIER, TokenKind.KEYWORD):
+        # The dot must be on the same logical line. Inside a With block, `With New
+        # Collection` and `.Add 1` below it are two statements, not `Collection.Add`.
+        while next_newline < len(newlines) and newlines[next_newline] < toks[i].end:
+            next_newline += 1
+        if next_newline < len(newlines) and newlines[next_newline] < toks[i + 1].start:
+            continue
+        # A bracketed member is the name inside the brackets: `ProbeLibrary.[Thing]`
+        # names the class Thing, as the VBE reads it (XLIDE issue #1623).
+        if toks[i + 2].kind not in (TokenKind.IDENTIFIER, TokenKind.KEYWORD, TokenKind.BRACKETED_IDENTIFIER):
             continue
         # A member access further along a chain (`a.b.c`) is not a library
         # qualifier: `b` there is a member of whatever `a` is.
@@ -122,7 +134,10 @@ def _qualified_names_in(source: str, symbols: ModuleSymbols | None = None, proje
             binding = resolve_bare_identifier_binding(BareIdentifierResolutionInput(current_module=symbols, project_visible_symbols=project_visible_symbols or (), enclosing_procedure=procedure if procedure and procedure.full_span.start <= toks[i].start else None, name=library, context=BareIdentifierContext.MEMBER_RECEIVER, offset=toks[i].start))
             if binding.scope is not BareIdentifierResolutionScope.UNRESOLVED or (procedure and library.lower() in implicit_writes.get(procedure.full_span.start, set())):
                 continue
-        out.append((library, Span(toks[i].start, toks[i + 2].end), type_qualifier))
+        member = token_name(toks[i + 2])
+        out.append(
+            (library, member if member is not None else toks[i + 2].raw_text, Span(toks[i].start, toks[i + 2].end), type_qualifier)
+        )
     return out
 
 
@@ -133,7 +148,7 @@ def libraries_named_in(source: str) -> set[str]:
     of its modules would stop compiling before the reference goes, which is what the
     VBE's own Tools > References dialog never says.
     """
-    return {library.lower() for library, _, _ in _qualified_names_in(source)}
+    return {library.lower() for library, _, _, _ in _qualified_names_in(source)}
 
 
 # The Scripting library's types a module names unqualified, which no default
@@ -218,6 +233,22 @@ class ProjectNames:
     project_name: str | None = None
     # Every module of the project, lowercased; None without the project.
     project_module_names: AbstractSet[str] | None = None
+    # What each referenced VBA project that was read offers this one, its types included.
+    referenced_project_surfaces: Sequence[ReferencedProjectSurface] | None = None
+
+
+def _referenced_project_types(qualifier: str, project: ProjectNames | None) -> AbstractSet[str] | None:
+    """The types a read referenced project offers by name, lowercased, or None for a
+    qualifier that is no such project (XLIDE issue #1503): its exposed classes and the
+    Public Types and Enums of its visible standard modules. A class it does not expose
+    is no type of the referring project: `Dim t As ProbeLibrary.Thing` is
+    "User-defined type not defined"."""
+    surface = next(
+        (candidate for candidate in (project.referenced_project_surfaces if project is not None else None) or ()
+         if candidate.name.lower() == qualifier),
+        None,
+    )
+    return referenced_project_names(surface).types.keys() if surface is not None else None
 
 
 def _known_qualifiers(
@@ -278,10 +309,23 @@ def check_missing_library_reference(
     qualifiers: frozenset[str] | None = None
     judged = False
     explicit = any(tok.kind is TokenKind.KEYWORD and tok.raw_text.lower() == "explicit" for tok in tokenize_cached(source))
-    for found_library, span, type_qualifier in _qualified_names_in(source, symbols, project_visible_symbols):
+    for found_library, member, span, type_qualifier in _qualified_names_in(source, symbols, project_visible_symbols):
         if not type_qualifier and not explicit:
             continue
         lower = found_library.lower()
+        referenced_types = _referenced_project_types(lower, project) if type_qualifier else None
+        if referenced_types is not None:
+            # The member's token name: continuation trivia and escaped identifiers
+            # are already handled by the lexer, including CR-only physical lines.
+            if member.lower() not in referenced_types:
+                push(
+                    "missingLibraryReference",
+                    f"'{found_library}' is a VBA project this project references, and it offers no type "
+                    f"'{member}': a class it does not expose, or a Type or Enum in a module it keeps "
+                    "private, cannot be named here. This is a VBE compile error: User-defined type not defined.",
+                    span,
+                )
+            continue
         library = _ADDABLE.get(lower)
         if library is None:
             # A library XLIDE cannot add: judged only in a type position, and only

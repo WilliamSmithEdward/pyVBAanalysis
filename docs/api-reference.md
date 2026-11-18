@@ -54,7 +54,7 @@ These are re-exported at the package root for convenience:
   `modules`, the `host` its extension implies, and `referenced_hosts`, the other
   Office libraries its project references (`None` when the reference list could
   not be read). It also carries `referenced_libraries` (all reference names),
-  `workbook_sheets` (saved Excel sheet names and kinds in tab order), and
+  `referenced_projects` (which of those are other VBA projects), `workbook_sheets` (saved Excel sheet names and kinds in tab order), and
   `project_constants` (Conditional Compilation Arguments). Reference and sheet
   metadata is `None` when unreadable and an empty list when known to be empty.
 * A `LoadedModule` carries a module's `name`, `kind`, and `source` (the code body
@@ -76,6 +76,14 @@ These are re-exported at the package root for convenience:
   `VbaProcedureParam`, and the predicates `is_procedure_kind`,
   `is_bare_callable_kind`, `procedure_signature_from_symbol`,
   `qualified_procedure_key`.
+* Referenced VBA projects (`pyvbaanalysis.symbols.referenced_projects`):
+  `referenced_project_surface(name, modules)` builds what a referenced project
+  offers from its modules' sources (`ReferencedProjectModuleSource`, attribute
+  header included). Pass the result as `referenced_project_surfaces` to
+  `analyze_project`, `analyze_module_options_for` or `AnalyzeModuleOptions`, with
+  the project's name in `referenced_projects` and `referenced_libraries`. A
+  referenced project named there without a surface is unread, and a bare name it
+  might supply is left unjudged. The readers do not open referenced files.
 * Name resolution: `resolve_bare_identifier_binding`, `source_identifier_names`,
   `BareIdentifierContext`, `BareIdentifierResolution`.
 

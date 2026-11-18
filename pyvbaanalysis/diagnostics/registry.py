@@ -170,6 +170,8 @@ from .rules.param_array_use import check_param_array_use
 from .rules.parameter_defaults import check_parameter_default_values
 from .rules.parentheses import check_parentheses
 from .rules.property_use import check_invalid_property_use
+from .rules.referenced_projects import check_referenced_project_names
+from ..symbols.referenced_projects import ReferencedLookupOrder
 from .rules.refused_declarations import check_refused_declarations
 from .rules.runtime_values import check_runtime_argument_values, check_runtime_conversion_values
 from .rules.statement_forms import check_statement_forms
@@ -188,8 +190,10 @@ from .rules.undeclared import (
     check_member_not_found,
     check_non_callable_call_statement,
     check_option_explicit,
+    ProjectQualifiers,
     check_undeclared_variables,
     check_unknown_call_statement,
+    has_unread_project_reference,
 )
 from .rules.variant_values import check_variant_value_misuse
 from .rules.vba_library_members import check_vba_library_members
@@ -293,6 +297,7 @@ def _unknown_call_statement(ctx: RulePassContext, push: PushFn) -> ProcedureStat
         push,
         ctx.opts.project_class_members,
         own_object_member_names(ctx.opts),
+        has_unread_project_reference(ctx.opts.referenced_projects, ctx.opts.referenced_project_surfaces),
     )
 
 
@@ -334,6 +339,7 @@ def _missing_library_reference(ctx: RulePassContext, push: PushFn) -> None:
             referenced_libraries=ctx.opts.referenced_libraries,
             project_name=ctx.opts.project_name,
             project_module_names=ctx.opts.project_module_names,
+            referenced_project_surfaces=ctx.opts.referenced_project_surfaces,
         ),
     )
 
@@ -475,6 +481,12 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
             ctx.opts.referenced_hosts,
             push,
             own_object_member_names(ctx.opts),
+            ProjectQualifiers(
+                referenced_libraries=ctx.opts.referenced_libraries,
+                referenced_projects=ctx.opts.referenced_projects,
+                project_name=ctx.opts.project_name,
+                referenced_project_surfaces=ctx.opts.referenced_project_surfaces,
+            ),
         ),
     ),
     DiagnosticRuleEntry(
@@ -638,7 +650,8 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(
         name="implementsMembers",
         run=lambda ctx, push: check_implements_members(
-            ctx.source, ctx.mod, ctx.symbols, ctx.module_kind, ctx.opts.project_class_members, ctx.activity, push
+            ctx.source, ctx.mod, ctx.symbols, ctx.module_kind, ctx.opts.project_class_members, ctx.activity, push,
+            ctx.member_ctx.referenced_project_surfaces, ctx.member_ctx.referenced_lookup_order,
         ),
     ),
     DiagnosticRuleEntry(
@@ -1102,6 +1115,25 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
         # and Word).
         block_headers=True,
         procedure_statements=lambda ctx, push: check_member_not_found(ctx.source, ctx.member_ctx, push),
+    ),
+    DiagnosticRuleEntry(
+        name="referencedProjectNames",
+        # `If ProbeLibrary.Widget Is Nothing Then` fails as a statement does.
+        block_headers=True,
+        procedure_statements=lambda ctx, push: check_referenced_project_names(
+            ctx.source,
+            ctx.mod,
+            ctx.opts.referenced_project_surfaces,
+            ctx.symbols.root.children or [],
+            ctx.opts.project_visible_symbols,
+            ctx.opts.project_module_names,
+            ReferencedLookupOrder(
+                ctx.opts.referenced_libraries,
+                (ctx.opts.host_model or {}).get("hostName") or ctx.opts.host or "Excel",
+            ),
+            ctx.opts.host_model,
+            push,
+        ),
     ),
     DiagnosticRuleEntry(
         name="moduleMemberForms",

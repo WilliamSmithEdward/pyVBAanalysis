@@ -28,6 +28,7 @@ from .diagnostics import AnalyzeModuleOptions, VbaDiagnostic, analyze_module
 from .symbols import ModuleInput, ModuleSymbolKind, ProjectIndex, ProjectIndexOptions
 
 if TYPE_CHECKING:
+    from .symbols.referenced_projects import ReferencedProjectSurface
     from .symbols.sheet_changes import WorkbookSheetInfo
 
 
@@ -43,6 +44,8 @@ def analyze_module_options_for(
     host: str | None = None,
     referenced_hosts: Sequence[str] | None = None,
     referenced_libraries: Sequence[str] | None = None,
+    referenced_projects: Sequence[str] | None = None,
+    referenced_project_surfaces: Sequence[ReferencedProjectSurface] | None = None,
     project_name: str | None = None,
     workbook_sheets: Sequence[WorkbookSheetInfo] | None = None,
 ) -> AnalyzeModuleOptions:
@@ -63,6 +66,10 @@ def analyze_module_options_for(
     the reference list is unknown, [] that it is known to name nothing else.
     ``referenced_libraries`` names every library the project references as its dir
     stream records them (`Scripting`, `MSForms`); None means unknown.
+    ``referenced_projects`` names which of those are other VBA projects, and
+    ``referenced_project_surfaces`` says what each one that was read offers (build
+    one with symbols.referenced_projects.referenced_project_surface from the
+    referenced project's modules); a referenced project without a surface is unread.
     ``project_name`` is the project's own name as its dir stream records it
     (`VBAProject`), read with the references; None means unknown.
     ``workbook_sheets`` lists the sheets of the workbook the project lives in, in
@@ -72,6 +79,8 @@ def analyze_module_options_for(
         host=host,
         referenced_hosts=referenced_hosts,
         referenced_libraries=referenced_libraries,
+        referenced_projects=referenced_projects,
+        referenced_project_surfaces=referenced_project_surfaces,
         project_name=project_name,
         workbook_sheets=workbook_sheets,
         module_name=module_name,
@@ -156,6 +165,8 @@ def analyze_project(
     host: str | None = None,
     referenced_hosts: Sequence[str] | None = None,
     referenced_libraries: Sequence[str] | None = None,
+    referenced_projects: Sequence[str] | None = None,
+    referenced_project_surfaces: Sequence[ReferencedProjectSurface] | None = None,
     project_name: str | None = None,
     workbook_sheets: Sequence[WorkbookSheetInfo] | None = None,
 ) -> dict[str, list[VbaDiagnostic]]:
@@ -212,6 +223,8 @@ def analyze_project(
             host=host,
             referenced_hosts=referenced_hosts,
             referenced_libraries=referenced_libraries,
+            referenced_projects=referenced_projects,
+            referenced_project_surfaces=referenced_project_surfaces,
             project_name=project_name,
             workbook_sheets=workbook_sheets,
         )
