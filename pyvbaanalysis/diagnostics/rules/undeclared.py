@@ -40,6 +40,7 @@ from ...host import (
 from ...host.host_libraries import HOST_LIBRARY_NAMES
 from ...host.host_model import (
     HostObjectModel,
+    get_excel_object_model,
     get_host_members,
     resolve_host_enum,
     resolve_host_global_member,
@@ -1102,16 +1103,20 @@ def designer_class_member_names(
     a module they are in scope unqualified, exactly as the module's own procedures
     are, because the module IS one of these. Empty when the caller cannot say which
     class it is, or the model does not carry that type."""
-    if not designer_class or model is None:
+    if not designer_class:
         return frozenset()
-    by_type: dict[str, frozenset[str]] | None = _DESIGNER_CLASS_MEMBER_NAMES.get(model)
+    # No model means Excel's, as the extension analyzes a workbook: an .xlsm
+    # sheet has its class as its designer (XLIDE #225), and takes its members
+    # bare (XLIDE #1649).
+    resolved = model if model is not None else get_excel_object_model()
+    by_type: dict[str, frozenset[str]] | None = _DESIGNER_CLASS_MEMBER_NAMES.get(resolved)
     if by_type is None:
         by_type = {}
-        _DESIGNER_CLASS_MEMBER_NAMES.put(by_type, model)
+        _DESIGNER_CLASS_MEMBER_NAMES.put(by_type, resolved)
     key = designer_class.lower()
     names = by_type.get(key)
     if names is None:
-        names = frozenset(member["name"].lower() for member in get_host_members(designer_class, model))
+        names = frozenset(member["name"].lower() for member in get_host_members(designer_class, resolved))
         by_type[key] = names
     return names
 

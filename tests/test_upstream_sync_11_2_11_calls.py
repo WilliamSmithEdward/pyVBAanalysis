@@ -19,6 +19,7 @@ from pyvbaanalysis.diagnostics.analyze_module import _run_rules, with_resolved_h
 from pyvbaanalysis.conditional import ConditionalCompilationEnvironment, parse_project_conditional_constants
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions
 from pyvbaanalysis.diagnostics.rule_metadata import diagnostic_metadata_for_code
+from pyvbaanalysis.diagnostics.rules.undeclared import designer_class_member_names
 from pyvbaanalysis.evidence import DATA_DIR
 from pyvbaanalysis.symbols import (
     ImplicitMember,
@@ -363,3 +364,41 @@ def test_1564_rules_do_not_raise_on_mid_with_an_empty_start() -> None:
 
     source = 'Sub A()\n    Dim s As String\n    Mid(s, ) = "z"\nEnd Sub\n'
     _run_rules(source, with_resolved_host_model(AnalyzeModuleOptions()), raise_error)
+
+
+# -- 647576aa: an .xlsm sheet's module takes its Worksheet members bare -------
+
+
+def _undeclared_names(body: str, implicit: list[ImplicitMember]) -> list[str]:
+    """Undeclared names in a sheet whose class the workbook supplied, with the
+    host named and no model passed, as the extension analyzes an .xlsm."""
+    src = f"Option Explicit\nPublic Function Probe() As Variant\n    {body}\nEnd Function\n"
+    opts = AnalyzeModuleOptions(
+        module_name="Sheet1", module_kind=ModuleSymbolKind.DOCUMENT, document_type="worksheet",
+        designer_class="Excel.Worksheet", host="excel", implicit_members=implicit,
+        known_identifiers=set(), known_procedures=set(),
+    )
+    return [
+        src[d.span.start : d.span.end]
+        for d in analyze_module(src, opts)
+        if d.code in ("undeclared-variable", "unknown-call")
+    ]
+
+
+@pytest.mark.parametrize("body", [
+    "Probe = UsedRange.Address", "Probe = Shapes.Count", "Probe = Index", "Activate", "Unprotect",
+])
+def test_1649_sheet_with_a_designer_class_takes_its_members_bare(body: str) -> None:
+    assert _undeclared_names(body, []) == []
+    assert _undeclared_names(body, [ImplicitMember("CommandButton1", "Object")]) == []
+
+
+@pytest.mark.parametrize("body, name", [
+    ("Probe = Nope", "Nope"), ("Probe = FullName", "FullName"), ("Nope", "Nope"),
+])
+def test_1649_sheet_with_a_designer_class_still_reports_what_it_lacks(body: str, name: str) -> None:
+    assert _undeclared_names(body, []) == [name]
+
+
+def test_1649_designer_class_members_default_to_excel() -> None:
+    assert "usedrange" in designer_class_member_names("Excel.Worksheet", None)
