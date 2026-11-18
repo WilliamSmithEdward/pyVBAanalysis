@@ -19,6 +19,7 @@ from typing import Protocol
 from ..call.call_context import bare_call_statement_target
 from ..js_compat import js_trim
 from ..lexer.token_kinds import TokenKind, VbaToken
+from ..lexer.tokenize import tokenize_cached
 from ..parser.nodes import Span
 from ..symbols.symbol_model import qualified_procedure_key
 from .context import PushFn, statement_tokens
@@ -554,7 +555,8 @@ def validate_arity(
                     "argumentCount",
                     f"Parameter '{strip_header_brackets(missing.name)}' of '{display_name}' "
                     f"is not Optional, and the call gives it no argument, by position or by "
-                    f"name. This is a VBE compile error: Argument not optional.",
+                    f"name. This is a VBE compile error: "
+                    f"{'Syntax error' if _syntax_when_short(source, sig, call) else 'Argument not optional'}.",
                     call.name_span,
                 )
         return  # positional count is not validated alongside named arguments
@@ -598,12 +600,180 @@ def validate_arity(
     ):
         return
     if n < required or n > maximum:
-        push(
-            "argumentCount",
-            f"Wrong number of arguments to '{display_name}': expected "
-            f"{describe_arity(required, maximum)}, but got {n}.",
-            call.name_span,
+        # `Call MsgBox "hello"`: an explicit Call with its arguments outside
+        # parentheses is a Syntax error, whatever the count. As a statement of its
+        # own call-requires-parens reports it. In a one-line If's branch, where
+        # that rule does not run, it is reported here when its count is short
+        # too; a branch Call to a procedure with no required parameter, or to a
+        # member, goes unreported, as before (XLIDE #1667).
+        outside = _call_arguments_outside_parentheses(source, call) if call.explicit_call and n == 0 else None
+        if outside == "statement":
+            return
+        if outside == "branch":
+            push(
+                "argumentCount",
+                f"The Call to '{display_name}' gives its arguments outside parentheses. This is a "
+                "VBE compile error: Syntax error.",
+                call.name_span,
+            )
+            return
+        missing_param = params[n] if n < required else None
+        # Too few is "Argument not optional", except for the VBA functions the VBE
+        # parses as its own syntax, where it is a Syntax error (measured in Excel,
+        # Word, PowerPoint and Access 16.0).
+        if missing_param is None:
+            message = (
+                f"Wrong number of arguments to '{display_name}': expected "
+                f"{describe_arity(required, maximum)}, but got {n}."
+            )
+        elif _syntax_when_short(source, sig, call):
+            message = (
+                f"The call to '{display_name}' gives {n} of its {required} required "
+                f"argument{'' if required == 1 else 's'}. This is a VBE compile error: Syntax error."
+            )
+        else:
+            message = (
+                f"'{strip_header_brackets(missing_param.name)}' is required by '{display_name}', "
+                f"which got {n} argument{'' if n == 1 else 's'}. This is a VBE compile error: "
+                "Argument not optional."
+            )
+        push("argumentCount", message, call.name_span)
+
+
+# VBA's functions that the VBE parses as its own syntax, so that a call with too
+# few arguments is a Syntax error, not "Argument not optional": `CInt()`, `Len()`,
+# `InStr("a")`. Measured in Excel, Word, PowerPoint and Access 16.0 (build
+# 20527), where the other VBA functions measured with a required parameter give
+# "Argument not optional", but for CallByName and MIRR, whose arguments' types
+# are checked first ("Type mismatch"), and FileAttr, whose second argument the
+# VBE does not require (XLIDE #1667).
+_SYNTAX_WHEN_SHORT: frozenset[str] = frozenset({
+    "len", "lenb", "instr", "instrb", "strcomp", "string$",
+    "cbool", "cbyte", "ccur", "cdate", "cdbl", "cint", "clng", "clnglng", "clngptr", "csng", "cstr", "cvar",
+    "cverr", "abs", "int", "fix", "sgn", "lbound", "ubound",
+})
+
+_MID_NAME_RE = re.compile(r"^midb?\$?\Z")
+
+
+def _raw_at(toks: Sequence[VbaToken], index: int) -> str | None:
+    return toks[index].raw_text if 0 <= index < len(toks) else None
+
+
+def _syntax_when_short(source: str, sig: CallableTypeSignature, call: CallArguments) -> bool:
+    """Whether a call with too few arguments is a Syntax error in the VBE: a bare
+    call of one of _SYNTAX_WHEN_SHORT (`VBA.CLng()` is "Argument not optional"), a
+    Mid statement's target, `Mid(s) = "x"`, and `Debug.Assert` (measured in Excel,
+    Word, PowerPoint and Access 16.0). Read from the module's tokens, so spacing,
+    line numbers, continuations and strings don't mislead."""
+    lower = sig.name.lower()
+    # A bracketed name, `[Len]()`, is an ordinary identifier, not the VBE's syntax.
+    if source[call.name_span.start : call.name_span.start + 1] == "[":
+        return False
+    if sig.runtime and not call.qualifier and not call.vba_library and lower in _SYNTAX_WHEN_SHORT:
+        return True
+    is_assert = lower == "assert"
+    is_mid = _MID_NAME_RE.match(lower) is not None and not call.qualifier
+    if not is_assert and not is_mid:
+        return False
+    toks = tokenize_cached(source)
+    at = _token_index_at(toks, call.name_span.start)
+    if at < 0:
+        return False
+    if is_assert:
+        # VBA's Debug object, not a member reached through one: `h.Debug.Assert`.
+        before_debug = _raw_at(toks, at - 2)
+        return (
+            _raw_at(toks, at - 1) == "."
+            and before_debug is not None
+            and before_debug.lower() == "debug"
+            and _raw_at(toks, at - 3) not in (".", "!")
         )
+    # A Mid statement: Mid heads its statement, and `(...) =` follows it.
+    if not _statement_head_before(toks, at):
+        return False
+    # `Mid$` lexes as Mid and a `$` of its own.
+    open_ = at + 2 if _raw_at(toks, at + 1) == "$" else at + 1
+    close = _matching_parenthesis(toks, open_)
+    return close >= 0 and _raw_at(toks, close + 1) == "="
+
+
+def _call_arguments_outside_parentheses(source: str, call: CallArguments) -> str | None:
+    """Where an explicit Call with an argument after its name, outside
+    parentheses, stands: heading a statement of its own ("statement"), or as a
+    one-line If's branch ("branch"). None when the Call has no such argument."""
+    toks = tokenize_cached(source)
+    at = _token_index_at(toks, call.name_span.start)
+    following = toks[at + 1] if 0 <= at and at + 1 < len(toks) else None
+    if (
+        following is None
+        or following.kind in (TokenKind.NEWLINE, TokenKind.COLON, TokenKind.COMMENT)
+        or following.raw_text == "("
+        or (following.kind is TokenKind.KEYWORD and following.raw_text.lower() == "else")
+    ):
+        return None
+    call_at = at
+    while call_at > 0 and toks[call_at].raw_text.lower() != "call" and toks[call_at].kind is not TokenKind.NEWLINE:
+        call_at -= 1
+    if toks[call_at].raw_text.lower() != "call":
+        return None
+    before = toks[call_at - 1] if call_at > 0 else None
+    return (
+        "branch"
+        if before is not None and before.kind is TokenKind.KEYWORD and before.raw_text.lower() in ("then", "else")
+        else "statement"
+    )
+
+
+def _token_index_at(toks: Sequence[VbaToken], offset: int) -> int:
+    """The index of the token that starts at `offset`, or -1."""
+    low, high = 0, len(toks) - 1
+    while low <= high:
+        mid = (low + high) >> 1
+        if toks[mid].start < offset:
+            low = mid + 1
+        elif toks[mid].start > offset:
+            high = mid - 1
+        else:
+            return mid
+    return -1
+
+
+def _statement_head_before(toks: Sequence[VbaToken], at: int) -> bool:
+    """Whether the token at `at` heads a statement: after a line's start, a line
+    number, a colon, or a one-line If's Then or Else."""
+    prev = at - 1
+    if (
+        0 <= prev < len(toks)
+        and toks[prev].kind is TokenKind.INTEGER_LITERAL
+        and (prev == 0 or toks[prev - 1].kind is TokenKind.NEWLINE)
+    ):
+        prev -= 1
+    tok = toks[prev] if 0 <= prev < len(toks) else None
+    if tok is None or tok.kind in (TokenKind.NEWLINE, TokenKind.COLON):
+        return True
+    return (
+        tok.kind is TokenKind.KEYWORD
+        and tok.raw_text.lower() in ("then", "else")
+        and _raw_at(toks, prev - 1) not in (".", "!")
+    )
+
+
+def _matching_parenthesis(toks: Sequence[VbaToken], open_: int) -> int:
+    """The index of the `)` closing the `(` at `open_`, or -1."""
+    if _raw_at(toks, open_) != "(":
+        return -1
+    depth = 0
+    for i in range(open_, len(toks)):
+        if toks[i].kind is TokenKind.NEWLINE:
+            return -1
+        if toks[i].raw_text == "(":
+            depth += 1
+        if toks[i].raw_text == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
 
 
 # VBA's parameterless functions whose result `Now(1)` indexes (measured in Excel 16.0).

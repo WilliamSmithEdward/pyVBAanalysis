@@ -678,3 +678,133 @@ def test_1665_a_hosts_own_loadpicture_keeps_its_arguments() -> None:
 ])
 def test_1665_savepicture_arguments_follow_stdole(lines: tuple[str, ...], expected: list[str]) -> None:
     assert _date_codes(_stdole_procedure(*lines)) == expected
+
+
+# -- beb4e2d1: a call with too few arguments is "Argument not optional" (#1667) -
+
+_DEFAULT_DOCUMENT_MODULES = {"excel": ["ThisWorkbook", "Sheet1"], "word": ["ThisDocument"], "powerpoint": [], "access": []}
+_TOO_FEW_FIXTURES = [raw for raw in _RAW_CASES if raw["id"].startswith("too_few_arguments_")]
+
+
+def _project_findings(
+    modules: list[dict], host: str = "excel", default_documents: bool = False
+) -> list:
+    """Every finding of the fixture's modules, for the project as the extension
+    reads it: the host's default references, and with `default_documents` the
+    host's own document modules the fixture leaves out, as empty modules."""
+    inputs = [_oracle_input(m) for m in modules]
+    named = {m.module_name.lower() for m in inputs}
+    extra = (
+        [ModuleInput(name, ModuleSymbolKind.DOCUMENT, "") for name in _DEFAULT_DOCUMENT_MODULES[host]
+         if name.lower() not in named]
+        if default_documents
+        else []
+    )
+    index = ProjectIndex(ProjectIndexOptions(ConditionalCompilationEnvironment(project_constants={})))
+    for module in [*inputs, *extra]:
+        index.set_module(module)
+    out = []
+    for module in inputs:
+        opts = analyze_module_options_for(
+            index, module.module_name, module.module_kind, host=host,
+            referenced_libraries=_DEFAULT_REFERENCES[host], project_name=_PROJECT_NAMES[host],
+            conditional_compilation=ConditionalCompilationEnvironment(project_constants={}),
+        )
+        out += analyze_module(module.source, opts)
+    return out
+
+
+def _argument_messages(modules: list[dict], host: str = "excel") -> list[str]:
+    return [d.message for d in _project_findings(modules, host, True) if d.code == "argument-count"]
+
+
+def _short_procedure(*lines: str) -> list[dict]:
+    source = "\r\n".join([
+        "Option Explicit", "Sub Main()", "    Dim v As Variant, s As String",
+        *(f"    {line}" for line in lines), "End Sub", "",
+    ])
+    return [{"name": "Module1", "type": "standard", "source": source}]
+
+
+def test_1667_fixtures_cover_every_office_host() -> None:
+    assert {raw["host"] for raw in _TOO_FEW_FIXTURES} == {"excel", "word", "powerpoint", "access"}
+
+
+@pytest.mark.parametrize("raw", _TOO_FEW_FIXTURES, ids=[raw["id"] for raw in _TOO_FEW_FIXTURES])
+def test_1667_fixture_gets_the_vbe_message(raw: dict) -> None:
+    match = re.search(r"Compile error: (.+?)\. Measured", raw["description"])
+    assert match is not None
+    vbe = match.group(1)
+    messages = _argument_messages(raw["modules"], raw["host"])
+    assert len(messages) == 1
+    if vbe.startswith("Wrong number of arguments"):
+        assert messages[0].startswith("Wrong number of arguments to ")
+    else:
+        assert messages[0].endswith(f"This is a VBE compile error: {vbe}.")
+
+
+def test_1667_names_the_parameter_left_out() -> None:
+    assert _argument_messages(_short_procedure('s = Left("a")')) == [
+        "'Length' is required by 'Left', which got 1 argument. This is a VBE compile error: Argument not optional."
+    ]
+
+
+@pytest.mark.parametrize("line, ending", [
+    ("v = VBA.CLng()", "Argument not optional."),
+    ("v = CLng()", "Syntax error."),
+    ('v = Mid("a")', "Argument not optional."),
+    ('Mid(s) = "x"', "Syntax error."),
+    ('If v Then Mid$(s) = "x"', "Syntax error."),
+    ("Call MsgBox()", "Argument not optional."),
+    ("If True Then Call MsgBox Else v = 1", "Argument not optional."),
+    ("v = [Len]()", "Argument not optional."),
+    ('10 Mid(s) = "x"', "Syntax error."),
+    ('Mid(IIf(True, CStr(Len(s)), s)) = "x"', "Syntax error."),
+    ('If Mid(s) = "a" Then v = 1', "Argument not optional."),
+    ("Debug.   Assert", "Syntax error."),
+    ("v = LBound(Dimension:=1)", "Syntax error."),
+    ("v = Left(Length:=1)", "Argument not optional."),
+])
+def test_1667_too_few_message(line: str, ending: str) -> None:
+    assert _argument_messages(_short_procedure(line))[0].endswith(ending)
+
+
+def test_1667_a_continued_mid_statement_is_a_syntax_error() -> None:
+    assert _argument_messages(_short_procedure("Mid _", '    (s) = "x"'))[0].endswith("Syntax error.")
+
+
+def test_1667_an_explicit_call_without_parentheses() -> None:
+    assert _argument_messages(_short_procedure('Call MsgBox "hello"')) == []
+    assert _argument_messages(_short_procedure('Call MsgBox  "hello"')) == []
+    branch_call = "The Call to 'MsgBox' gives its arguments outside parentheses. This is a VBE compile error: Syntax error."
+    assert _argument_messages(_short_procedure('If v Then Call MsgBox "hello"')) == [branch_call]
+    assert _argument_messages(_short_procedure('If v Then v = 1 Else Call MsgBox "hello"')) == [branch_call]
+    found = _project_findings(_short_procedure('Call MsgBox "hello"'))
+    assert [d.code for d in found if d.severity.value == "error"] == ["call-requires-parens"]
+
+
+def test_1667_pins_the_syntax_error_wording() -> None:
+    assert _argument_messages(_short_procedure("v = CInt()")) == [
+        "The call to 'CInt' gives 0 of its 1 required argument. This is a VBE compile error: Syntax error."
+    ]
+
+
+def test_1667_a_project_member_reached_through_debug_keeps_its_signature() -> None:
+    modules = [
+        {"name": "Module1", "type": "standard",
+         "source": "Option Explicit\r\nSub Main()\r\n    Dim h As New Holder\r\n    h.Debug.Assert\r\nEnd Sub\r\n"},
+        {"name": "Holder", "type": "class",
+         "source": "Option Explicit\r\nPublic Function Debug() As Thing\r\nEnd Function\r\n"},
+        {"name": "Thing", "type": "class",
+         "source": "Option Explicit\r\nPublic Sub Assert(ByVal a As Long)\r\nEnd Sub\r\n"},
+    ]
+    assert _argument_messages(modules)[0].endswith("Argument not optional.")
+
+
+def test_1667_a_project_function_named_like_vba_keeps_its_signature() -> None:
+    modules = [{"name": "Module1", "type": "standard", "source": (
+        "Option Explicit\r\nFunction Abs(a As Long, b As Long) As Long\r\nEnd Function\r\n"
+        "Sub Main()\r\n    Dim v As Variant\r\n    v = Abs(1)\r\nEnd Sub\r\n"
+    )}]
+    message = _argument_messages(modules)[0]
+    assert message.startswith("'b' is required by 'Abs'") and message.endswith("Argument not optional.")
