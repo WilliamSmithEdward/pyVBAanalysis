@@ -819,3 +819,108 @@ def test_erase_element_accepts_what_compiles() -> None:
 def test_erase_element_in_an_inactive_arm_is_left_alone() -> None:
     source = "Sub Main()\n    Dim a(2) As Long\n#If False Then\n    Erase a(1)\n#End If\nEnd Sub\n"
     assert _hits(source, "erase-requires-array") == []
+
+
+# -- acf42528: a ReDim target without bounds ---------------------------------
+
+
+def test_redim_bounds_measured_cases() -> None:
+    cases = _measured("redim_bounds_")
+    assert {_HOSTS.get(case.id, "excel") for case in cases} == {"excel", "word", "powerpoint", "access"}
+    for case in cases:
+        missing = [
+            d
+            for d in _by_code(case.modules[0].source, "malformed-statement", _HOSTS.get(case.id, "excel"))
+            if "missing a bound" in d.message
+        ]
+        if case.expected == "accepted":
+            assert missing == [], case.id
+
+
+def test_redim_target_without_bounds() -> None:
+    source = (
+        "Private Type T\n    x() As Long\nEnd Type\nSub Main()\n"
+        "    Dim a() As Long, b() As Long, m() As Long, v As Variant, t As T\n    ReDim a()\n"
+        "    ReDim Preserve a() As Long\n    ReDim b(1), a, v\n    ReDim m(1, ), m(, 1)\n"
+        "    ReDim a(1 To ), a(To 3)\n    ReDim t.x()\n    With t\n        ReDim .x\n    End With\nEnd Sub\n"
+    )
+    hits = _hits(source, "malformed-statement")
+    assert [_span_text(source, d) for d in hits] == [
+        "a()", "a()", "a", "v", "m(1, )", "m(, 1)", "a(1 To )", "a(To 3)", "t.x()", ".x",
+    ]
+    assert hits[0].severity == DiagnosticSeverity.ERROR
+    for part in ["ReDim target 'a()' is missing a bound", "a(1 To 3)", "Syntax error"]:
+        assert part in hits[0].message
+    assert "t.x(1 To 3)" in hits[8].message
+
+
+def test_redim_without_bounds_after_a_line_number_a_colon_a_comment_and_a_continuation() -> None:
+    source = (
+        "Sub Main()\n    Dim a() As Long, b() As Long\n10  ReDim a()\n    ReDim a(): Beep\n"
+        "    ReDim a() ' note\n    ReDim b(1), _\n        a()\nEnd Sub\n"
+    )
+    assert _spans(source, "malformed-statement") == ["a()", "a()", "a()", "a()"]
+
+
+def test_redim_without_bounds_of_a_scalar_or_constant() -> None:
+    source = "Private Const c As Long = 1\nSub Main()\n    Dim n As Long\n    ReDim n\n    ReDim c()\nEnd Sub\n"
+    assert _spans(source, "malformed-statement") == ["n", "c()"]
+    assert _hits(source, "scalar-redim") == []
+
+
+@pytest.mark.parametrize("line", ["ReDim a(1", "ReDim a(1))", "ReDim a(1) = 2", "ReDim b(1), a("])
+def test_redim_unbalanced_or_continued_target_is_left_alone(line: str) -> None:
+    source = "Sub Main()\n    Dim a() As Long, b() As Long\n    " + line + "\nEnd Sub\n"
+    assert [d for d in _hits(source, "malformed-statement") if "missing a bound" in d.message] == []
+
+
+def test_redim_without_bounds_keeps_the_element_type_report() -> None:
+    source = "Sub Main()\n    Dim a() As Long\n    ReDim a() As String\nEnd Sub\n"
+    assert _spans(source, "malformed-statement") == ["a()"]
+    assert len(_hits(source, "redim-type-change")) == 1
+
+
+def test_redim_target_that_is_no_name_is_left_alone() -> None:
+    source = "Sub Main()\n    Dim a() As Long, b As Long\n    ReDim a b\nEnd Sub\n"
+    assert [d for d in _hits(source, "malformed-statement") if "missing a bound" in d.message] == []
+
+
+def test_redim_member_named_as_is_a_member() -> None:
+    source = "Sub Main()\n    Dim o As Object\n    ReDim o.As(1)\nEnd Sub\n"
+    assert _hits(source, "malformed-statement") == []
+
+
+def test_redim_without_bounds_through_a_subscript() -> None:
+    source = (
+        "Private Type T\n    x() As Long\n    f(2) As Long\nEnd Type\nSub Main()\n    Dim u(2) As T\n"
+        "    ReDim u(1).x(), u(1).f()\nEnd Sub\n"
+    )
+    assert _spans(source, "malformed-statement") == ["u(1).x()", "u(1).f()"]
+    assert _hits(source, "fixed-array-redim") == []
+    assert _hits(source, "scalar-redim") == []
+
+
+def test_redim_type_member_without_bounds() -> None:
+    source = (
+        "Private Type T\n    n As Long\n    f(2) As Long\nEnd Type\nSub Main()\n    Dim t As T\n"
+        "    ReDim t.n(), t.f(), t.f(1 To )\nEnd Sub\n"
+    )
+    assert _spans(source, "malformed-statement") == ["t.n()", "t.f()", "t.f(1 To )"]
+    assert _hits(source, "scalar-redim") == []
+    assert _hits(source, "fixed-array-redim") == []
+
+
+def test_redim_scalar_with_empty_parentheses() -> None:
+    source = "Sub Main()\n    Dim n As Long\n    ReDim n()\nEnd Sub\n"
+    assert _spans(source, "malformed-statement") == ["n()"]
+    assert _hits(source, "scalar-redim") == []
+
+
+def test_redim_with_bounds_is_accepted() -> None:
+    source = (
+        "Private Type T\n    x() As Long\nEnd Type\nSub Main()\n"
+        "    Dim a() As Long, m() As Long, o As Object, t As T, b()\n    ReDim a(1), m(1, 0 To 2)\n"
+        "    ReDim Preserve a(0 To 1)\n    ReDim a(o.To), a(1 To o.To)\n    ReDim t.x(1)\n    With t\n"
+        "        ReDim .x(1)\n    End With\n#If False Then\n    ReDim a()\n#End If\nEnd Sub\n"
+    )
+    assert _hits(source, "malformed-statement") == []

@@ -53,7 +53,7 @@ from ..type_fields import (
 )
 from ..type_member_state import MemberStatesAt, type_member_states_at
 from ..walker import active_module_members, statement_tokens_after_leading_label, token_name, token_text
-from .arrays import module_option_base
+from .arrays import module_option_base, redim_target_bounds
 
 _NOT_SET = "This will raise Run-time error '91': Object variable or With block variable not set."
 
@@ -711,7 +711,8 @@ def _check_resizes(
             continue
         group = [tok for tok in toks[start:i] if tok.kind is not TokenKind.COMMENT]
         start = i + 1
-        if not group:
+        # A ReDim target without bounds is a Syntax error, which the ReDim target rule reports.
+        if not group or (head == "redim" and redim_target_bounds(group).missing):
             continue
 
         def at(last: VbaToken, group: list[VbaToken] = group) -> Span:
