@@ -61,10 +61,11 @@ from ..walker import (
 )
 from .assignments import scalar_function_call_target
 
-# The statements the call extractor leaves to the file rules, whose argument
-# count is still checked here (XLIDE issue #1414, measured in Excel, Word,
-# PowerPoint and Access 16.0).
-_OWN_RULE_STATEMENTS = frozenset({"chdir", "chdrive", "kill", "mkdir", "rmdir"})
+# The statements the call extractor does not read as calls, whose argument count
+# is still checked here: the file statements the file rules own (XLIDE issue
+# #1414), and Load and Unload (XLIDE #1668, measured in Excel, Word, PowerPoint
+# and Access 16.0).
+_OWN_RULE_STATEMENTS = frozenset({"chdir", "chdrive", "kill", "mkdir", "rmdir", "load", "unload"})
 
 
 def check_argument_count(

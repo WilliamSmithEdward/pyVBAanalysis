@@ -889,3 +889,73 @@ def test_1666_local_array_with_no_as_clause(head: tuple[str, ...], expected: lis
         [*head, "Sub Main()", "    Dim c As New Collection", "    Dim a(1)", "    a(0) = c", "End Sub", ""]
     )
     assert _error_codes([{"name": "Module1", "type": "standard", "source": source}]) == expected
+
+
+# -- b8d1b66e: the arguments of Beep, Randomize, Reset, Load and Unload (#1668) -
+
+_STATEMENT_ARGUMENT_FIXTURES = [raw for raw in _RAW_CASES if raw["id"].startswith("statement_arguments_")]
+
+
+def _statement_codes(modules: list[dict], host: str = "excel") -> list[str]:
+    return [d.code for d in _project_findings(modules, host) if d.severity.value == "error"]
+
+
+def _statement_procedure(*lines: str) -> list[dict]:
+    source = "\r\n".join([
+        "Option Explicit", "Sub Main()", "    Dim c As New Collection",
+        *(f"    {line}" for line in lines), "End Sub", "",
+    ])
+    return [{"name": "Module1", "type": "standard", "source": source}]
+
+
+def test_1668_fixtures_cover_every_office_host() -> None:
+    assert {raw["host"] for raw in _STATEMENT_ARGUMENT_FIXTURES} == {"excel", "word", "powerpoint", "access"}
+
+
+@pytest.mark.parametrize(
+    "raw", _STATEMENT_ARGUMENT_FIXTURES, ids=[raw["id"] for raw in _STATEMENT_ARGUMENT_FIXTURES]
+)
+def test_1668_statement_arguments_fixture(raw: dict) -> None:
+    expected = [] if raw["expected"] == "accepted" else ["argument-count"]
+    assert _statement_codes(raw["modules"], raw["host"]) == expected
+
+
+@pytest.mark.parametrize("lines, expected", [
+    (("If True Then Beep 1",), ["argument-count"]),
+    (("Beep: Reset 1",), ["argument-count"]),
+    (("GoTo Reset", "Reset:"), []),
+    (('If True Then Beep Else MsgBox "a"',), []),
+    (("If True Then Beep: Beep Else Reset",), []),
+    (("If True Then Beep: Beep 1 Else Beep",), ["argument-count"]),
+    (("If True Then Beep Else Beep 1",), ["argument-count"]),
+    (("Dim x As Single", 'If True Then Beep: Randomize x! Else MsgBox "a", 1'), []),
+    (("Dim x As Single", "If True Then Randomize x! Else Beep 1"), ["argument-count"]),
+    (("GoTo Load", "10 Load: Beep"), []),
+    (("Dim o As Object", "Call Unload"), ["argument-count"]),
+    (("Dim o As Object", "Load (o), o"), ["argument-count"]),
+    (("Dim o As Object", "Load (o)"), []),
+    (("Beep: Unload: Beep",), ["argument-count"]),
+    (('Kill ("a")',), []),
+])
+def test_1668_statement_argument_counts(lines: tuple[str, ...], expected: list[str]) -> None:
+    assert _statement_codes(_statement_procedure(*lines)) == expected
+
+
+def test_1668_load_and_unload_a_userform() -> None:
+    modules = [
+        {"name": "Module1", "type": "standard",
+         "source": "Option Explicit\r\nSub Main()\r\n    Load Form1\r\n    Unload Form1\r\nEnd Sub\r\n"},
+        {"name": "Form1", "type": "userform",
+         "source": "Option Explicit\r\nPrivate Sub UserForm_Click()\r\n    Unload Me\r\nEnd Sub\r\n"},
+    ]
+    assert _statement_codes(modules) == []
+
+
+def test_1668_a_then_branch_is_read_without_its_else() -> None:
+    found = _statement_codes(_statement_procedure("Dim x As Integer", "If True Then x = 40000 Else x = 1"))
+    assert "arithmetic-overflow" in found
+
+
+def test_1668_a_label_after_a_lone_cr() -> None:
+    source = "\r".join(["Option Explicit", "Sub Main()", "    GoTo Kill", "Kill:", "End Sub", ""])
+    assert _statement_codes([{"name": "Module1", "type": "standard", "source": source}]) == []

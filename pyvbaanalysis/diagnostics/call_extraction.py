@@ -18,9 +18,11 @@ from typing import Protocol
 
 from ..call.call_context import bare_call_statement_target
 from ..js_compat import js_trim
+from ..lexer.token_helpers import match_paren_from
 from ..lexer.token_kinds import TokenKind, VbaToken
 from ..lexer.tokenize import tokenize_cached
 from ..parser.nodes import Span
+from ..parser.parser_state import is_then_or_else_keyword_at
 from ..symbols.symbol_model import qualified_procedure_key
 from .context import PushFn, statement_tokens
 from .walker import first_executable_token_index, strip_header_brackets, token_name, token_text
@@ -300,7 +302,7 @@ def extract_call(source: str, span: Span) -> CallArguments | None:
         else:
             arg_toks = []  # `Call Foo` with no parameter list
     else:
-        arg_toks = toks[callee_idx + 1 :]
+        arg_toks = _until_colon_or_else(toks[callee_idx + 1 :])
 
     split = empty_arg_split() if not arg_toks else split_arg_slots(arg_toks, slice_start)
     return CallArguments(
@@ -313,28 +315,71 @@ def extract_call(source: str, span: Span) -> CallArguments | None:
     )
 
 
+def _until_colon_or_else(toks: list[VbaToken]) -> list[VbaToken]:
+    """A statement's tokens up to its first colon or a one-line If's Else, which
+    no argument holds: in `If ok Then Beep: Beep Else Beep` the first Beep ends at
+    the colon, and the second at Else. A member named Else, `d.Else` or `d!Else`,
+    is a name, but `x! Else` is a Single and then Else, as the parser reads it
+    (XLIDE #1668)."""
+    for i, tok in enumerate(toks):
+        if tok.kind is TokenKind.COLON or is_then_or_else_keyword_at(toks, i, "else"):
+            return toks[:i]
+    return toks
+
+
 _LINE_LABEL_COLON_RE = re.compile(r"[ \t]*:")
+_LINE_START_PREFIX_RE = re.compile(r"^[ \t]*(?:\d+[ \t]+)?\Z")
+
+
+def _at_line_start(source: str, offset: int) -> bool:
+    """Whether only blanks and a line number stand between `offset` and the start
+    of its line, past a CR or an LF."""
+    i = offset - 1
+    while i >= 0 and source[i] != "\n" and source[i] != "\r":
+        i -= 1
+    return _LINE_START_PREFIX_RE.match(source[i + 1 : offset]) is not None
 
 
 def argument_list_statement_call(source: str, span: Span, names: AbstractSet[str]) -> CallArguments | None:
-    """`Kill "a", "b"`: one of the statements the call extractor leaves to rules of
-    their own, read as the call it also is, for its argument count."""
+    """`Kill "a", "b"`, `Load c, c`: one of the statements the call extractor does
+    not read as calls, read as the call it also is, for its argument count."""
     toks = statement_tokens(source, span)
     at = first_executable_token_index(toks)
+    # `Call Load` with no argument list is the statement's call too (XLIDE #1668).
+    explicit_call = token_text(toks[at] if at < len(toks) else None) == "call"
+    if explicit_call:
+        at += 1
     name = token_name(toks[at]) if at < len(toks) else None
     following = toks[at + 1].raw_text if at + 1 < len(toks) else None
-    if not name or name.lower() not in names or following in ("=", ".", "(", ":"):
+    if (
+        not name
+        or name.lower() not in names
+        or following in ("=", ".", ":")
+        or (explicit_call and following is not None)
+    ):
         return None
-    # `Kill:` is a line label of that name (XLIDE issue #272); the colon ends the
-    # statement's span, so look past it in the source.
+    # `Kill("a")` and `Load (o)` are one parenthesized argument, which the
+    # expression rules read; `Load (o), o` goes on past it, a list of two.
+    if following == "(":
+        close = match_paren_from(toks, at + 1)
+        if close < 0 or close == len(toks) - 1:
+            return None
+    # `Kill:` at the start of a line is a line label of that name (XLIDE issue
+    # #272), and the colon ends the statement's span, so look past it in the
+    # source. After another statement and a colon, `Beep: Load: Beep`, it is the
+    # statement.
+    name_start = span.start + toks[at].start
     name_end = span.start + toks[at].end
-    if _LINE_LABEL_COLON_RE.match(source[name_end : name_end + 64]) is not None:
+    if _LINE_LABEL_COLON_RE.match(source[name_end : name_end + 64]) is not None and _at_line_start(
+        source, name_start
+    ):
         return None
-    arg_toks = toks[at + 1 :]
+    arg_toks = _until_colon_or_else(toks[at + 1 :])
     split = empty_arg_split() if not arg_toks else split_arg_slots(arg_toks, span.start)
     return CallArguments(
         name=name,
-        name_span=Span(span.start + toks[at].start, span.start + toks[at].end),
+        name_span=Span(name_start, name_end),
+        explicit_call=True if explicit_call else None,
         slots=split.slots,
         slot_spans=split.spans,
         slice_start=span.start,
