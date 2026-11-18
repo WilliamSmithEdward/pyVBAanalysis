@@ -19,7 +19,8 @@ from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 
 from ...completion.member_access import MemberCompletionContext, resolve_exact_member_completion
-from ...host.host_model import resolve_host_global_member
+from ...host.host_model import HostObjectModel, application_member_names, resolve_host_global_member
+from ...host.stdole_library import STDOLE_FUNCTION_SIGNATURES, STDOLE_MEASURED_HOSTS
 from ...lexer.keyword_table import is_reserved_identifier
 from ...lexer.token_helpers import split_top_level_token_groups
 from ...lexer.token_kinds import VbaToken
@@ -78,6 +79,8 @@ def check_argument_count(
     same_module_signatures = same_module_callable_signatures(symbols)
     project_signatures = unique_project_type_signatures(project_procedures)
     module_signatures = callable_type_signatures_for(symbols, project_procedures)
+    application_members = application_member_names(member_ctx.model)
+    host_model = member_ctx.model
 
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
         source_names = source_name_scope_for(symbols, member, project_visible_symbols)
@@ -103,7 +106,8 @@ def check_argument_count(
             effective = statement_call or qualified_statement_call
             if effective is not None:
                 _validate_callable_arity(
-                    source, effective, same_module_signatures, project_signatures, source_names, push, object_names
+                    source, effective, same_module_signatures, project_signatures, source_names, push, object_names,
+                    application_members, host_model,
                 )
                 _record_project_qualified_call_span(effective, project_qualified_call_spans)
             for call in expression_calls(
@@ -112,7 +116,8 @@ def check_argument_count(
                 if call.name_span.start in setter_names or _same_call_target(call, effective):
                     continue
                 _validate_callable_arity(
-                    source, call, same_module_signatures, project_signatures, source_names, push, object_names
+                    source, call, same_module_signatures, project_signatures, source_names, push, object_names,
+                    application_members, host_model,
                 )
                 _record_project_qualified_call_span(call, project_qualified_call_spans)
             for member_call in (
@@ -143,7 +148,7 @@ def check_argument_count(
                 ):
                     _validate_callable_arity(
                         source, branch_call, same_module_signatures, project_signatures,
-                        source_names, push, object_names,
+                        source_names, push, object_names, application_members, host_model,
                     )
                     _record_project_qualified_call_span(branch_call, project_qualified_call_spans)
                 for member_call in member_statement_calls(source, branch, member_ctx):
@@ -312,6 +317,8 @@ def _validate_callable_arity(
     source_names: SourceNameScope | None,
     push: PushFn,
     object_names: AbstractSet[str] = frozenset(),
+    application_members: AbstractSet[str] = frozenset(),
+    host_model: HostObjectModel | None = None,
 ) -> None:
     lower = call.lookup_key or call.name.lower()
     # `VBA.CLng()`: VBA's function, measured to take the arguments its bare
@@ -356,6 +363,20 @@ def _validate_callable_arity(
         runtime_signature = runtime_arity_signature(runtime) if runtime is not None else None
         if runtime_signature is not None:
             validate_arity(source, runtime_signature, call, push)
+            return
+        # stdole's LoadPicture and SavePicture, unless the host has a global of the
+        # name, as Access's Application.LoadPicture(FileName), which the VBE takes
+        # instead (measured in Access 16.0), or VB6's LoadPicture. Measured in the
+        # four Office hosts only, so only there (XLIDE #1665).
+        stdole = STDOLE_FUNCTION_SIGNATURES.get(lower)
+        host_name = "Excel" if host_model is None else (host_model.get("hostName") or "")
+        if (
+            stdole is not None
+            and host_name in STDOLE_MEASURED_HOSTS
+            and lower not in application_members
+            and resolve_host_global_member(call.name, host_model) is None
+        ):
+            validate_arity(source, parse_runtime_display_signature(call.name, stdole), call, push)
 
 
 _Rejection = tuple[str, str, Span, VbaDiagnosticData | None]

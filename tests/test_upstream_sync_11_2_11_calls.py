@@ -533,14 +533,15 @@ _PROJECT_NAMES = {"excel": "VBAProject", "word": "Project", "powerpoint": "VBAPr
 _DATE_FIXTURES = [raw for raw in _RAW_CASES if raw["id"].startswith("date_statement_")]
 
 
-def _date_codes(source: str, host: str = "excel") -> list[str]:
+def _date_codes(source: str, host: str = "excel", references: list[str] | None = None) -> list[str]:
     """Each error code, with the project known as the extension knows it, which
     turns on the undeclared-name check."""
     index = ProjectIndex(ProjectIndexOptions(ConditionalCompilationEnvironment(project_constants={})))
     index.set_module(ModuleInput("Module1", ModuleSymbolKind.STANDARD, source))
     opts = analyze_module_options_for(
         index, "Module1", ModuleSymbolKind.STANDARD, host=host,
-        referenced_libraries=_DEFAULT_REFERENCES[host], project_name=_PROJECT_NAMES[host],
+        referenced_libraries=references if references is not None else _DEFAULT_REFERENCES[host],
+        project_name=_PROJECT_NAMES[host],
     )
     return [d.code for d in analyze_module(source, opts) if d.severity.value == "error"]
 
@@ -574,3 +575,106 @@ def test_1664_date_statement_is_accepted(lines: tuple[str, ...]) -> None:
 ])
 def test_1664_its_value_and_let_or_set_date_still_report(lines: tuple[str, ...]) -> None:
     assert _date_codes(_date_procedure(*lines)) == ["undeclared-variable"]
+
+
+# -- fac65b6d: stdole's LoadPicture, SavePicture and constants (#1665) --------
+
+_STDOLE_FIXTURES = [raw for raw in _RAW_CASES if raw["id"].startswith("stdole_name_")]
+# What the analyzer reports for each refused fixture.
+_STDOLE_REFUSED_AS = {
+    "stdfunctions_bare": "undeclared-variable",
+    "stdfunctions_nope": "undeclared-variable",
+    "savepicture_one": "argument-count",
+    "savepicture_three": "argument-count",
+    "savepicture_none": "argument-count",
+    "savepicture_value": "undeclared-variable",
+    "checked_assign": "undeclared-variable",
+    "color_assign": "undeclared-variable",
+    "for_gray": "undeclared-variable",
+    "input_color": "undeclared-variable",
+    "const_loadpicture": "undeclared-variable",
+}
+# Refused by the VBE and not reported, as upstream has it: LoadPicture's
+# arguments are checked in a statement call only, and Access's own
+# Application.LoadPicture is not arity-checked.
+_STDOLE_KNOWN_QUIET: dict[str, tuple[str, ...] | None] = {
+    "loadpicture_five": None,
+    "loadpicture_four": ("access",),
+    "loadpicture_noarg": ("access",),
+    "const_loadpicture": ("access",),
+}
+
+
+def _stdole_procedure(*lines: str) -> str:
+    return "\r\n".join([
+        "Option Explicit", "Sub Main()", "    Dim p As Object, v As Variant",
+        *(f"    {line}" for line in lines), "End Sub", "",
+    ])
+
+
+def test_1665_fixtures_cover_every_office_host() -> None:
+    assert {raw["host"] for raw in _STDOLE_FIXTURES} == {"excel", "word", "powerpoint", "access"}
+
+
+@pytest.mark.parametrize("raw", _STDOLE_FIXTURES, ids=[raw["id"] for raw in _STDOLE_FIXTURES])
+def test_1665_stdole_fixture(raw: dict) -> None:
+    kind = re.sub(r"_compile$", "", re.sub(r"^stdole_name_(excel|word|powerpoint|access)_", "", raw["id"]))
+    quiet_hosts = _STDOLE_KNOWN_QUIET.get(kind, ())
+    quiet = kind in _STDOLE_KNOWN_QUIET and (quiet_hosts is None or raw["host"] in quiet_hosts)
+    found = _date_codes(raw["modules"][0]["source"], raw["host"])
+    assert found == ([] if raw["expected"] == "accepted" or quiet else [_STDOLE_REFUSED_AS[kind]])
+
+
+@pytest.mark.parametrize("lines", [
+    ('Set p = loadpicture("")',), ("Set p = LoadPicture",), ('Call SavePicture(p, "x")',),
+    ("If v = GRAY Then v = vgacolor",),
+    ("Set p = StdFunctions _", '    .LoadPicture("")'), ('Set p = StdFunctions.[LoadPicture]("")',),
+    ('Call SavePicture(p, "x")',), ("If v Then _", '    SavePicture p, "x"'),
+    ("If v = Color Then v = Gray",), ('If v Then Set p = LoadPicture("") Else LoadPicture ""',),
+    ("Dim x As Single", 'If x! Then SavePicture p, "x"'),
+    ("Get #1, Checked, v",), ("Input #Checked, v",), ("Put #1, , Checked",), ("Input #1, v(Checked)",),
+])
+def test_1665_stdole_names_accepted(lines: tuple[str, ...]) -> None:
+    assert _date_codes(_stdole_procedure(*lines)) == []
+
+
+@pytest.mark.parametrize("lines", [
+    ("v = SavePicture",), ("v = StdFunctions.Nope",), ('StdFunctions.SavePicture p, "x"',),
+    ("Input #1, _", "    Color"), ("For _", "    Gray = 1 To 3", "Next"),
+    ("If v Then Color = 1",), ("If v Then Set Default = p",), ("If v Then v = 1 Else Checked = 2",),
+    ("If v Then _", "    Color = 1"), ('LSet Color = "x"',), ('Mid(Color, 1, 1) = "x"',),
+    ('Mid$(Color, 1) = "x"',), ('If v Then MidB$(Gray, 1) = "x"',), ("Color(1) = 1",),
+    ("If v Then Color(1) = 1",), ("If v Then SavePicture = 1",), ("If v Then v = 1 Else SavePicture = 1",),
+    ("Color(v(1)) = 1",), ("If v Then Checked",), ("If v Then Color 1, 2",), ("If v Then Call Checked",),
+    ("Color(v(v(v(1)))) = 1",), ('Color(v("(")) = 1',),
+    ("Dim x As Single", "If x! Then Color = 1"), ("Dim x As Single", "If True Then x = x! Else Color = 1"),
+    ("Get #1, , Checked",), ("Input #1, v, Color",), ("Line Input #1, Gray",),
+    ('Input #1, v(":"), Color',), ("Input #1, v.Then, Color",), ("Get #1, v!Else, Gray",),
+    ('Set p = LoadPictures("")',), ("v = Grey",),
+])
+def test_1665_stdole_names_written_or_misused_still_report(lines: tuple[str, ...]) -> None:
+    assert _date_codes(_stdole_procedure(*lines)) == ["undeclared-variable"]
+
+
+def test_1665_stdole_names_stay_known_without_the_reference() -> None:
+    assert _date_codes(_stdole_procedure('Set p = LoadPicture("")'), "excel", ["Office"]) == []
+
+
+def test_1665_a_bare_stdfunctions_const_value_is_undeclared() -> None:
+    assert _date_codes("Option Explicit\r\nConst K = StdFunctions\r\n") == ["undeclared-variable"]
+
+
+def test_1665_a_hosts_own_loadpicture_keeps_its_arguments() -> None:
+    opts = AnalyzeModuleOptions(host="vb6", module_name="Module1", module_kind=ModuleSymbolKind.STANDARD)
+    found = analyze_module(_stdole_procedure('LoadPicture "", 0, 0, 1, 1'), opts)
+    assert [d for d in found if d.code == "argument-count"] == []
+    assert _date_codes(_stdole_procedure('Set p = LoadPicture("", 1, 1, 0)'), "access") == []
+
+
+@pytest.mark.parametrize("lines, expected", [
+    (("SavePicture",), ["argument-count"]),
+    (("Call SavePicture()",), ["argument-count"]),
+    (('Call SavePicture(p, "x")',), []),
+])
+def test_1665_savepicture_arguments_follow_stdole(lines: tuple[str, ...], expected: list[str]) -> None:
+    assert _date_codes(_stdole_procedure(*lines)) == expected

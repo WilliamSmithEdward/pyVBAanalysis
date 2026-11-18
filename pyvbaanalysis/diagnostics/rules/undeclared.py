@@ -46,11 +46,14 @@ from ...host.host_model import (
     resolve_host_global_member,
 )
 from ...host.ms_forms_form_control_members import MSFORMS_FORM_CONTROL_MEMBERS
+from ...host.stdole_library import STDOLE_CONSTANT_NAMES, STDOLE_FUNCTION_SIGNATURES
 from ...identity_cache import IdentityLru
 from ...js_compat import JS_WHITESPACE, js_trim
 from ...lexer.keyword_table import is_reserved_identifier
 from ...lexer.token_helpers import match_paren_from
 from ...lexer.token_kinds import TokenKind, VbaToken
+from ...lexer.tokenize import tokenize_cached
+from ...parser.parser_state import is_then_or_else_keyword_at
 from ...parser.nodes import (
     BodyNode,
     DeclareNode,
@@ -87,7 +90,6 @@ from ...symbols.symbol_model import (
 )
 from ...types.type_names import is_known_scalar_type, normalize_type
 from ..call_extraction import (
-    CallableTypeSignature,
     CallArguments,
     extract_call,
     is_named_slot,
@@ -112,7 +114,6 @@ from ..walker import (
 )
 from ...completion import MemberCompletionContext
 from .shared import (
-    ValueReadReference,
     for_each_undeclared_reference_span,
     resolve_exhaustive_member_surface,
     value_read_references,
@@ -608,6 +609,8 @@ def check_unknown_call_statement(
             or resolve_host_enum(name, host_model) is not None
             or resolve_runtime_object(name) is not None
             or resolve_runtime_function(name) is not None
+            # stdole's LoadPicture and SavePicture (host/stdole_library.py).
+            or lower in STDOLE_FUNCTION_SIGNATURES
         )
 
     # What the module and the procedure declare themselves, which a control does
@@ -956,8 +959,22 @@ def check_undeclared_variables(
     # in Excel 16.0). Per procedure, below.
     redim_declared: AbstractSet[str] = frozenset()
 
+    # A stdole constant or LoadPicture read as a value. Written to, it is the VBE's
+    # "Assignment to constant not permitted" or "Variable required" (`Color = 1`,
+    # `For Gray = 1 To 3`, `Input #1, Color`), which is still reported as
+    # undeclared; so is a constant called as a one-line If's branch, `If v Then
+    # Checked`. LoadPicture's result is no constant, so a Const's value, which
+    # comes without a span, may not use it (XLIDE #1665).
+    def stdole_value_at(lower: str, context: BareIdentifierContext, span: Span | None) -> bool:
+        if context is BareIdentifierContext.ASSIGNMENT_TARGET:
+            return False
+        if span is None:
+            return lower != "loadpicture"
+        use = _stdole_name_use(source, span)
+        return use == "read" or (use == "branchCall" and lower == "loadpicture")
+
     def is_known(
-        name: str, proc_sym: VbaSymbol | None, context: BareIdentifierContext
+        name: str, proc_sym: VbaSymbol | None, context: BareIdentifierContext, span: Span | None = None
     ) -> bool:
         lower = name.lower()
         return (
@@ -992,6 +1009,25 @@ def check_undeclared_variables(
             # VBA's own enums and modules qualify their members the same way:
             # `VbMsgBoxResult.vbYes`, `ColorConstants.vbRed`, `Strings.Left`.
             or resolve_vba_library_qualifier(name) is not None
+            # stdole's own names, which stand bare in the default references of
+            # every host (host/stdole_library.py): `Set p = LoadPicture(path)`,
+            # `v = Checked`. SavePicture is a Sub, so it has no value to read, and
+            # is the call rule's, but a call inside a one-line If is read here as
+            # an expression, so its place counts. The StdFunctions module
+            # qualifies LoadPicture, `StdFunctions.LoadPicture(path)`; bare, it is
+            # "Expected variable or procedure, not module".
+            or (lower in _STDOLE_VALUE_NAMES and stdole_value_at(lower, context, span))
+            or (
+                lower == "savepicture"
+                and context is BareIdentifierContext.EXPRESSION
+                and span is not None
+                and _stdole_name_use(source, span) == "branchCall"
+            )
+            or (
+                lower == "stdfunctions"
+                and span is not None
+                and _STDOLE_FUNCTION_AFTER_RE.match(source, span.end, span.end + 256) is not None
+            )
         )
 
     for member in active_module_members(mod, activity):
@@ -1007,7 +1043,7 @@ def check_undeclared_variables(
                 name: str, ref_span: Span, mode: str, context: BareIdentifierContext
             ) -> None:
                 key = f"{ref_span.start}:{ref_span.end}"
-                if key in reported or is_known(name, proc_sym, context):
+                if key in reported or is_known(name, proc_sym, context, ref_span):
                     return
                 reported.add(key)
                 push(
@@ -1035,13 +1071,17 @@ def check_undeclared_variables(
                 report(
                     target[0], target[1], "assigning to it", BareIdentifierContext.ASSIGNMENT_TARGET
                 )
-            for ref in _undeclared_read_references(
+            # Each read is judged where it stands: a stdole name is known as a
+            # value and not as a write (XLIDE #1665).
+            for ref in value_read_references(
                 source,
                 span,
                 lambda name: is_known(name, proc_sym, BareIdentifierContext.EXPRESSION),
                 module_signatures,
                 project_members,
             ):
+                if is_known(ref.name, proc_sym, BareIdentifierContext.EXPRESSION, ref.span):
+                    continue
                 if ref.bracketed and bracket_names_evaluate:
                     continue
                 report(ref.name, ref.span, "using it", BareIdentifierContext.EXPRESSION)
@@ -1164,6 +1204,116 @@ def _redim_target_names_in(
     return out
 
 
+# stdole's names with a value: LoadPicture's result and the enum members.
+# SavePicture is a Sub.
+_STDOLE_VALUE_NAMES: frozenset[str] = frozenset({"loadpicture", *STDOLE_CONSTANT_NAMES})
+
+# `.LoadPicture` after StdFunctions, bracketed or not, past spaces and line
+# continuations. `StdFunctions.SavePicture` stays unknown: a qualified call's
+# arguments are not checked against stdole's signature. Matched at a position,
+# so it carries no `^`.
+_STDOLE_FUNCTION_AFTER_RE = re.compile(
+    r"[ \t]*(?:_[ \t]*\r?\n[ \t]*)*\.[ \t]*(?:loadpicture\b|\[loadpicture\])", re.IGNORECASE
+)
+
+
+def _is_branch_keyword(toks: Sequence[VbaToken], i: int) -> bool:
+    """A one-line If's Then or Else, not a member of that name (`v.Then`,
+    `v!Else`), as the parser reads it: `x! Then` is a Single and then Then."""
+    return is_then_or_else_keyword_at(toks, i, "then") or is_then_or_else_keyword_at(toks, i, "else")
+
+
+_MID_TARGET_RE = re.compile(r"^midb?\$?\(\Z")
+
+
+def _stdole_name_use(source: str, span: Span) -> str:
+    """How a stdole name is used where it stands, read from the tokens of its
+    statement, so strings, nesting and line continuations don't mislead:
+
+    - `write`: an assignment's target, indexed or not (`Color = 1`,
+      `Color(1) = 1`, `Set Default = p`), an LSet, RSet or Mid statement's
+      target, a For or For Each counter, or a variable Input #, Line Input # or
+      Get # reads into;
+    - `branchCall`: called as a one-line If's branch, `If v Then Checked` or
+      `Else Call SavePicture(p, "x")`, which the undeclared walk reads as an
+      expression;
+    - `read`: anything else.
+    """
+    toks = tokenize_cached(source)
+    at = -1
+    low, high = 0, len(toks) - 1
+    while low <= high:
+        mid = (low + high) >> 1
+        if toks[mid].start < span.start:
+            low = mid + 1
+        elif toks[mid].start > span.start:
+            high = mid - 1
+        else:
+            at = mid
+            break
+    if at < 0:
+        return "read"
+    # The statement's head: past a newline, a colon, or a one-line If's Then or Else.
+    head = at
+    while (
+        head > 0
+        and toks[head - 1].kind is not TokenKind.NEWLINE
+        and toks[head - 1].kind is not TokenKind.COLON
+        and not _is_branch_keyword(toks, head - 1)
+    ):
+        head -= 1
+    branch = head > 0 and _is_branch_keyword(toks, head - 1)
+    if head < at and toks[head].kind is TokenKind.INTEGER_LITERAL:
+        head += 1
+    before = [tok.raw_text.lower() for tok in toks[head:at]]
+    # Past the name's own argument list, at the same depth.
+    after = at + 1
+    if after < len(toks) and toks[after].raw_text == "(":
+        depth = 0
+        while after < len(toks):
+            if toks[after].raw_text == "(":
+                depth += 1
+            if toks[after].raw_text == ")":
+                depth -= 1
+                if depth == 0:
+                    after += 1
+                    break
+            if toks[after].kind is TokenKind.NEWLINE:
+                break
+            after += 1
+    next_ = toks[after].raw_text if after < len(toks) else None
+    at_head = len(before) == 0 or (len(before) == 1 and before[0] in ("set", "let"))
+    if at_head and next_ == "=":
+        return "write"
+    if (
+        (len(before) == 1 and before[0] in ("lset", "rset"))
+        or _MID_TARGET_RE.match("".join(before)) is not None
+        or (len(before) > 0 and before[-1] == "for")
+        or (len(before) >= 2 and before[-2] == "for" and before[-1] == "each")
+    ):
+        return "write"
+    # Input # and Line Input # read into every variable after the file number,
+    # Get # into its third argument; at the statement's own depth only.
+    io = "input" if len(before) >= 2 and before[0] == "line" and before[1] == "input" else (
+        before[0] if before else None
+    )
+    if io in ("input", "get") and "#" in before:
+        depth = 0
+        commas = 0
+        for text in before:
+            if text == "(":
+                depth += 1
+            elif text == ")":
+                depth -= 1
+            elif text == "," and depth == 0:
+                commas += 1
+        if depth == 0 and commas >= (1 if io == "input" else 2):
+            return "write"
+    if branch and (len(before) == 0 or (len(before) == 1 and before[0] == "call")) and next_ not in (".", "!"):
+        return "branchCall"
+    return "read"
+
+
 def _starts_with_let(toks: Sequence[VbaToken]) -> bool:
     """Whether a statement's first executable token, past a line number or label, is `Let`."""
     i = first_executable_token_index(toks)
@@ -1221,20 +1371,6 @@ def designer_class_member_names(
         names = frozenset(member["name"].lower() for member in get_host_members(designer_class, resolved))
         by_type[key] = names
     return names
-
-
-def _undeclared_read_references(
-    source: str,
-    span: Span,
-    is_known: Callable[[str], bool],
-    module_signatures: Mapping[str, CallableTypeSignature],
-    project_members: Sequence[VbaProjectClassMembers] | None,
-) -> list[ValueReadReference]:
-    return [
-        ref
-        for ref in value_read_references(source, span, is_known, module_signatures, project_members)
-        if not is_known(ref.name)
-    ]
 
 
 def _has_option_explicit(
