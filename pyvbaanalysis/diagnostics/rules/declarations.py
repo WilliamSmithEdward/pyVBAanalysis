@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Literal, Union, cast
@@ -871,13 +871,31 @@ def _collect_with_events_declaration_spans(
     declarations, with new_only those of `WithEvents x As New T`. `New` on a
     WithEvents declaration is legal (the field is initialized lazily), so its New
     reference is exempt from invalidNewTypeName."""
+    return _collect_declaration_spans(
+        mod, activity, lambda group, decl: group.with_events and (decl.is_new or not new_only)
+    )
+
+
+def _collect_self_reporting_declaration_spans(
+    mod: ModuleNode, activity: ConditionalActivityTracker | None
+) -> list[Span]:
+    """The WithEvents and Const declarations, whose own rules report a standard
+    module's name as their type (XLIDE issues #1530 and #1553)."""
+    return _collect_declaration_spans(mod, activity, lambda group, _decl: group.with_events or group.is_const)
+
+
+def _collect_declaration_spans(
+    mod: ModuleNode,
+    activity: ConditionalActivityTracker | None,
+    include: Callable[[VariableGroupNode, VariableDeclNode], bool],
+) -> list[Span]:
     spans: list[Span] = []
 
     def inspect(group: VariableGroupNode) -> None:
-        if not group.with_events or is_inactive_node(activity, group):
+        if is_inactive_node(activity, group):
             return
         for decl in group.declarations:
-            if decl.is_new or not new_only:
+            if include(group, decl):
                 spans.append(decl.span)
 
     for member in active_module_members(mod, activity):
@@ -898,7 +916,7 @@ _SCRIPTING_TYPE_NAMES = frozenset({"dictionary", "filesystemobject", "textstream
 
 def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, opts: AnalyzeModuleOptions, push: PushFn) -> None:
     with_events_new_spans = _collect_with_events_declaration_spans(mod, activity, True)
-    with_events_spans: list[Span] | None = None
+    self_reporting_spans: list[Span] | None = None
     known_non_type_names = opts.known_non_type_names or frozenset()
     variables: set[str] | None = None
     own_types: set[str] | None = None
@@ -911,7 +929,8 @@ def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: Conditio
         # module's Public Type, VBA's Collection and a host type of that name.
         # Only a Type or Enum of that name in this module itself, or a
         # qualified name, is the type. WithEvents says so itself (XLIDE issue
-        # #1530, measured in Excel, Word, PowerPoint and Access 16.0).
+        # #1530), and so does a Const, refused for any type VBA does not own
+        # (issue #1553); both measured in Excel, Word, PowerPoint and Access 16.0.
         if not ref.qualifier and ref.kind in ("declaration", "newDeclaration"):
             lower = ref.name.lower()
             if standard_modules is None:
@@ -927,9 +946,9 @@ def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: Conditio
                     if isinstance(member, (TypeNode, EnumNode))
                 }
             if lower in standard_modules and lower not in own_types:
-                if with_events_spans is None:
-                    with_events_spans = _collect_with_events_declaration_spans(mod, activity, False)
-                if not any(_contains_span(span, ref.span) for span in with_events_spans):
+                if self_reporting_spans is None:
+                    self_reporting_spans = _collect_self_reporting_declaration_spans(mod, activity)
+                if not any(_contains_span(span, ref.span) for span in self_reporting_spans):
                     push(
                         "invalidAsTypeName",
                         f"'{ref.name}' is a standard module of this project, and a module is not a "

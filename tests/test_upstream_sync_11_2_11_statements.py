@@ -95,3 +95,29 @@ def test_a_userform_whose_code_declares_an_event_is_a_valid_source() -> None:
         ),
     ])
     assert found == []
+
+
+# -- 25c82b6d: one error for a Const As a standard module -------------------
+
+_ISSUE_1553 = _measured("issue1553_")
+
+
+def test_issue_1553_has_every_measured_case() -> None:
+    # Ten shapes refused and two accepted, in each of the four hosts.
+    assert len(_ISSUE_1553) == 48
+
+
+@pytest.mark.parametrize("case", _ISSUE_1553, ids=lambda case: case.id)
+def test_issue_1553_agrees_with_the_vbe(case: OracleCase) -> None:
+    found = [line.split(": ", 1)[1] for line in _case_errors(case)]
+    if case.expected == "accepted":
+        assert found == []
+        return
+    # One report, with the VBE's own reason.
+    assert len(found) == 1
+    assert found[0].startswith("const-invalid-type: ")
+    if "object" in case.id:
+        reason = "Invalid data type for constant"
+    else:
+        reason = "Syntax error" if "procedure_" in case.id else "Expected: type name"
+    assert reason in found[0]
