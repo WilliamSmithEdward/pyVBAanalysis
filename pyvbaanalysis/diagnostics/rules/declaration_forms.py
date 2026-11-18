@@ -171,7 +171,8 @@ def _check_deftype(source: str, span: Span, claimed: dict[str, str], push: PushF
     """
     toks = statement_tokens_after_leading_label(source, span)
     head = token_text(toks[0] if toks else None)
-    if head not in DEFTYPE_KEYWORDS:
+    # DefDec gives no letter a type: it is no Def statement at all.
+    if head not in DEFTYPE_KEYWORDS or head == "defdec":
         return
     first = toks[0]
     statement = first.canonical_text if first.canonical_text is not None else first.raw_text

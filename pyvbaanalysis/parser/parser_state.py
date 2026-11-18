@@ -134,6 +134,18 @@ def _single_line_if_tail_opener_index(tokens: Sequence[VbaToken]) -> int:
     return last + 1
 
 
+def is_then_or_else_keyword_at(tokens: Sequence[VbaToken], index: int, word: str) -> bool:
+    """Port of isThenOrElseKeywordAt (XLIDE issue #1496): True when `tokens[index]`
+    is the keyword Then or Else (`word`), not a member of that name. A word after
+    `.`, or after a `!` touching it, is a member: `d.Then`, `d!Else`."""
+    if token_word(tokens[index] if 0 <= index < len(tokens) else None) != word:
+        return False
+    previous = tokens[index - 1] if index >= 1 else None
+    return previous is None or not (
+        previous.raw_text == "." or (previous.raw_text == "!" and previous.end == tokens[index].start)
+    )
+
+
 def _is_single_line_if(statement: LogicalStatement) -> bool:
     """An If statement that is not a block If header, whose Then ends its line."""
     tokens = code_tokens(statement)

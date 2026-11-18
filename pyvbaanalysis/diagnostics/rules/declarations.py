@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Literal, Union, cast
@@ -101,6 +101,8 @@ from .shared import (
     DEFTYPE_KEYWORDS,
     NameTokenHit,
     declaration_name_hit,
+    def_dec_head,
+    def_dec_message,
     leading_declaration_modifier_count,
     module_declaration_statement_in_procedure,
     name_token_hit,
@@ -932,19 +934,38 @@ def _is_new_type_reference(kind: _TypeNameReferenceKind) -> bool:
     return kind == "newExpression" or kind == "newDeclaration"
 
 
-def _collect_with_events_new_declaration_spans(
+def _collect_with_events_declaration_spans(
+    mod: ModuleNode, activity: ConditionalActivityTracker | None, new_only: bool
+) -> list[Span]:
+    """Port of collectWithEventsDeclarationSpans: the spans of WithEvents
+    declarations, with new_only those of `WithEvents x As New T`. `New` on a
+    WithEvents declaration is legal (the field is initialized lazily), so its New
+    reference is exempt from invalidNewTypeName."""
+    return _collect_declaration_spans(
+        mod, activity, lambda group, decl: group.with_events and (decl.is_new or not new_only)
+    )
+
+
+def _collect_self_reporting_declaration_spans(
     mod: ModuleNode, activity: ConditionalActivityTracker | None
 ) -> list[Span]:
-    """Port of collectWithEventsNewDeclarationSpans: the spans of `WithEvents x As
-    New T` declarations. `New` on a WithEvents declaration is legal (the field is
-    initialized lazily), so its New reference is exempt from invalidNewTypeName."""
+    """The WithEvents and Const declarations, whose own rules report a standard
+    module's name as their type (XLIDE issues #1530 and #1553)."""
+    return _collect_declaration_spans(mod, activity, lambda group, _decl: group.with_events or group.is_const)
+
+
+def _collect_declaration_spans(
+    mod: ModuleNode,
+    activity: ConditionalActivityTracker | None,
+    include: Callable[[VariableGroupNode, VariableDeclNode], bool],
+) -> list[Span]:
     spans: list[Span] = []
 
     def inspect(group: VariableGroupNode) -> None:
-        if not group.with_events or is_inactive_node(activity, group):
+        if is_inactive_node(activity, group):
             return
         for decl in group.declarations:
-            if decl.is_new:
+            if include(group, decl):
                 spans.append(decl.span)
 
     for member in active_module_members(mod, activity):
@@ -964,14 +985,47 @@ _SCRIPTING_TYPE_NAMES = frozenset({"dictionary", "filesystemobject", "textstream
 
 
 def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, opts: AnalyzeModuleOptions, push: PushFn) -> None:
-    with_events_new_spans = _collect_with_events_new_declaration_spans(mod, activity)
+    with_events_new_spans = _collect_with_events_declaration_spans(mod, activity, True)
+    self_reporting_spans: list[Span] | None = None
     known_non_type_names = opts.known_non_type_names or frozenset()
     variables: set[str] | None = None
     own_types: set[str] | None = None
+    standard_modules: set[str] | None = None
     qualified_enum_types: set[str] | None = None
     for ref in _collect_type_name_references(source, mod):
         if activity is not None and activity.is_inactive(ref.span):
             continue
+        # A standard module's name is no type, and it wins over another
+        # module's Public Type, VBA's Collection and a host type of that name.
+        # Only a Type or Enum of that name in this module itself, or a
+        # qualified name, is the type. WithEvents says so itself (XLIDE issue
+        # #1530), and so does a Const, refused for any type VBA does not own
+        # (issue #1553); both measured in Excel, Word, PowerPoint and Access 16.0.
+        if not ref.qualifier and ref.kind in ("declaration", "newDeclaration"):
+            lower = ref.name.lower()
+            if standard_modules is None:
+                standard_modules = {
+                    type_.name.lower() for type_ in opts.project_class_members or () if type_.kind == "standardModule"
+                }
+                if opts.module_kind == ModuleSymbolKind.STANDARD and opts.module_name:
+                    standard_modules.add(opts.module_name.lower())
+            if own_types is None:
+                own_types = {
+                    member.name.lower()
+                    for member in active_module_members(mod, activity)
+                    if isinstance(member, (TypeNode, EnumNode))
+                }
+            if lower in standard_modules and lower not in own_types:
+                if self_reporting_spans is None:
+                    self_reporting_spans = _collect_self_reporting_declaration_spans(mod, activity)
+                if not any(_contains_span(span, ref.span) for span in self_reporting_spans):
+                    push(
+                        "invalidAsTypeName",
+                        f"'{ref.name}' is a standard module of this project, and a module is not a "
+                        "type. This is a VBE compile error: A module is not a valid type.",
+                        ref.span,
+                    )
+                    continue
         lookup_name = _type_reference_lookup_name(ref)
         if ref.kind == "declaration" and ref.qualifier:
             if qualified_enum_types is None:
@@ -2425,7 +2479,8 @@ def _keyword_span(source: str, span: Span, *keywords: str) -> Span:
 def _deftype_module_declaration_hit(source: str, span: Span) -> tuple[str, Span] | None:
     toks = statement_tokens_after_leading_label(source, span)
     first = toks[0] if toks else None
-    if first is None or token_text(first) not in DEFTYPE_KEYWORDS:
+    # DefDec is no Def statement; check_module_level_statements_outside_procedures reports it.
+    if first is None or token_text(first) not in DEFTYPE_KEYWORDS or token_text(first) == "defdec":
         return None
     label = (first.canonical_text if first.canonical_text is not None else first.raw_text) + " statements"
     return (label, absolute_span(span, first))
@@ -2513,6 +2568,18 @@ def _is_alternative_procedure_header_statement(source: str, span: Span, procedur
 
 def check_module_declarations_in_procedure_bodies(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
     def inspect_statement(stmt: LeafStatementNode) -> None:
+        # DefDec in a one-line If's branch: `If v Then DefDec A-Z`.
+        if isinstance(stmt, StatementNode):
+            for span in stmt.single_line_if_branches or ():
+                branch = def_dec_head(source, span)
+                if branch is not None:
+                    push("malformedStatement", def_dec_message(False), absolute_span(span, branch.token))
+        def_dec = def_dec_head(source, stmt.span)
+        if def_dec is not None:
+            # A `DefDec:` label is the reserved-label check's.
+            if not def_dec.label:
+                push("malformedStatement", def_dec_message(False), absolute_span(stmt.span, def_dec.token))
+            return
         hit = module_declaration_statement_in_procedure(source, stmt.span)
         if hit is None:
             return
@@ -2581,9 +2648,12 @@ _PROCEDURE_CLOSER_RE = re.compile(r"^\s*End\s+(?:Sub|Function|Property)(?![A-Za-
 def check_module_level_statements_outside_procedures(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
     active = {id(member) for member in active_module_members(mod, activity)}
     procedure_end: Span | None = None
+    procedures_above: list[Span] = []
     for member in mod.members:
         if isinstance(member, ProcedureNode):
             procedure_end = Span(max(member.span.start, member.span.end - 1), member.span.end)
+            if id(member) in active:
+                procedures_above.append(member.span)
         if not isinstance(member, StatementNode) or id(member) not in active:
             continue
         # `End Function` in both arms of an #If: the procedure ended at the
@@ -2595,6 +2665,17 @@ def check_module_level_statements_outside_procedures(source: str, mod: ModuleNod
             and activity.mutually_exclusive(procedure_end, member.span)
             and _PROCEDURE_CLOSER_RE.match(source[member.span.start:member.span.end])
         ):
+            continue
+        # The reserved-label check reads procedure bodies only, so a module-level
+        # `DefDec:` is reported here too, with the same message as the statement.
+        def_dec = def_dec_head(source, member.span)
+        if def_dec is not None:
+            # Above every procedure compiled beside it: one in another #If arm doesn't count.
+            above = not any(
+                activity is None or not activity.mutually_exclusive(span, member.span)
+                for span in procedures_above
+            )
+            push("malformedStatement", def_dec_message(above), absolute_span(member.span, def_dec.token))
             continue
         toks = statement_tokens_after_leading_label(source, member.span)
         first = toks[0] if toks else None

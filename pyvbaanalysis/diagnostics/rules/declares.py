@@ -48,6 +48,7 @@ from ..walker import (
 )
 
 _ZERO_ORDINAL_RE = re.compile(r"#0+")
+_TYPE_CHARACTER_RE = re.compile(r"^[$%&!#@^]\Z")
 
 
 def _at(toks: Sequence[VbaToken], i: int) -> VbaToken | None:
@@ -84,6 +85,46 @@ def _check_declare_line(source: str, declare: DeclareNode, push: PushFn) -> None
             f"Declare '{declare.name}': {what}. This is a VBE compile error: {error}.",
             Span(declare.span.start + tok.start, declare.span.start + tok.end),
         )
+
+    # Lib comes straight after the name, its type character and CDecl:
+    # `Declare PtrSafe Function F () As Long` and `Function F Alias "x" Lib "k"`
+    # are "Expected: Lib" (measured in Excel, Word, PowerPoint and Access 16.0,
+    # build 20527).
+    # Start after the parser's span of the name and its type character, and
+    # past what is glued onto it: `9Sleep` and `9Sleep&`, whose name the
+    # parser reads as 9 and the invalid-identifier-start check reports whole.
+    name_end = (
+        declare.type_suffix_span.end
+        if declare.type_suffix_span is not None
+        else declare.name_span.end
+        if declare.name_span is not None
+        else None
+    )
+    if name_end is not None:
+        at = next((k for k, tok in enumerate(toks) if declare.span.start + tok.start >= name_end), -1)
+        while (
+            at > 0
+            and at < len(toks)
+            and toks[at].start == toks[at - 1].end
+            and (
+                toks[at].kind is TokenKind.IDENTIFIER
+                or toks[at].kind is TokenKind.INTEGER_LITERAL
+                or _TYPE_CHARACTER_RE.match(toks[at].raw_text) is not None
+            )
+        ):
+            at += 1
+        if at >= 0 and token_text(_at(toks, at)) == "cdecl":
+            at += 1
+        if at < 0 or token_text(_at(toks, at)) != "lib":
+            name_tok = next(
+                (tok for tok in reversed(toks) if declare.span.start + tok.end <= name_end), None
+            )
+            refuse(
+                _at(toks, at) or name_tok or toks[-1],
+                "Lib and the library's name come straight after the name",
+                "Expected: Lib",
+            )
+            return
 
     open_ = -1
     for i, tok in enumerate(toks):

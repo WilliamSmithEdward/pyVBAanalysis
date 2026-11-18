@@ -317,6 +317,12 @@ UPSTREAM_SILENT: dict[tuple[str, str], str] = {
             "upstream unreferencedQualifiers1413.test.ts reports it as missing-library-reference only"
         for host in ("", "word_", "powerpoint_", "access_")
     },
+    **{
+        (f"issue1553_{host}_{shape}_const_compile", "invalid-as-type-name"):
+            "upstream constModuleType1553.test.ts: one error, the Const's const-invalid-type"
+        for host in ("excel", "word", "powerpoint", "access")
+        for shape in ("private", "public", "procedure", "own_name", "second")
+    },
 }
 
 

@@ -123,6 +123,7 @@ from ..walker import (
     statement_tokens_after_leading_label,
     token_name,
     token_text,
+    top_level_operator_index,
 )
 from .overflow import constant_number_folder
 from .shared import is_bare_or_vba_qualified_intrinsic_call, source_expression_syntax_problem
@@ -488,7 +489,19 @@ def check_invalid_redim_targets(
         proc_sym = procedure_symbol_for(symbols, member)
 
         def visitor(stmt: LeafStatementNode) -> None:
+            without_bounds = _redim_targets_without_bounds(source, stmt.span)
+            for hit in without_bounds:
+                push(
+                    "malformedStatement",
+                    f"ReDim target '{hit.text}' is missing a bound: ReDim gives each dimension an upper "
+                    f"bound, and a lower bound before any To, as in {hit.example}. This is a VBE compile "
+                    "error: Syntax error.",
+                    hit.span,
+                )
             for target in _redim_statement_targets(source, stmt.span):
+                # A target without bounds is a Syntax error, which the VBE reports first.
+                if any(hit.span.start == target.span.start for hit in without_bounds):
+                    continue
                 lower = target.name.lower()
                 # A Const or Enum member is no array (issue #255): "Expected array".
                 binding = source_identifier_binding(
@@ -605,6 +618,143 @@ def _redim_blocked_declaration_kind(decl: VariableDeclNode) -> str | None:
             return None
         return "scalar"
     return "fixedArray" if decl.array_bounds else None
+
+
+@dataclass(frozen=True, slots=True)
+class _RedimWithoutBounds:
+    text: str
+    example: str
+    span: Span
+
+
+def _redim_targets_without_bounds(source: str, span: Span) -> list[_RedimWithoutBounds]:
+    """`ReDim a()`, `ReDim a`, `ReDim m(1, )` and `ReDim a(1 To )`: each ReDim
+    target ends in its bounds, a list with an upper bound for each dimension and,
+    with To, a lower bound before it, and a target without them is a Syntax error
+    (XLIDE issue #1691, measured in Excel, Word, PowerPoint and Access 16.0).
+    MS-VBAL 5.4.3.3."""
+    toks = statement_tokens_after_leading_label(source, span)
+    if token_text(_at(toks, 0)) != "redim":
+        return []
+    out: list[_RedimWithoutBounds] = []
+    start = 2 if token_text(_at(toks, 1)) == "preserve" else 1
+    for group in split_top_level_token_groups(toks, start, ","):
+        bounds = redim_target_bounds(_without_comments(group))
+        if bounds.missing:
+            out.append(
+                _RedimWithoutBounds(
+                    text=_one_line_text(source, _token_group_span(span, bounds.target)),
+                    example=f"{_one_line_text(source, _token_group_span(span, bounds.name))}(1 To 3)",
+                    span=_token_group_span(span, bounds.target),
+                )
+            )
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class RedimTargetBounds:
+    target: list[VbaToken]
+    name: list[VbaToken]
+    missing: bool
+
+
+def redim_target_bounds(content: Sequence[VbaToken]) -> RedimTargetBounds:
+    """One ReDim target, its comments left out: the target without its As clause,
+    the name before its bounds, and whether the bounds are missing. An empty
+    target is left to other checks."""
+    # The As clause starts at an `As` outside parentheses that is no member's name.
+    depth = 0
+    end = len(content)
+    for i, tok in enumerate(content):
+        raw = tok.raw_text
+        depth += 1 if raw == "(" else -1 if raw == ")" else 0
+        if depth == 0 and _is_keyword_at(content, i, "as"):
+            end = i
+            break
+    target = list(content[:end])
+    # A target with no parentheses has no bounds. One whose parentheses do not
+    # balance, `ReDim a(1` while typing, is the unbalanced-parentheses check's,
+    # and one that goes on after them, `ReDim a(1) = 2`, is left alone.
+    open_ = (
+        _matching_open_paren(target, len(target) - 1) if target and target[-1].raw_text == ")" else -1
+    )
+    if any(tok.raw_text in ("(", ")") for tok in target) and (open_ <= 0 or not _parentheses_balance(target)):
+        return RedimTargetBounds(target, target, False)
+    name = target[:open_] if open_ > 0 else target
+    # What comes before the bounds is a name or a member: `ReDim a b` is left alone.
+    if not _is_name_chain(name):
+        return RedimTargetBounds(target, name, False)
+    bounds = split_top_level_token_groups(target[open_ + 1 : -1], 0, ",") if open_ > 0 else []
+    missing = not (
+        open_ > 0
+        and all(len(dimension) > 0 and not _has_empty_to_side(dimension) for dimension in bounds)
+    )
+    return RedimTargetBounds(target, name, missing)
+
+
+def _has_empty_to_side(dimension: Sequence[VbaToken]) -> bool:
+    """`To 3` or `1 To`: a dimension's To with nothing on one side. A member named
+    To, `o.To`, is no To."""
+    depth = 0
+    for i, tok in enumerate(dimension):
+        depth += 1 if tok.raw_text == "(" else -1 if tok.raw_text == ")" else 0
+        if depth == 0 and _is_keyword_at(dimension, i, "to") and (i == 0 or i == len(dimension) - 1):
+            return True
+    return False
+
+
+def _is_name_chain(toks: Sequence[VbaToken]) -> bool:
+    """`a`, `a$`, `t.x`, `.x`, `o!x` or `u(1).x`: names joined by `.` or `!`, each
+    but the last may take a subscript, a type character after the last."""
+    i = 1 if _raw_at(toks, 0) == "." else 0
+    while True:
+        if not token_name(_at(toks, i)):
+            return False
+        if _raw_at(toks, i + 1) == "(":
+            close = match_paren_from(toks, i + 1)
+            if (
+                close < 0
+                or (_raw_at(toks, close + 1) != "." and _raw_at(toks, close + 1) != "!")
+                or _at(toks, close + 2) is None
+            ):
+                return False
+            i = close + 2
+            continue
+        following = _at(toks, i + 1)
+        if following is not None and following.raw_text in (".", "!") and _at(toks, i + 2) is not None:
+            i += 2
+            continue
+        suffix = (
+            1
+            if following is not None
+            and following.start == toks[i].end
+            and _ERASE_TYPE_CHARACTER_RE.match(following.raw_text)
+            else 0
+        )
+        return i + 1 + suffix == len(toks)
+
+
+def _parentheses_balance(toks: Sequence[VbaToken]) -> bool:
+    """Every `)` closes a `(` before it, and every `(` is closed."""
+    depth = 0
+    for tok in toks:
+        depth += 1 if tok.raw_text == "(" else -1 if tok.raw_text == ")" else 0
+        if depth < 0:
+            return False
+    return depth == 0
+
+
+def _matching_open_paren(toks: Sequence[VbaToken], close: int) -> int:
+    """The index of the `(` that the `)` at `close` closes, or -1."""
+    depth = 0
+    for i in range(close, -1, -1):
+        if toks[i].raw_text == ")":
+            depth += 1
+        elif toks[i].raw_text == "(":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
 
 
 def _redim_statement_targets(source: str, span: Span) -> list[_RedimTarget]:
@@ -1993,8 +2143,35 @@ def check_erase_targets(
                 symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.ASSIGNMENT_TARGET
             )
 
+        def element_shape(name: str) -> DeclaredValueShape | None:
+            # Only a variable or parameter: what a call returns is left alone.
+            binding = source_identifier_binding(
+                symbols, proc_sym, project_visible_symbols, name, BareIdentifierContext.EXPRESSION
+            )
+            if (
+                binding.scope is not BareIdentifierResolutionScope.AMBIGUOUS
+                and len(binding.definitions) > 0
+                and all(definition.kind in _ERASE_ELEMENT_KINDS for definition in binding.definitions)
+            ):
+                return resolve_shape(name).shape
+            return None
+
         def visitor(stmt: LeafStatementNode) -> None:
+            elements = _erase_element_targets(source, stmt.span, member.name, element_shape)
+            for hit in elements:
+                push(
+                    "eraseRequiresArray",
+                    f"Erase target '{hit.text}' is one element of the array '{hit.name}', and Erase takes "
+                    f"the whole array, as in Erase {hit.name}. This is a VBE compile error: Expected array."
+                    if hit.is_array
+                    else f"Erase target '{hit.text}' gives a subscript to '{hit.name}', which is declared As "
+                    f"{hit.as_type} and is no array. This is a VBE compile error: Expected array.",
+                    hit.span,
+                )
+            # An element the check above reports is no arbitrary expression.
             for span in _invalid_erase_targets(source, stmt.span):
+                if any(element.span.start == span.start for element in elements):
+                    continue
                 push(
                     "invalidEraseTarget",
                     "Erase target must be a variable or array name, not an arbitrary expression.",
@@ -2010,6 +2187,98 @@ def check_erase_targets(
         return visitor
 
     return factory
+
+
+# What an Erase target's name may be for its subscript to be read as an element's.
+_ERASE_ELEMENT_KINDS = frozenset(
+    {VbaSymbolKind.LOCAL_VARIABLE, VbaSymbolKind.MODULE_VARIABLE, VbaSymbolKind.PARAMETER}
+)
+
+_ERASE_TYPE_CHARACTER_RE = re.compile(r"^[%&^@!#$]\Z")
+_ONE_LINE_CONTINUATION_RE = re.compile(r"[ \t]+_[ \t]*\r?\n[ \t]*")
+
+
+@dataclass(frozen=True, slots=True)
+class _EraseElement:
+    text: str
+    name: str
+    span: Span
+    as_type: str
+    is_array: bool
+
+
+def _erase_element_targets(
+    source: str,
+    span: Span,
+    procedure_name: str,
+    variable_shape: Callable[[str], DeclaredValueShape | None],
+) -> list[_EraseElement]:
+    """`Erase a(1)` with `a(2) As Long`, and `Erase n(1)` with `n As Long`: Erase
+    takes a whole array, and an element of an array whose elements are no
+    Variant, or a number, string, date or Boolean given a subscript, is the VBE
+    compile error Expected array (XLIDE issue #1690, measured in Excel, Word,
+    PowerPoint and Access 16.0). A Variant's element may hold an array and
+    compiles, and so do an Object's default member and members: `Erase v(1)`,
+    `Erase o(1)`, `Erase c(1)`, `Erase o.x(1)`. A call, `Erase F(1)`, is left
+    alone, and so is the procedure's own name, which is a call there.
+    MS-VBAL 5.4.3.4."""
+    toks = statement_tokens_after_leading_label(source, span)
+    if token_text(_at(toks, 0)) != "erase":
+        return []
+    out: list[_EraseElement] = []
+    for group in split_top_level_token_groups(toks, 1, ","):
+        content = _without_comments(group)
+        first = _at(content, 0)
+        name = token_name(first)
+        # The name, a type character if any (`a&(1)`), then one subscript that is
+        # not empty and ends the target. `Erase a(1 To 2)`, `Erase a(1,)` and
+        # `Erase a(,)` are Syntax errors instead, and `Erase a(x:=1)` Named
+        # arguments not allowed: left to the VBE.
+        second = _at(content, 1)
+        open_ = (
+            2
+            if first is not None
+            and second is not None
+            and second.start == first.end
+            and _ERASE_TYPE_CHARACTER_RE.match(second.raw_text)
+            else 1
+        )
+        if (
+            not name
+            or _raw_at(content, open_) != "("
+            or len(content) < open_ + 3
+            or match_paren_from(content, open_) != len(content) - 1
+            or any(_is_keyword_at(content, i, "to") for i in range(len(content)))
+            or any(
+                len(slot) == 0 or top_level_operator_index(slot, ":=") >= 0
+                for slot in split_top_level_token_groups(content[open_ + 1 : -1], 0, ",")
+            )
+            or name.lower() == procedure_name.lower()
+        ):
+            continue
+        shape = variable_shape(name)
+        normalized = normalize_type(shape.as_type) if shape is not None and shape.as_type else None
+        if (
+            shape is None
+            or not normalized
+            or normalized == "variant"
+            or (not shape.is_array and not is_known_scalar_type(normalized))
+        ):
+            continue
+        at = _token_group_span(span, content)
+        out.append(_EraseElement(_one_line_text(source, at), name, at, shape.as_type or "", shape.is_array))
+    return out
+
+
+def _is_keyword_at(toks: Sequence[VbaToken], i: int, word: str) -> bool:
+    """`word` at `toks[i]` as a keyword: a member's name, `o.To` or `o!As`, is none."""
+    previous = _raw_at(toks, i - 1)
+    return token_text(_at(toks, i)) == word and previous != "." and previous != "!"
+
+
+def _one_line_text(source: str, span: Span) -> str:
+    """The text at `span` for a message, a line continuation read as a space."""
+    return _ONE_LINE_CONTINUATION_RE.sub(" ", source[span.start : span.end])
 
 
 def _invalid_erase_targets(source: str, span: Span) -> list[Span]:
