@@ -20,9 +20,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from typing import Protocol, cast
 
-from ...completion.member_access import MemberCompletionContext, project_class_member_at
+from ...completion.member_access import (
+    MemberCompletionContext,
+    project_class_member_at,
+    resolve_exact_member_completion,
+)
 from ...conditional import ConditionalActivityTracker
 from ...flow.procedure_labels import statement_label_declarations, statement_label_references
 from ...host.host_model import resolve_host_alias
@@ -37,6 +42,7 @@ from ...symbols.symbol_model import (
 )
 from ...types.type_inference import (
     argumentless_host_default,
+    effective_declared_value_type,
     object_holding_default,
     object_value_needs_index,
     procedure_symbol_for,
@@ -54,7 +60,73 @@ from ..walker import (
     statement_tokens,
     token_name,
     token_text,
+    top_level_operator_index,
 )
+# Upstream exports these from assignments.ts for this rule (XLIDE #1666).
+from .assignments import _late_bound_receiver, _member_assignment_target
+
+def _untyped_assignment_target(
+    source: str,
+    span: Span,
+    toks: Sequence[VbaToken],
+    first: int,
+    env: Mapping[str, str],
+    arrays: AbstractSet[str],
+    local_array_types: Mapping[str, str | None],
+    member_ctx: MemberCompletionContext,
+) -> bool:
+    """Whether the statement assigns to a member or an array element that takes
+    any value at compile time: a member typed Variant (a host property, a project
+    or UDT field, a setter's value), a member of a receiver that binds at run
+    time, or an element of a Variant array, declared so or with no As clause. A
+    scalar, enum or unknown target is not: those keep the reading they had
+    (XLIDE #1666)."""
+    member = _member_assignment_target(source, span)
+    if member is not None:
+        if _late_bound_receiver(source, member.member_span.end, member_ctx):
+            return True
+        resolved = resolve_exact_member_completion(source, member.member, member.member_span.end, member_ctx)
+        type_ = (
+            (
+                resolved.write_type
+                if resolved.write_type is not None
+                else resolved.declared_type
+                if resolved.declared_type is not None
+                else resolved.returns
+            )
+            if resolved is not None and not resolved.is_array and not resolved.write_is_array
+            else None
+        )
+        return type_ is not None and normalize_type(type_) == "variant"
+    # `Dim a(1)` with no As clause and no DefType holds Variants too.
+    element_name = _element_assignment_target(toks, first)
+    element = element_name.lower() if element_name is not None else None
+    if element is None:
+        return False
+    type_ = local_array_types.get(element) if element in local_array_types else env.get(element)
+    return element in arrays and (type_ is None or normalize_type(type_) == "variant")
+
+
+def _element_assignment_target(toks: Sequence[VbaToken], first: int) -> str | None:
+    """The array element a statement assigns to, `a(0) = x`: a name, its balanced
+    argument list and the statement's `=`. None for anything else."""
+    i = first
+    if token_text(_at(toks, i)) == "let":
+        i += 1
+    name = token_name(_at(toks, i))
+    if not name or _raw_at(toks, i + 1) != "(":
+        return None
+    depth = 0
+    for j in range(i + 1, len(toks)):
+        raw = toks[j].raw_text
+        if raw == "(":
+            depth += 1
+        if raw == ")":
+            depth -= 1
+            if depth == 0:
+                return name if _raw_at(toks, j + 1) == "=" else None
+    return None
+
 
 _SCALAR_OPERATORS = frozenset({"=", "<", ">", "<=", ">=", "<>", "+", "-", "*", "/", "\\", "&", "^"})
 
@@ -235,11 +307,15 @@ def _check_procedure(
     # Arrays, whose `x(1)` is an element: the procedure's, and the module's
     # that no local hides.
     arrays: set[str] = set()
+    # A local array's own element type, DefType applied; None holds Variants. A
+    # local hides the module's name, so env cannot say.
+    local_array_types: dict[str, str | None] = {}
     proc_sym = procedure_symbol_for(symbols, member)
     for child in (proc_sym.children if proc_sym is not None else None) or []:
         locals_.add(child.name.lower())
         if child.is_array:
             arrays.add(child.name.lower())
+            local_array_types[child.name.lower()] = effective_declared_value_type(symbols, child)
     for child in symbols.root.children or []:
         if child.is_array and child.name.lower() not in locals_:
             arrays.add(child.name.lower())
@@ -291,8 +367,40 @@ def _check_procedure(
                     "compile error: Expected variable or procedure, not module.",
                     at(callee),
                 )
-            assigns = target is not None or token_text(_at(toks, first)) == "set"
-            eq = _find_index(toks, lambda tok: tok.raw_text == "=") if assigns else -1
+            # `Range("A1").Value = c`, `k.w = c`, `a(0) = c`: an assignment to a
+            # member or an element that holds a Variant, or whose receiver binds
+            # at run time, takes any value, and fails as it runs. Its `=` is the
+            # assignment, no comparison. Measured in Excel, Word, PowerPoint and
+            # Access 16.0 (XLIDE #1666): a Collection into a Variant host
+            # property, a class's Variant field, a Variant array's element or a
+            # late-bound receiver compiles; into a scalar target it is "Argument
+            # not optional", which the comparison reading below still reports.
+            set_statement = token_text(_at(toks, first)) == "set"
+
+            # Only a statement that reads such an object needs the target read.
+            def reads_indexed_or_holding_object(toks: list[VbaToken] = toks) -> bool:
+                for tok in toks:
+                    tok_name = token_name(tok)
+                    lower = tok_name.lower() if tok_name else None
+                    if lower is not None and lower in env and (
+                        indexed(lower) or object_holding_default(env.get(lower), member_ctx) is not None
+                    ):
+                        return True
+                return False
+
+            untyped_target = (
+                target is None
+                and not set_statement
+                and reads_indexed_or_holding_object()
+                and _untyped_assignment_target(
+                    source, span, toks, first, env, arrays, local_array_types, member_ctx
+                )
+            )
+            assigns = target is not None or set_statement or untyped_target
+            if untyped_target:
+                eq = first + top_level_operator_index(toks[first:], "=")
+            else:
+                eq = _find_index(toks, lambda tok: tok.raw_text == "=") if assigns else -1
             # A one-line If is judged as its condition here; each branch is its
             # own span with its own assignment (issue #140: `If c Is Nothing
             # Then Set c = New Collection`).

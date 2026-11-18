@@ -808,3 +808,84 @@ def test_1667_a_project_function_named_like_vba_keeps_its_signature() -> None:
     )}]
     message = _argument_messages(modules)[0]
     assert message.startswith("'b' is required by 'Abs'") and message.endswith("Argument not optional.")
+
+
+# -- 2641f99f: a Collection into a Variant member or element compiles (#1666) -
+
+_COLLECTION_INTO_FIXTURES = [raw for raw in _RAW_CASES if raw["id"].startswith("collection_into_")]
+
+
+def _error_codes(modules: list[dict], host: str = "excel") -> list[str]:
+    return [d.code for d in _project_findings(modules, host, True) if d.severity.value == "error"]
+
+
+def _collection_procedure(*lines: str) -> list[dict]:
+    source = "\r\n".join([
+        "Option Explicit", "Sub Main()", "    Dim c As New Collection, v As Variant",
+        *(f"    {line}" for line in lines), "End Sub", "",
+    ])
+    return [{"name": "Module1", "type": "standard", "source": source}]
+
+
+def _with_class(body: str, cls: str) -> list[dict]:
+    return [
+        {"name": "Module1", "type": "standard", "source": "\r\n".join([
+            "Option Explicit", "Sub Main()", "    Dim c As New Collection, k As New Class1", f"    {body}",
+            "End Sub", "",
+        ])},
+        {"name": "Class1", "type": "class", "source": "\r\n".join(["Option Explicit", *cls.split("\n"), ""])},
+    ]
+
+
+def test_1666_fixtures_cover_every_office_host() -> None:
+    assert {raw["host"] for raw in _COLLECTION_INTO_FIXTURES} == {"excel", "word", "powerpoint", "access"}
+
+
+@pytest.mark.parametrize("raw", _COLLECTION_INTO_FIXTURES, ids=[raw["id"] for raw in _COLLECTION_INTO_FIXTURES])
+def test_1666_collection_into_fixture(raw: dict) -> None:
+    expected = ["collection-operand"] if raw["expected"] == "rejected" else []
+    assert _error_codes(raw["modules"], raw["host"]) == expected
+
+
+def test_1666_still_reports_scalar_and_enum_targets() -> None:
+    assert _error_codes(_collection_procedure("Dim ws As Worksheet", "If False Then ws.Name = c")) == [
+        "collection-operand"
+    ]
+    assert _error_codes(_with_class("k.n = c", "Public Enum E\n    A\nEnd Enum\nPublic n As E")) == [
+        "collection-operand"
+    ]
+    assert _error_codes(
+        _with_class("k.P(1) = c", "Public Property Let P(ByVal i As Long, ByVal x As Long)\nEnd Property")
+    ) == ["collection-operand"]
+    assert "collection-operand" in _error_codes(_with_class("k.a(0) = c", "Public a(1) As Long"))
+    assert _error_codes(
+        _collection_procedure("Dim p As Paragraph, d As Document", "If False Then d.Content.Text = p"), "word"
+    ) == ["collection-operand"]
+
+
+@pytest.mark.parametrize("lines, expected", [
+    (("Dim a(1, 1) As Variant", "a(0, 1) = c"), []),
+    (("Dim a(1)", "a(0) = c"), []),
+    (('With Range("A1")', "    .Value = c", "End With"), []),
+    (('Range("A1") = c',), ["collection-operand"]),
+    (("Dim r As Range", "If False Then v = (r.Value = c)"), ["collection-operand"]),
+    (('Range("A1").Value = c + 1',), ["collection-operand"]),
+    (("c.Add 1", 'Range("A1").Value = c(1)'), []),
+    (("Dim a(1) As Long", "c.Add 1", "a(0) = c(1)"), []),
+    (('Let Range("A1").Value = c',), []),
+    (('If v Then Range("A1").Value = c',), []),
+    (("Dim a(1) As Long", "If v Then a(0) = c"), ["collection-operand"]),
+])
+def test_1666_collection_into_member_or_element(lines: tuple[str, ...], expected: list[str]) -> None:
+    assert _error_codes(_collection_procedure(*lines)) == expected
+
+
+@pytest.mark.parametrize("head, expected", [
+    (("Option Explicit", "Dim a As Long"), []),
+    (("DefInt A-Z", "Option Explicit"), ["collection-operand"]),
+])
+def test_1666_local_array_with_no_as_clause(head: tuple[str, ...], expected: list[str]) -> None:
+    source = "\r\n".join(
+        [*head, "Sub Main()", "    Dim c As New Collection", "    Dim a(1)", "    a(0) = c", "End Sub", ""]
+    )
+    assert _error_codes([{"name": "Module1", "type": "standard", "source": source}]) == expected
