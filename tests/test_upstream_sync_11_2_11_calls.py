@@ -14,7 +14,7 @@ from pyvbaanalysis.conditional import ConditionalCompilationEnvironment
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions
 from pyvbaanalysis.diagnostics.rule_metadata import diagnostic_metadata_for_code
 from pyvbaanalysis.evidence import DATA_DIR
-from pyvbaanalysis.symbols import ModuleInput, ModuleSymbolKind, ProjectIndex
+from pyvbaanalysis.symbols import ImplicitMember, ModuleInput, ModuleSymbolKind, ProjectIndex
 
 _RAW_CASES = json.loads((DATA_DIR / "vbe_oracle_cases.json").read_text(encoding="utf-8"))["cases"]
 
@@ -35,12 +35,18 @@ def _oracle_input(module: dict) -> ModuleInput:
     document_type = (
         "workbook" if lower == "thisworkbook" else "document" if lower == "thisdocument" else "worksheet"
     )
+    designer_class = module.get("designerClass")
     return ModuleInput(
         code_name if code_name is not None else module["name"],
-        _KINDS.get(module.get("type", "standard"), ModuleSymbolKind.STANDARD),
+        ModuleSymbolKind.USERFORM
+        if designer_class is not None and designer_class.startswith("Access.")
+        else _KINDS.get(module.get("type", "standard"), ModuleSymbolKind.STANDARD),
         module["source"],
         designer_class=module.get("designerClass"),
         document_type=document_type if code_name is not None else None,
+        implicit_members=[ImplicitMember(m["name"], m["type"]) for m in module["implicitMembers"]]
+        if module.get("implicitMembers") is not None
+        else None,
     )
 
 
@@ -177,3 +183,66 @@ def test_1494_module_variable_of_the_same_name_takes_precedence() -> None:
         ModuleInput("Module2", ModuleSymbolKind.STANDARD, "Option Explicit\r\nPublic Sheet1 As Range\r\n"),
     ]
     assert _main_project("excel", modules, "Dim r As Range", "Set r = Sheet1") == []
+
+
+# -- 8506a287: event parameters by DefType, WithEvents Collections (#1493) ----
+
+_ISSUE_1493 = [
+    raw for raw in _RAW_CASES if raw["id"].startswith("issue1493_") and "longptr" not in raw["id"]
+]
+
+
+def test_1493_has_the_measured_cases() -> None:
+    assert len(_ISSUE_1493) >= 118
+
+
+@pytest.mark.parametrize("raw", _ISSUE_1493, ids=[raw["id"] for raw in _ISSUE_1493])
+def test_1493_agrees_with_the_vbe(raw: dict) -> None:
+    found = _project_errors([_oracle_input(m) for m in raw["modules"]], raw.get("host"))
+    if raw["expected"] == "accepted":
+        assert found == []
+    else:
+        assert len(found) > 0
+
+
+def _pulse(source_def: str, listener_def: str, handler: str) -> list[ModuleInput]:
+    return [
+        ModuleInput("Source", ModuleSymbolKind.CLASS, f"Option Explicit\r\n{source_def}\r\nPublic Event Pulse(ByVal x)\r\n"),
+        ModuleInput(
+            "Listener",
+            ModuleSymbolKind.CLASS,
+            f"Option Explicit\r\n{listener_def}\r\nPrivate WithEvents src As Source\r\n"
+            f"Private Sub src_Pulse({handler})\r\n    Debug.Print 1\r\nEnd Sub\r\n",
+        ),
+    ]
+
+
+def test_1493_names_the_def_type_that_typed_the_handler_parameter() -> None:
+    found = _project_errors(_pulse("DefLng X", "DefStr X", "ByVal x"))
+    assert len(found) == 1
+    assert "parameter 1, 'x' is String (by the module's DefType), and the event's is Long" in found[0]
+
+
+def test_1493_keeps_the_event_as_written() -> None:
+    index = ProjectIndex()
+    for module in _pulse("DefLng X", "", "ByVal x As Long"):
+        index.set_module(module)
+    source = next(t for t in index.project_member_surfaces("Listener") if t.name == "Source")
+    event = next(m for m in source.members if m.name == "Pulse")
+    assert event.signature == "Pulse(ByVal x)"
+    assert [p.type_ for p in event.event_params or []] == ["Long"]
+
+
+def _listener(as_type: str) -> ModuleInput:
+    return ModuleInput("Listener", ModuleSymbolKind.CLASS, f"Option Explicit\r\nPrivate WithEvents c As {as_type}\r\n")
+
+
+def test_1493_vba_collection_and_a_standard_module_named_collection() -> None:
+    found = _project_errors([_listener("VBA.Collection")])
+    assert len(found) == 1 and "VBA's Collection, which does not source automation events" in found[0]
+    found = _project_errors([_listener("[VBA.Collection]")])
+    assert len(found) == 1 and "User-defined type not defined" in found[0]
+    found = _project_errors(
+        [ModuleInput("Collection", ModuleSymbolKind.STANDARD, "Option Explicit\r\n"), _listener("Collection")]
+    )
+    assert len(found) == 1 and "A module is not a valid type" in found[0]

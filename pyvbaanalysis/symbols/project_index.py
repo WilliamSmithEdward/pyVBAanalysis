@@ -1458,6 +1458,11 @@ class ProjectIndex:
                     if (new_kind := _member_procedure_kind(symbol)) is not None
                     else None
                 ),
+                event_params=(
+                    _project_object_member_parameters(symbol, mod)
+                    if symbol.kind is VbaSymbolKind.EVENT
+                    else None
+                ),
                 attributes=_merge_member_attributes(None, symbol.attributes),
             )
         return list(by_name.values())

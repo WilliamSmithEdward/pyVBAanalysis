@@ -632,7 +632,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(
         name="eventHandlerSignatures",
         run=lambda ctx, push: check_event_handler_signatures(
-            ctx.mod, ctx.module_kind, ctx.opts, ctx.member_ctx, ctx.activity, push
+            ctx.mod, ctx.module_kind, ctx.opts, ctx.member_ctx, ctx.activity, push, ctx.symbols.def_types
         ),
     ),
     DiagnosticRuleEntry(
