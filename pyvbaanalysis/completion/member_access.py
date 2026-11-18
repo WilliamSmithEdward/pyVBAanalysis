@@ -46,18 +46,26 @@ from ..lexer.token_kinds import TokenKind, VbaToken
 from ..lexer.tokenize import tokenize
 from ..parser.nodes import (
     BodyNode,
+    EnumNode,
     LeafStatementNode,
     ModuleNode,
     ProcedureNode,
     ProcKind,
+    TypeNode,
     VariableGroupNode,
     is_leaf_statement,
     iter_body_nodes,
 )
 from ..parser.parse_module import parse_module
-from ..runtime import resolve_runtime_object, resolve_runtime_object_type, resolve_vba_library_qualifier
+from ..runtime import (
+    resolve_runtime_function,
+    resolve_runtime_object,
+    resolve_runtime_object_type,
+    resolve_vba_library_qualifier,
+)
 from ..host.host_default_members import HOST_DEFAULT_MEMBERS
 from ..symbols.symbol_model import (
+    ModuleSymbolKind,
     VbaProjectClassMember,
     VbaProjectClassMemberDefinition,
     VbaProjectClassMembers,
@@ -66,6 +74,15 @@ from ..symbols.symbol_model import (
     VbaSymbol,
     VbaSymbolKind,
     is_access_designer_class,
+)
+from ..symbols.referenced_projects import (
+    ReferencedLookupOrder,
+    ReferencedObjectMember,
+    ReferencedProjectModule,
+    ReferencedProjectSurface,
+    declared_type_names,
+    referenced_project_names,
+    referenced_project_reached,
 )
 from ..types.type_names import is_known_scalar_type, normalize_type
 from .cursor_context import completion_significant_tokens
@@ -79,6 +96,12 @@ _COMBINED_TYPE_PREFIX = "combined:"
 _COMBINED_TYPE_SEPARATOR = "|"
 _UNION_TYPE_PREFIX = "union:"
 _UNION_TYPE_SEPARATOR = "|"
+# An exposed class of a referenced VBA project: `referencedClass:<project>:<class>`,
+# lowercased.
+_REFERENCED_CLASS_PREFIX = "referencedClass:"
+# A referenced project by its name, and one of its standard modules (XLIDE issue #1623).
+_REFERENCED_PROJECT_PREFIX = "referencedProject:"
+_REFERENCED_MODULE_PREFIX = "referencedModule:"
 _TRAILING_EMPTY_PARENS_RE = re.compile(r"\s*\(\s*\)\s*$")
 _AS_OBJECT_SIGNATURE_RE = re.compile(r"\bAs Object\s*$", re.IGNORECASE)
 
@@ -118,6 +141,11 @@ class MemberCompletionContext:
     receiver_type_cache: dict[tuple[int, int], str | None] | None = None
     # Receiver chains already collected, keyed by the dot token's offset (#135).
     receiver_chain_cache: dict[int, _ReceiverChain] | None = None
+    # What each referenced VBA project that was read offers: its exposed classes'
+    # members (XLIDE issue #1603).
+    referenced_project_surfaces: Sequence[ReferencedProjectSurface] | None = None
+    # Which library a bare name reaches first, where the surfaces are given.
+    referenced_lookup_order: ReferencedLookupOrder | None = None
     # Upstream's memberSurfaceCache (XLIDE issue #139) has no field here: the port
     # has memoized surfaces per (project types, model) since before, in
     # _SURFACES_CACHE below, which serves every context of one pass.
@@ -705,11 +733,7 @@ def _advance_receiver_type(
     # A member that takes an argument of its own is what it returns:
     # Shapes.Range(Array("A")) is a ShapeRange, not a Shape (XLIDE issue #197).
     return _apply_default_member_return_type(
-        resolved.type,
-        segment.has_arguments
-        and not is_explicit_element_accessor(segment.name)
-        and not member_takes_own_arguments(_signature_for_member(current_type, segment.name, ctx)),
-        ctx,
+        resolved.type, _arguments_index_result(current_type, segment, ctx), ctx
     )
 
 
@@ -1041,6 +1065,20 @@ def _resolve_root(
         "document",
     ):
         return _project_type_key(lower)
+    if project_surface is None:
+        # A referenced project's class with a default instance is that instance by
+        # name.
+        referenced_instance = _referenced_instance_of_name(root, ctx)
+        if referenced_instance:
+            return referenced_instance
+        # A read referenced project's own name reaches its standard modules and
+        # their members: `ProbeLibrary.NewWidget()` (XLIDE issue #1623).
+        referenced_project = next(
+            (surface for surface in ctx.referenced_project_surfaces or () if surface.name.lower() == lower),
+            None,
+        )
+        if referenced_project is not None:
+            return f"{_REFERENCED_PROJECT_PREFIX}{referenced_project.name.lower()}"
     return (
         None
         if ctx.allow_set_assignment_refinement is False
@@ -1256,6 +1294,9 @@ _SURFACES_CACHE = IdentityLru()
 def _member_surface_for_type(
     type_name: str, ctx: MemberCompletionContext
 ) -> _MemberSurface | None:
+    if _is_referenced_key(type_name):
+        # Port-only: built per lookup, from the surfaces' shared name index.
+        return _build_member_surface_for_type(type_name, ctx)
     surfaces: dict[str, _MemberSurface | None] | None = _SURFACES_CACHE.get(
         ctx.project_class_members, ctx.model
     )
@@ -1286,6 +1327,27 @@ def _build_member_surface_for_type(
             # the parts is not a compile error (XLIDE issue #114: `ActiveSheet.asdf`
             # compiles). Never exhaustive.
             exhaustive=False,
+        )
+    if type_name.startswith(_REFERENCED_PROJECT_PREFIX) or type_name.startswith(_REFERENCED_MODULE_PREFIX):
+        return _referenced_module_surface(type_name, ctx)
+    if type_name.startswith(_REFERENCED_CLASS_PREFIX):
+        found = _referenced_class_of_key(type_name, ctx)
+        if found is None:
+            return None
+        project, module = found
+        return _MemberSurface(
+            owner=f"{project.name}.{module.name}",
+            members=[
+                MemberCompletionEntry(
+                    name=member.name,
+                    kind=member.kind,
+                    returns=_referenced_class_key(project, member.returns_class) if member.returns_class else None,
+                )
+                for member in module.object_members or ()
+            ],
+            # A default member forwards nothing by name: `ws.Nope` fails, and an
+            # index into it, `ws(1)`, is followed or left unjudged below.
+            exhaustive=True,
         )
     if type_name.startswith(_VBA_LIBRARY_PREFIX):
         qualifier = resolve_vba_library_qualifier(type_name[len(_VBA_LIBRARY_PREFIX) :])
@@ -1577,6 +1639,14 @@ def _resolve_any_member_return_type(
             type=_type_key_for([item.type for item in resolved]),
             kind="method" if all(item.kind == "method" for item in resolved) else "property",
         )
+    if _is_referenced_key(owner_type):
+        surface = _member_surface_for_type(owner_type, ctx)
+        referenced_member = _surface_member_named(surface, member_name) if surface is not None else None
+        return (
+            _ResolvedMemberReturn(type=referenced_member.returns, kind=referenced_member.kind)
+            if referenced_member is not None and referenced_member.returns
+            else None
+        )
     combined = _parse_combined_type_key(owner_type)
     if combined is not None:
         project_key, host_type_name = combined
@@ -1619,6 +1689,18 @@ def _apply_default_member_return_type(
 ) -> str | None:
     if not type_name or not has_arguments:
         return type_name
+    # `ws(1)` reaches a referenced class's default member: the class it returns
+    # where the member takes the index itself (XLIDE issue #1623), and otherwise
+    # unjudged. Never the class's own members.
+    if type_name.startswith(_REFERENCED_CLASS_PREFIX):
+        found = _referenced_class_of_key(type_name, ctx)
+        if found is None or not found[1].default_member:
+            return type_name
+        return (
+            _referenced_class_key(found[0], found[1].default_member_class)
+            if found[1].default_member_class
+            else None
+        )
     union = _parse_union_type_key(type_name)
     if union is not None:
         return _type_key_for(
@@ -1698,7 +1780,216 @@ def _resolve_declared_object_type(
     if key:
         code_name_host = (ctx.code_names or {}).get(key)
         return _combined_type_key(key, code_name_host) if code_name_host else _project_type_key(key)
-    return resolve_host_alias(declared_type, model) or resolve_msforms_type_name(declared_type)
+    return (
+        resolve_host_alias(declared_type, model)
+        or resolve_msforms_type_name(declared_type)
+        or _referenced_class_of_declared_type(declared_type, ctx)
+    )
+
+
+def _referenced_class_of_declared_type(declared_type: str, ctx: MemberCompletionContext) -> str | None:
+    """The key of the referenced project's exposed class a declared type names,
+    `ProbeLibrary.Widget` or a bare `Widget`."""
+    surfaces = ctx.referenced_project_surfaces
+    if not surfaces:
+        return None
+    names = declared_type_names(declared_type)
+    if names is None or len(names) > 2:
+        return None
+    lower = names[-1].lower()
+    project: ReferencedProjectSurface | None = None
+    if len(names) == 2:
+        qualifier = names[0].lower()
+        project = next((surface for surface in surfaces if surface.name.lower() == qualifier), None)
+    elif (
+        ctx.referenced_lookup_order is not None
+        and lower not in _project_class_members_by_name(ctx)
+        and not _is_own_type_or_enum(lower, ctx)
+    ):
+        project = referenced_project_reached(
+            lower, surfaces, ctx.referenced_lookup_order, lambda offered: lower in offered.types
+        )
+    module = referenced_project_names(project).types.get(lower) if project is not None else None
+    # The class itself: an Enum it declares, `As WidgetColor`, is a Long.
+    if project is None or module is None or module.kind is not ModuleSymbolKind.CLASS or module.name.lower() != lower:
+        return None
+    return _referenced_class_key(project, module.name)
+
+
+def _referenced_instance_of_name(root: str, ctx: MemberCompletionContext) -> str | None:
+    """The key of the default instance a bare name reaches, where no name of this
+    project or an earlier library has it."""
+    lower = root.lower()
+    if (
+        not ctx.referenced_project_surfaces
+        or ctx.referenced_lookup_order is None
+        or _is_own_type_or_enum(lower, ctx)
+        or resolve_runtime_function(lower) is not None
+    ):
+        return None
+    # The first project that offers the name in any form. A hidden module offers nothing.
+    project = referenced_project_reached(
+        lower,
+        ctx.referenced_project_surfaces,
+        ctx.referenced_lookup_order,
+        lambda offered: lower in offered.bare_names or lower in offered.types,
+    )
+    module = referenced_project_names(project).modules.get(lower) if project is not None else None
+    if project is None or module is None or module.kind is not ModuleSymbolKind.CLASS or not module.visible or not module.predeclared:
+        return None
+    return _referenced_class_key(project, module.name)
+
+
+def _is_own_type_or_enum(lower: str, ctx: MemberCompletionContext) -> bool:
+    """Whether this module or another of the project declares a Type or Enum of the
+    name."""
+    from ..symbols.name_resolution import _project_symbols_named
+
+    if ctx.parsed_module is not None and any(
+        isinstance(member, (TypeNode, EnumNode)) and (member.name or "").lower() == lower
+        for member in ctx.parsed_module.members
+    ):
+        return True
+    return any(
+        symbol.kind in (VbaSymbolKind.TYPE, VbaSymbolKind.ENUM)
+        for symbol in _project_symbols_named(ctx.project_symbols or (), lower)
+    )
+
+
+def _referenced_class_key(project: ReferencedProjectSurface, class_name: str) -> str:
+    return f"{_REFERENCED_CLASS_PREFIX}{project.name.lower()}:{class_name.lower()}"
+
+
+def _referenced_class_of_key(
+    type_name: str, ctx: MemberCompletionContext
+) -> tuple[ReferencedProjectSurface, ReferencedProjectModule] | None:
+    project_name, _, class_name = type_name[len(_REFERENCED_CLASS_PREFIX) :].partition(":")
+    project = next(
+        (surface for surface in ctx.referenced_project_surfaces or () if surface.name.lower() == project_name),
+        None,
+    )
+    module = referenced_project_names(project).modules.get(class_name) if project is not None else None
+    return (project, module) if project is not None and module is not None and module.kind is ModuleSymbolKind.CLASS else None
+
+
+def _arguments_index_result(
+    owner_type: str, segment: _ReceiverChainSegment, ctx: MemberCompletionContext
+) -> bool:
+    """Whether the arguments in `x.Member(1)` go on to what Member returns, an index
+    into it. A referenced class's member answers from what it declares, whatever it
+    is called: `w.Item(1)` on a parameterless Item indexes its result."""
+    if not segment.has_arguments:
+        return False
+    lower = segment.name.lower()
+    if owner_type.startswith(_REFERENCED_CLASS_PREFIX):
+        found = _referenced_class_of_key(owner_type, ctx)
+        members = found[1].object_members or () if found is not None else ()
+        member = next((candidate for candidate in members if candidate.name.lower() == lower), None)
+        return not (member is not None and member.takes_arguments)
+    if owner_type.startswith(_REFERENCED_PROJECT_PREFIX) or owner_type.startswith(_REFERENCED_MODULE_PREFIX):
+        member = next(
+            (candidate for candidate in _referenced_module_members(owner_type, ctx) if candidate.name.lower() == lower),
+            None,
+        )
+        return not (member is not None and member.takes_arguments)
+    return not is_explicit_element_accessor(segment.name) and not member_takes_own_arguments(
+        _signature_for_member(owner_type, segment.name, ctx)
+    )
+
+
+def _is_referenced_key(type_name: str) -> bool:
+    return (
+        type_name.startswith(_REFERENCED_CLASS_PREFIX)
+        or type_name.startswith(_REFERENCED_PROJECT_PREFIX)
+        or type_name.startswith(_REFERENCED_MODULE_PREFIX)
+    )
+
+
+def _referenced_module_of_key(
+    type_name: str, ctx: MemberCompletionContext
+) -> tuple[ReferencedProjectSurface, ReferencedProjectModule | None] | None:
+    """The referenced project a project or module key names, and that module, if any."""
+    module_key = type_name.startswith(_REFERENCED_MODULE_PREFIX)
+    prefix = _REFERENCED_MODULE_PREFIX if module_key else _REFERENCED_PROJECT_PREFIX
+    project_name, _, module_name = type_name[len(prefix) :].partition(":")
+    project = next(
+        (surface for surface in ctx.referenced_project_surfaces or () if surface.name.lower() == project_name),
+        None,
+    )
+    if project is None:
+        return None
+    if not module_key:
+        return (project, None)
+    # The surface's name index, built once per surface, rather than a scan of its
+    # modules per lookup.
+    module = referenced_project_names(project).modules.get(module_name)
+    return (project, module) if module is not None and module.kind is ModuleSymbolKind.STANDARD and module.visible else None
+
+
+def _referenced_modules_of(
+    project: ReferencedProjectSurface, keep: Callable[[ReferencedProjectModule], bool]
+) -> list[ReferencedProjectModule]:
+    """A project's visible modules of one kind, from its name index."""
+    return [module for module in referenced_project_names(project).modules.values() if module.visible and keep(module)]
+
+
+def _referenced_module_members(type_name: str, ctx: MemberCompletionContext) -> list[ReferencedObjectMember]:
+    """The Public members a project key's visible standard modules, or a module key's
+    one module, offer."""
+    found = _referenced_module_of_key(type_name, ctx)
+    if found is None:
+        return []
+    project, module = found
+    modules = [module] if module is not None else _referenced_modules_of(
+        project, lambda candidate: candidate.kind is ModuleSymbolKind.STANDARD
+    )
+    return [member for candidate in modules for member in candidate.module_members or ()]
+
+
+def _referenced_module_surface(type_name: str, ctx: MemberCompletionContext) -> _MemberSurface | None:
+    """What a referenced project's name, or one of its standard modules, offers after
+    a dot: the modules (a project's), and their Public members with the class each
+    returns, so `ProbeLibrary.NewWidget().Nope` reaches Widget. Never exhaustive: the
+    referenced-project rule judges a name after the project or module itself, and
+    its Types, Enums and classes are not listed here."""
+    found = _referenced_module_of_key(type_name, ctx)
+    if found is None:
+        return None
+    project, module = found
+    lower_project = project.name.lower()
+    members: list[MemberCompletionEntry] = []
+    if module is None:
+        members.extend(
+            MemberCompletionEntry(
+                name=candidate.name,
+                kind="property",
+                returns=f"{_REFERENCED_MODULE_PREFIX}{lower_project}:{candidate.name.lower()}",
+            )
+            for candidate in _referenced_modules_of(project, lambda m: m.kind is ModuleSymbolKind.STANDARD)
+        )
+        # An exposed class with a default instance is that instance by its qualified
+        # name: `With ProbeLibrary.Solo` (XLIDE issue #1623).
+        members.extend(
+            MemberCompletionEntry(
+                name=candidate.name, kind="property", returns=_referenced_class_key(project, candidate.name)
+            )
+            for candidate in _referenced_modules_of(
+                project, lambda m: m.kind is ModuleSymbolKind.CLASS and bool(m.predeclared)
+            )
+        )
+    members.extend(
+        MemberCompletionEntry(
+            name=member.name,
+            kind=member.kind,
+            returns=_referenced_class_key(project, member.returns_class) if member.returns_class else None,
+        )
+        for member in _referenced_module_members(type_name, ctx)
+    )
+    return _MemberSurface(
+        owner=f"{project.name}.{module.name}" if module is not None else project.name,
+        members=members,
+        exhaustive=False,
+    )
 
 
 def _project_key_for_type_name(

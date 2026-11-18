@@ -17,7 +17,8 @@ standard module. Elsewhere:
    Sub, Function, or Property"; on a VBA function such as Len: "Syntax error";
    on a Declare: "Invalid use of AddressOf operator";
  - into a ByVal Long, Integer or Byte parameter in 64-bit VBA: "Type mismatch",
-   since AddressOf gives a LongPtr (#298).
+   since AddressOf gives a LongPtr (#298). 64-bit is the host's Win64, not a
+   project argument or a #Const (see host_win64).
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from ...conditional import ConditionalActivityTracker
 from ...conditional.conditional_compilation import (
     ConditionalCompilationEnvironment,
     compiler_constants_with_defaults,
+    host_win64,
 )
 from ...lexer.token_kinds import VbaToken
 from ...parser.nodes import LeafStatementNode, ModuleNode, ProcedureNode, Span
@@ -85,12 +87,19 @@ def check_address_of_use(
     project_procedures: Mapping[str, Sequence[VbaProcedureSignature]] | None,
     project_class_members: Sequence[VbaProjectClassMembers] | None,
     conditional_compilation: ConditionalCompilationEnvironment | None,
+    host: str | None,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
 ) -> None:
     if _ADDRESSOF_RE.search(source) is None:
         return
-    win64 = compiler_constants_with_defaults(conditional_compilation).get("win64")
+    # VB6 keeps the reading it had, the project's Win64 included: what it
+    # should read there is unmeasured.
+    win64 = (
+        compiler_constants_with_defaults(conditional_compilation).get("win64")
+        if host is not None and host.lower() == "vb6"
+        else host_win64(conditional_compilation)
+    )
     if isinstance(win64, bool):
         is64 = win64 is True
     elif isinstance(win64, (int, float)):

@@ -10,8 +10,9 @@ ByVal to such a parameter, used as an array index or bound, as a For counter's
 bound, or as a VBA function's whole-number argument such as Mid's Start. VarPtr,
 ObjPtr and StrPtr return a LongPtr, so `n = VarPtr(x)`, how 32-bit code keeps a
 pointer, stops compiling. CLng(q) converts; a Double, Variant or String takes the
-value; `q / 1` is a Double. The rule follows the Win64 compiler constant: in
-32-bit Office LongPtr is a Long and there is no LongLong.
+value; `q / 1` is a Double. The rule follows the host's Win64 compiler
+constant, not a project argument or a #Const (see host_win64): in 32-bit Office
+LongPtr is a Long and there is no LongLong.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from typing import Any, cast
 from ...conditional import ConditionalActivityTracker
 from ...conditional.conditional_compilation import (
     ConditionalCompilationEnvironment,
-    compiler_constants_with_defaults,
+    host_win64,
 )
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
 from ...lexer.token_kinds import TokenKind, VbaToken
@@ -83,7 +84,7 @@ def check_long_long_narrowing(
     activity: ConditionalActivityTracker | None,
     push: PushFn,
 ) -> None:
-    win64 = compiler_constants_with_defaults(conditional_compilation).get("win64")
+    win64 = host_win64(conditional_compilation)
     if isinstance(win64, bool):
         on = win64
     elif isinstance(win64, (int, float)):

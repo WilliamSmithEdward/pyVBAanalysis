@@ -364,8 +364,24 @@ def compiler_constants_with_defaults(
 ) -> dict[str, ConditionalValue]:
     """The constants a directive sees, the defaults for 64-bit Office included:
     what conditional_compiler_constants gives for the environment the branch
-    activity is decided in (XLIDE issue #215)."""
+    activity is decided in (XLIDE issue #215). Not for deciding whether the code
+    runs in 64-bit Office, where a project argument must not count: that is
+    host_win64."""
     return conditional_compiler_constants(_effective_environment(env))
+
+
+def host_win64(env: ConditionalCompilationEnvironment | None) -> ConditionalValue | None:
+    """Win64 as the host has it, over the defaults, never the project's: what a
+    rule reads to tell whether the code runs in 64-bit Office. A project's
+    conditional compilation argument `Win64 = 0` (Tools > Project Properties)
+    turns `#If Win64` off and nothing else: measured in 64-bit Excel, Word,
+    PowerPoint and Access, a Declare without PtrSafe is still refused, and VarPtr
+    into a Long and AddressOf into a ByVal Long are still a Type mismatch. A
+    module's `#Const Win64 = 0` is the same (XLIDE issues #1528, #1551)."""
+    compiler = _effective_environment(env).compiler_constants
+    return conditional_compiler_constants(
+        ConditionalCompilationEnvironment(compiler_constants=compiler)
+    ).get("win64")
 
 
 def conditional_compiler_constants(

@@ -32,6 +32,7 @@ from ..lexer.tokenize import tokenize_cached
 from ..parser.nodes import ExprNode, LeafStatementNode, ModuleNode, ProcedureNode, Span, iter_body_nodes
 from ..parser.parse_module import parse_module
 from ..symbols.build_module_symbols import BuildModuleSymbolsOptions, build_module_symbols
+from ..symbols.referenced_projects import ReferencedLookupOrder
 from ..symbols.symbol_model import ModuleSymbolKind, VbaProjectClassMembers
 from ..types.type_inference import dead_branch_spans_in, unreachable_statements_in
 from .context import (
@@ -456,6 +457,10 @@ def diagnostic_member_completion_context(
         with_scan_cache={},
         receiver_type_cache={},
         receiver_chain_cache={},
+        referenced_project_surfaces=opts.referenced_project_surfaces,
+        referenced_lookup_order=ReferencedLookupOrder(
+            opts.referenced_libraries, (opts.host_model or {}).get("hostName") or opts.host or "Excel"
+        ),
     )
     me_project_type = _me_project_type_for(opts.module_name, opts.module_kind)
     if me_project_type:

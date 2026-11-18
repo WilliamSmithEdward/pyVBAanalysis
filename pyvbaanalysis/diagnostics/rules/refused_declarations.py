@@ -16,7 +16,8 @@ whole project:
   ParamArray, "Syntax error".
 - const-invalid-type: a Const declared As a type that is not one of VBA's
   own: As Object is "Invalid data type for constant", and As Collection,
-  Range, a class, an Enum, a Type or Decimal is "Expected: type name".
+  Range, a class, an Enum, a Type or Decimal is "Expected: type name"
+  at module level and "Syntax error" inside a procedure (issue #1553).
 - empty-enum: an Enum with no members, "Enum without members not allowed".
 - type-member-without-type: a Type member with no As clause, a type
   suffix included, "Statement invalid inside Type block".
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from typing import Literal
 
 from ...conditional import ConditionalActivityTracker
 from ...js_compat import JS_WHITESPACE, js_trim
@@ -102,7 +104,7 @@ def check_refused_declarations(
 
     def const_groups(group: VariableGroupNode) -> None:
         if group.is_const:
-            _check_const_types(source, group.declarations, activity, push)
+            _check_const_types(source, group.declarations, "procedure", activity, push)
 
     for member in active_module_members(mod, activity):
         if isinstance(member, ProcedureNode):
@@ -167,7 +169,7 @@ def check_refused_declarations(
                 )
         elif isinstance(member, VariableGroupNode):
             if member.is_const:
-                _check_const_types(source, member.declarations, activity, push)
+                _check_const_types(source, member.declarations, "module", activity, push)
             # Static keeps a local's value between calls, and means nothing
             # outside a procedure (XLIDE issue #216).
             if member.modifier.lower() == "static":
@@ -229,21 +231,28 @@ def check_refused_declarations(
 def _check_const_types(
     source: str,
     declarations: Sequence[VariableDeclNode],
+    scope: Literal["module", "procedure"],
     activity: ConditionalActivityTracker | None,
     push: PushFn,
 ) -> None:
+    """A Const declared As a type VBA does not own. The VBE's message depends on
+    where: "Expected: type name" at module level and "Syntax error" inside a
+    procedure, a standard module's name included, while Object is "Invalid data
+    type for constant" at either level (XLIDE issue #1553, measured in Excel,
+    Word, PowerPoint and Access 16.0)."""
     for decl in declarations:
         as_type = js_trim(decl.as_type) if decl.as_type is not None else None
         if not as_type or is_inactive_node(activity, decl) or as_type.lower() in _CONST_TYPES:
             continue
         object_ = as_type.lower() == "object"
+        vbe_error = "Syntax error" if scope == "procedure" else "Expected: type name"
         push(
             "constInvalidType",
             "A Const cannot be declared As Object. This is a VBE compile error: Invalid data "
             "type for constant."
             if object_
             else f"A Const can only be declared As one of VBA's own types, not As {as_type}. "
-            "This is a VBE compile error: Expected: type name.",
+            f"This is a VBE compile error: {vbe_error}.",
             declared_name_span(source, decl.span, decl.name),
         )
 

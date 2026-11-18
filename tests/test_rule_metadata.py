@@ -34,15 +34,15 @@ _STRUCTURAL_ONLY_CODES = {
 }
 
 
-def test_catalogue_loads_226_rules() -> None:
+def test_catalogue_loads_227_rules() -> None:
     rules = load_rule_metadata()
-    assert len(rules) == 226
+    assert len(rules) == 227
     assert rules == DIAGNOSTIC_RULES  # the eager catalogue matches a fresh load
 
 
 def test_codes_are_unique() -> None:
     codes = [meta.code for meta in DIAGNOSTIC_RULES.values()]
-    assert len(codes) == len(set(codes)) == 226
+    assert len(codes) == len(set(codes)) == 227
 
 
 def test_fields_are_typed_enums() -> None:
@@ -58,7 +58,7 @@ def test_fields_are_typed_enums() -> None:
 
 def test_rule_metadata_by_code() -> None:
     by_code = rule_metadata_by_code()
-    assert len(by_code) == 226
+    assert len(by_code) == 227
     assert by_code["unterminated-string"].rule_name == "unterminatedString"
     assert by_code["unterminated-string"].default_severity is DiagnosticSeverity.ERROR
 
@@ -72,7 +72,7 @@ def test_codes_align_with_audit() -> None:
 
 def test_manifest_records_rule_metadata() -> None:
     manifest = load_manifest()
-    assert manifest["ruleCount"] == 226
+    assert manifest["ruleCount"] == 227
     assert "rule_metadata.json" in manifest["files"]
     assert sorted(manifest["ruleNames"]) == sorted(DIAGNOSTIC_RULES.keys())
 
@@ -129,7 +129,7 @@ def test_vba_diagnostic_shape() -> None:
 def test_all_rule_metadata_is_sorted_by_code_and_holds_the_structural_rules() -> None:
     codes = [meta.code for meta in all_diagnostic_rule_metadata()]
     assert codes == sorted(codes)
-    assert len(codes) == 226 + 3
+    assert len(codes) == 227 + 3
     assert "missing-block-closer" in codes
 
 

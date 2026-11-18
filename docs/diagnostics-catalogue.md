@@ -1,6 +1,6 @@
 # Diagnostic catalogue
 
-The diagnostic codes pyVBAanalysis can emit, generated from the rule metadata (`tools/generate_diagnostics_catalogue.py`). This table lists the 226 rule-metadata codes across 6 categories. A further 3 structural block-balance codes (`mismatched-end-keyword`, `missing-block-closer`, `unmatched-block-closer`) are emitted by the parser pass and are not in the metadata table, for a full set of 229 codes.
+The diagnostic codes pyVBAanalysis can emit, generated from the rule metadata (`tools/generate_diagnostics_catalogue.py`). This table lists the 227 rule-metadata codes across 6 categories. A further 3 structural block-balance codes (`mismatched-end-keyword`, `missing-block-closer`, `unmatched-block-closer`) are emitted by the parser pass and are not in the metadata table, for a full set of 230 codes.
 
 Each code is reported only when it is provably correct; anything unknown or ambiguous stays quiet (the no-false-positive discipline). The **kind** column says what a code means: a *compile error* is rejected by the VBE compiler, a *runtime error* is a deterministic Run-time error, a *runtime risk* is a likely fault, and *style* is advisory.
 
@@ -84,7 +84,7 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `undeclared-variable` | Variable not defined | error | compile error | MS-VBAL 5.2.4.1.1 |
 | `unknown-call` | Sub or Function not defined | error | compile error | MS-VBAL 5.4.2.1 |
 
-## Semantic (114)
+## Semantic (115)
 
 | Code | Title | Default | Kind | Spec reference |
 | --- | --- | --- | --- | --- |
@@ -188,6 +188,7 @@ Override a code's severity with `AnalyzeModuleOptions.severity_overrides` (or th
 | `set-requires-object` | Set assignment requires an object variable | error | compile error | MS-VBAL 5.4.3 |
 | `sheet-name-invalid` | Sheet name Excel refuses | error | runtime error | Excel runtime error 1004: invalid name for a sheet or chart (issue #122, Excel 16.0) |
 | `sheet-not-in-workbook` | Sheet the workbook does not have | error | runtime error | Excel runtime error 9: Subscript out of range from ThisWorkbook.Sheets, Worksheets or Charts given a name or index the workbook lacks (issue #229, Excel 16.0) |
+| `statement-operand-type` | Statement operand of a type the statement refuses | error | compile error | VBE "Type mismatch" on Line Input #, Mid, Load and Unload, and "Can not Get or Put an object reference variable or a variable of user-defined type containing an object reference" (Excel, Word, PowerPoint and Access 16.0) |
 | `string-arithmetic-coercion` | Nonnumeric string in numeric expression | error | runtime error | MS-VBAL 5.6 / runtime type coercion |
 | `sub-used-as-value` | Sub used as a value | error | compile error | VBE "Expected Function or variable" (issue #125, Excel 16.0) |
 | `type-suffix-mismatch` | Type-declaration character does not match the declared type | error | compile error | MS-VBAL 3.3.5.2; VBE "Type-declaration character does not match declared data type" (issue #216, Excel 16.0) |

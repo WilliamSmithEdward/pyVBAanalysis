@@ -5,6 +5,37 @@ All notable changes to pyVBAanalysis are recorded here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a minor version
 per milestone.
 
+## 3.0.3 - 2026-11-18
+
+Sync the analyzer and evidence data to XLIDE 11.2.11 (commit ec9c8a4). The
+oracle corpus grows from 14,868 to 17,975 cases, and the catalogue to 227 rules
+and 230 codes.
+
+* Judge names reached through a referenced VBA project: its modules, classes,
+  Enums and members, a class used with `New` or as a value, and the class a
+  member returns. `analyze_project` and `analyze_module_options_for` take
+  `referenced_projects` and `referenced_project_surfaces`, and Office files
+  report the VBA projects they reference. The port does not read a referenced
+  project's own file, so bare names in a module that could come from an
+  unread referenced project are left unjudged, as upstream does.
+* A referenced library's name stands only before a dot, and the project's own
+  name comes from its dir stream.
+* Report statements in shapes the VBE refuses: End, Stop, Error and On, file
+  statements, block headers missing a part, a ReDim target without bounds, an
+  Erase of one array element, DefDec, and a Declare without Lib. New code
+  `statement-operand-type` for an operand a statement refuses.
+* A call with too few arguments is "Argument not optional", and Beep,
+  Randomize, Reset, Load and Unload have their arguments checked.
+* Know stdole's LoadPicture, SavePicture and constants, the Date statement
+  under Option Explicit, and a statement that calls a form control.
+* Event handlers take parameters by DefType and may use LongLong for LongPtr;
+  WithEvents reads `VBA.Collection`, standard modules and object modules
+  without events as the VBE does.
+* A project argument `Win64 = 0` leaves the 64-bit rules on.
+* A Mid statement with an empty start argument no longer stops the runtime
+  value checks for the rest of the module (found by the rules fuzzer,
+  xlide_vscode#1564).
+
 ## 3.0.2 - 2026-10-28
 
 Sync the analyzer and evidence data to XLIDE 11.2.1 (commit 4f728e9). The

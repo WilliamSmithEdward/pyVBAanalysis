@@ -941,7 +941,7 @@ def by_ref_variable_type_mismatch(
     else:
         return None
     actual = normalize_type(actual_raw)
-    if not _by_ref_exact(actual) or _same_by_ref_type(actual, expected):
+    if not _by_ref_exact(actual) or same_by_ref_type(actual, expected):
         return None
     # An Object passes ByRef to `c As Collection`, and a Collection to `o As
     # Object`: both compile, and the wrong object raises 13 at run time (XLIDE
@@ -957,7 +957,7 @@ def _by_ref_exact(type_: str | None) -> bool:
     return is_known_by_ref_exact_type(type_) or type_ == "collection"
 
 
-def _same_by_ref_type(actual: str | None, expected: str | None) -> bool:
+def same_by_ref_type(actual: str | None, expected: str | None) -> bool:
     """Whether a ByRef argument's type is the parameter's. LongPtr is LongLong in
     64-bit Office, the platform the analyzer assumes."""
 

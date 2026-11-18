@@ -226,6 +226,15 @@ def infer_atomic_expression_type(
             return InferredArgumentType(
                 type_=sig.return_type, label=f"{name} As {sig.return_type}", span=span
             )
+        # A document module named bare is its module's object, ahead of a host
+        # global of the same name: `Set ws = ThisWorkbook` (XLIDE issue #1494).
+        from .rules.type_of_is import document_module_named
+
+        document = document_module_named(name, member_ctx)
+        if document:
+            return InferredArgumentType(
+                type_=document, label=f"the document module {document}", span=span
+            )
         external_object = infer_bare_external_object_expression_type(name, span, source_names, member_ctx)
         if external_object is not None:
             return external_object

@@ -374,7 +374,7 @@ def _is_default_member_attribute(attr: VbaSymbolAttribute) -> bool:
     )
 
 
-def _is_default_project_object_member(symbol: VbaSymbol) -> bool:
+def is_default_project_object_member(symbol: VbaSymbol) -> bool:
     return any(_is_default_member_attribute(a) for a in (symbol.attributes or []))
 
 
@@ -1419,7 +1419,7 @@ class ProjectIndex:
                     existing.write_is_array = True
                 if not existing.signature:
                     existing.signature = _project_object_member_signature(symbol)
-                if _is_default_project_object_member(symbol):
+                if is_default_project_object_member(symbol):
                     existing.default_member = True
                 if symbol.kind is VbaSymbolKind.PROPERTY_LET:
                     existing.let_accessor = True
@@ -1449,13 +1449,18 @@ class ProjectIndex:
                 module_name=mod.module_name,
                 visibility=symbol.visibility,
                 definitions=[_project_object_member_definition(symbol)],
-                default_member=True if _is_default_project_object_member(symbol) else None,
+                default_member=True if is_default_project_object_member(symbol) else None,
                 let_accessor=True if symbol.kind is VbaSymbolKind.PROPERTY_LET else None,
                 set_accessor=True if symbol.kind is VbaSymbolKind.PROPERTY_SET else None,
                 sub=True if symbol.kind is VbaSymbolKind.SUB else None,
                 procedure_params=(
                     {new_kind: _project_object_member_parameters(symbol, mod)}
                     if (new_kind := _member_procedure_kind(symbol)) is not None
+                    else None
+                ),
+                event_params=(
+                    _project_object_member_parameters(symbol, mod)
+                    if symbol.kind is VbaSymbolKind.EVENT
                     else None
                 ),
                 attributes=_merge_member_attributes(None, symbol.attributes),

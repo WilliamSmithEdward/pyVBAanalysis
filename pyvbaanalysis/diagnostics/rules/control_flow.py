@@ -483,9 +483,13 @@ def _check_malformed_if_headers(source: str, node: IfBlockNode, push: PushFn) ->
                 break
         if start_kw < 0:
             continue
-        # The block-opening `Then` is the last `then` keyword on the header line.
+        # The block-opening `Then` is the last `then` keyword on the header
+        # line. `d.Then` and `d!Then` are members, not the keyword (XLIDE issue #1496).
         close_then = -1
         for i in range(len(toks) - 1, start_kw, -1):
+            previous = toks[i - 1]
+            if previous.raw_text == "." or (previous.raw_text == "!" and previous.end == toks[i].start):
+                continue
             if toks[i].kind is TokenKind.KEYWORD and token_text(toks[i]) == "then":
                 close_then = i
                 break

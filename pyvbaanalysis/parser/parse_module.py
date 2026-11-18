@@ -75,6 +75,7 @@ from .parser_state import (
     StatementCursor,
     code_tokens,
     is_comment_line,
+    is_then_or_else_keyword_at,
     split_logical_statements,
 )
 from .type_declaration_suffix import is_type_declaration_suffix, type_name_for_declaration_suffix
@@ -1388,7 +1389,7 @@ class _Parser:
         then_index = -1
         for i in range(len(tokens) - 1, cond_start - 1, -1):
             t = tokens[i]
-            if t.kind is TokenKind.KEYWORD and token_word(t) == "then":
+            if t.kind is TokenKind.KEYWORD and is_then_or_else_keyword_at(tokens, i, "then"):
                 then_index = i
                 break
         cond_end = then_index if then_index >= 0 else len(tokens)
@@ -1494,9 +1495,9 @@ class _Parser:
             # Multi-line If only when "Then" ends the line (MS-VBAL 5.4.2.8). A
             # single-line "If x Then stmt" is not a block, and neither is
             # "If x Then:", whose colon opens its statement list (MS-VBAL 5.4.2.9,
-            # XLIDE issue #84).
-            last = _at(tokens, len(tokens) - 1)
-            return "if" if token_word(last) == "then" and not stmt.ended_by_colon else None
+            # XLIDE issue #84). `d.Then` ends in a member (XLIDE issue #1496).
+            ends_in_then = is_then_or_else_keyword_at(tokens, len(tokens) - 1, "then")
+            return "if" if ends_in_then and not stmt.ended_by_colon else None
         if w0 == "for":
             return "foreach" if token_word(_at(tokens, 1)) == "each" else "for"
         if w0 == "do":
@@ -1727,15 +1728,31 @@ class _Parser:
         tokens = _code_tokens_after_line_number(stmt)
         if not tokens or token_word(tokens[0]) != "if":
             return []
-        starts: list[int] = []
+        # Each branch runs from the token after its Then or Else to the next Then
+        # or Else keyword, which belongs to no branch: `If ok Then Beep Else
+        # MsgBox "a"` calls Beep with no argument. A branch that is a one-line If
+        # of its own, `Else If s Is Nothing Then Exit Sub`, keeps its Then, as the
+        # rules that read it as an If need (XLIDE #1668).
+        branches: list[tuple[int, bool, int]] = []  # (start, nested If, keyword index)
+        keywords: list[int] = []
         for i in range(1, len(tokens)):
-            if token_word(tokens[i]) not in ("then", "else"):
+            # A member named Then or Else, `d.Then`, starts no statement list.
+            if not is_then_or_else_keyword_at(tokens, i, "then") and not is_then_or_else_keyword_at(
+                tokens, i, "else"
+            ):
                 continue
+            keywords.append(tokens[i].start)
             if i + 1 < len(tokens):
-                starts.append(tokens[i + 1].start)
+                following = tokens[i + 1]
+                branches.append((following.start, token_word(following) == "if", len(keywords) - 1))
         return [
-            Span(start, starts[index + 1] if index + 1 < len(starts) else stmt.end)
-            for index, start in enumerate(starts)
+            Span(
+                start,
+                (branches[index + 1][0] if index + 1 < len(branches) else stmt.end)
+                if nested_if
+                else (keywords[keyword + 1] if keyword + 1 < len(keywords) else stmt.end),
+            )
+            for index, (start, nested_if, keyword) in enumerate(branches)
         ]
 
     @staticmethod

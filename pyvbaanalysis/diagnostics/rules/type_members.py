@@ -53,7 +53,7 @@ from ..type_fields import (
 )
 from ..type_member_state import MemberStatesAt, type_member_states_at
 from ..walker import active_module_members, statement_tokens_after_leading_label, token_name, token_text
-from .arrays import module_option_base
+from .arrays import module_option_base, redim_target_bounds
 
 _NOT_SET = "This will raise Run-time error '91': Object variable or With block variable not set."
 
@@ -711,7 +711,8 @@ def _check_resizes(
             continue
         group = [tok for tok in toks[start:i] if tok.kind is not TokenKind.COMMENT]
         start = i + 1
-        if not group:
+        # A ReDim target without bounds is a Syntax error, which the ReDim target rule reports.
+        if not group or (head == "redim" and redim_target_bounds(group).missing):
             continue
 
         def at(last: VbaToken, group: list[VbaToken] = group) -> Span:
@@ -768,6 +769,59 @@ def _check_resizes(
                 f"{_js(step.field.type_name)}. This is a VBE compile error: Expected array.",
                 at(group[step.at]),
             )
+        elif (
+            head == "erase"
+            and step.field.is_array
+            and step.open is not None
+            and step.close is not None
+            and step.close == len(group) - 1
+            and step.close > step.open + 1
+            and field_type is not None
+            and normalize_type(field_type) != "variant"
+            and _erase_element_subscript(group[step.open + 1 : step.close], step.field.dims)
+        ):
+            # `Erase t.x(1)` names one element of an array member whose elements
+            # are no Variant (XLIDE issue #1690, measured in the four hosts). Left
+            # to the VBE: `Erase t.x(1 To 2)`, a Syntax error, and `Erase t.f(1, 2)`
+            # with `f(2)`, Wrong number of dimensions; and, as on a variable, an
+            # empty subscript, `(1,)`, or a named argument, `(i:=1)`. The
+            # subscript as written, a space inside it where the source has one.
+            written = group[step.open : step.close + 1]
+            element = step.display + "".join(
+                (" " if k > 0 and tok.start > written[k - 1].end else "") + tok.raw_text
+                for k, tok in enumerate(written)
+            )
+            push(
+                "eraseRequiresArray",
+                f"Erase target '{element}' is one element of the array member '{step.display}', and "
+                f"Erase takes the whole array, as in Erase {step.display}. This is a VBE compile "
+                "error: Expected array.",
+                at(group[step.close]),
+            )
+
+
+def _erase_element_subscript(inner: Sequence[VbaToken], dims: Sequence[object] | None) -> bool:
+    """Whether the tokens inside an Erase target's parentheses are one element's
+    subscript the VBE reads as such: no `To` (a member named To aside), no named
+    argument, no empty place, and as many subscripts as the member's dimensions."""
+    for k, tok in enumerate(inner):
+        previous = _raw_at(inner, k - 1)
+        if token_text(tok) == "to" and previous != "." and previous != "!":
+            return False
+        if tok.raw_text == ":=" and _depth_at(inner, 0, k) == 0:
+            return False
+        if (
+            tok.raw_text == ","
+            and _depth_at(inner, 0, k) == 0
+            and (k == 0 or k == len(inner) - 1 or inner[k + 1].raw_text == ",")
+        ):
+            return False
+    return dims is None or len(dims) == _subscript_count(inner)
+
+
+def _subscript_count(inner: Sequence[VbaToken]) -> int:
+    """How many subscripts the tokens inside a pair of parentheses hold: `1, 2` holds two."""
+    return sum(1 for k, tok in enumerate(inner) if tok.raw_text == "," and _depth_at(inner, 0, k) == 0) + 1
 
 
 def _depth_at(toks: Sequence[VbaToken], start: int, index: int) -> int:

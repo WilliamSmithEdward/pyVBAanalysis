@@ -248,6 +248,7 @@ def _read_access_project(
     libids = _reference_libids(info.references) if info is not None else None
     if metadata is not None and info is not None:
         metadata.referenced_libraries = _reference_library_names(info.references)
+        metadata.referenced_projects = _referenced_project_names(info.references, metadata.referenced_libraries)
         metadata.project_name = _project_name(getattr(info, "project_name", None), metadata.referenced_libraries)
     return modules, libids, _project_constants(dir_raw)
 
@@ -377,6 +378,20 @@ def _reference_library_names(references: Iterable[Any]) -> list[str] | None:
     return names
 
 
+def _referenced_project_names(
+    references: Iterable[Any], referenced_libraries: list[str] | None
+) -> list[str] | None:
+    """The names of the references that are other VBA projects, not type libraries.
+    Read with the references, and None with them."""
+    if referenced_libraries is None:
+        return None
+    return [
+        getattr(reference, "name_unicode", "") or getattr(reference, "name", "")
+        for reference in references
+        if getattr(reference, "kind", None) == "project"
+    ]
+
+
 def _project_name(name: object, referenced_libraries: list[str] | None) -> str | None:
     """The project's own name as the dir stream records it (`VBAProject`,
     `Project`, an Access database's), which qualifies its types the way a
@@ -389,6 +404,7 @@ def _project_name(name: object, referenced_libraries: list[str] | None) -> str |
 @dataclass
 class _OfficeMetadata:
     referenced_libraries: list[str] | None = None
+    referenced_projects: list[str] | None = None
     project_name: str | None = None
     workbook_sheets: list[WorkbookSheetInfo] | None = None
 
@@ -433,6 +449,9 @@ def _read_office_project(
             libids = _reference_libids(project.references)
             if metadata is not None:
                 metadata.referenced_libraries = _reference_library_names(project.references)
+                metadata.referenced_projects = _referenced_project_names(
+                    project.references, metadata.referenced_libraries
+                )
                 metadata.project_name = _project_name(getattr(project, "name", None), metadata.referenced_libraries)
                 if suffix in EXCEL_EXTENSIONS:
                     metadata.workbook_sheets = workbook_sheets(container, suffix)
@@ -464,6 +483,7 @@ class OfficeProject:
     not been shown to lack any library.
 
     ``referenced_libraries`` contains the names of all referenced libraries;
+    ``referenced_projects`` names those that are other VBA projects;
     ``workbook_sheets`` contains saved Excel sheet names and kinds in tab order;
     ``project_name`` is the project's own name as its dir stream records it.
     Each is None when that metadata could not be read.
@@ -479,6 +499,7 @@ class OfficeProject:
     referenced_libraries: list[str] | None = None
     workbook_sheets: list[WorkbookSheetInfo] | None = None
     project_name: str | None = None
+    referenced_projects: list[str] | None = None
 
     def conditional_compilation(
         self, caller: ConditionalCompilationEnvironment | None = None
@@ -515,6 +536,7 @@ def read_office_project(path: str | Path) -> OfficeProject:
         referenced_libraries=metadata.referenced_libraries,
         workbook_sheets=metadata.workbook_sheets,
         project_name=metadata.project_name,
+        referenced_projects=metadata.referenced_projects,
     )
 
 
@@ -563,6 +585,7 @@ def analyze_office_file(
         # that references Excel is analyzed against both.
         referenced_hosts=project.referenced_hosts,
         referenced_libraries=project.referenced_libraries,
+        referenced_projects=project.referenced_projects,
         project_name=project.project_name,
         workbook_sheets=project.workbook_sheets,
     )

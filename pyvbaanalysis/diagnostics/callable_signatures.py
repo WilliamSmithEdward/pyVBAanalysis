@@ -361,11 +361,14 @@ def runtime_arity_signature(runtime: VbaRuntimeFunction) -> CallableTypeSignatur
 # missing argument (Argument not optional), one too many (Wrong number of
 # arguments) and a repeated named one (Named argument already specified) in
 # Excel, Word, PowerPoint and Access 16.0 (XLIDE issue #1414). Line Input #,
-# Name ... As and Width # have syntax of their own; Beep, Randomize, Reset, Load
-# and Unload were not measured.
+# Name ... As and Width # have syntax of their own. Beep, Randomize, Reset, Load
+# and Unload were measured for their counts only (build 20527, XLIDE #1668): Beep
+# and Reset take no argument, Randomize one optional, Load and Unload exactly
+# one, as statements and through Call.
 _ARGUMENT_LIST_STATEMENTS = frozenset({
     "appactivate", "chdir", "chdrive", "deletesetting", "filecopy", "kill", "mkdir", "rmdir",
     "savesetting", "sendkeys", "setattr",
+    "beep", "randomize", "reset", "load", "unload",
 })
 
 

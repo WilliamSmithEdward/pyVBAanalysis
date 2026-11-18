@@ -57,6 +57,20 @@ Issue #1412, measured the same way (2026-10-23):
 - redim-bound-array: an array variable as a ReDim bound, lower or upper,
   in parentheses or not, with Preserve or not, in any dimension, "Type
   mismatch". An element, UBound(a) and a Variant take.
+
+Measured in Excel, Word, PowerPoint and Access 16.0 (build 20527,
+2026-11-15) through the VBE oracle:
+
+- statement-operand-type: a statement handed a variable of a type it
+  refuses. Line Input # and the Mid statement write into a String or a
+  Variant, and anything else, a whole array included, is "Type
+  mismatch". Load and Unload take an object or a Variant, and a
+  literal, a scalar, a user-defined type or a whole array is "Type
+  mismatch". Get and Put refuse what is known to be an object and a
+  user-defined type holding one at any depth, and Put refuses Nothing,
+  "Can not Get or Put an object reference variable or a variable of
+  user-defined type containing an object reference"; a whole array of
+  objects takes.
 """
 
 from __future__ import annotations
@@ -104,11 +118,11 @@ from ...symbols.symbol_model import (
     VbaSymbol,
     VbaSymbolKind,
 )
-from ...types.type_inference import procedure_symbol_for, source_identifier_binding
+from ...types.type_inference import def_type_of, procedure_symbol_for, source_identifier_binding
 from ...types.type_names import is_known_scalar_type, normalize_type
 from ..context import PushFn
 from ..statement_operands import statement_operand_roots
-from ..type_fields import ModuleTypes, is_fixed_array_field, module_types
+from ..type_fields import ModuleTypes, field_chain, is_fixed_array_field, module_types, variable_root
 from ..walker import (
     absolute_span,
     active_module_members,
@@ -159,6 +173,10 @@ class _Context:
     types: ModuleTypes
     # The project's class, document and UserForm names.
     classes: AbstractSet[str]
+    # Whether each module Type holds an object, as far as it has been read.
+    holds_object: dict[str, bool | None]
+    # The Types and Enums this module declares, lowercased.
+    own_types: AbstractSet[str]
 
 
 def check_statement_types(
@@ -177,6 +195,7 @@ def check_statement_types(
             udts.add(member.name.lower())
         elif isinstance(member, EnumNode):
             enums.add(member.name.lower())
+    own_types = udts | enums
     classes: set[str] = set()
     for type_ in project_types or []:
         if type_.kind is VbaProjectTypeKind.USER_TYPE:
@@ -196,6 +215,8 @@ def check_statement_types(
         untyped_is_variant=_DEFTYPE_LINE_RE.search(source) is None,
         types=module_types(source, mod, activity),
         classes=classes,
+        holds_object={},
+        own_types=own_types,
     )
     for member in active_module_members(mod, activity):
         if isinstance(member, VariableGroupNode):
@@ -278,7 +299,12 @@ def _scalar_function_named(ctx: _Context, proc_sym: VbaSymbol | None, name: str)
 def _category(ctx: _Context, symbol: VbaSymbol | None) -> _Category | None:
     if symbol is None or symbol.is_array:
         return None
-    type_ = normalize_type(symbol.as_type)
+    return _type_category(ctx, symbol.as_type)
+
+
+def _type_category(ctx: _Context, as_type: str | None) -> _Category | None:
+    """category() for a scalar declared As `as_type`."""
+    type_ = normalize_type(as_type)
     if not type_:
         return "variant" if ctx.untyped_is_variant else None
     if type_ == "variant":
@@ -598,6 +624,7 @@ def _check_statement(ctx: _Context, proc_sym: VbaSymbol | None, span: Span) -> N
     _check_type_suffixes(ctx, proc_sym, toks, span)
     _check_named_arguments(ctx, proc_sym, toks, span)
     _check_mid_target(ctx, proc_sym, toks, span)
+    _check_operand_types(ctx, proc_sym, toks, span)
     first = token_text(toks[0])
     if first == "return" and len(toks) > 1 and toks[1].kind is not TokenKind.COLON:
         ctx.push(
@@ -1163,17 +1190,26 @@ def _check_named_arguments(
                 break
 
 
+def _mid_statement_open(toks: Sequence[VbaToken]) -> int | None:
+    """The index of the `(` after a statement's Mid or MidB, with `$` or not; None
+    for another statement."""
+    head = token_text(_at(toks, 0))
+    if head != "mid" and head != "midb":
+        return None
+    open_ = 2 if _raw_at(toks, 1) == "$" else 1
+    return open_ if _raw_at(toks, open_) == "(" else None
+
+
 def _check_mid_target(
     ctx: _Context, proc_sym: VbaSymbol | None, toks: Sequence[VbaToken], span: Span
 ) -> None:
     """`Mid$(S, 1, 1) = "x"` with S a Const."""
-    head = token_text(_at(toks, 0))
-    if head != "mid" and head != "midb":
+    open_ = _mid_statement_open(toks)
+    if open_ is None:
         return
-    open_ = 2 if _raw_at(toks, 1) == "$" else 1
     target = _at(toks, open_ + 1)
     name = token_name(target) if target is not None else None
-    if _raw_at(toks, open_) != "(" or not name or _raw_at(toks, open_ + 2) != ",":
+    if not name or _raw_at(toks, open_ + 2) != ",":
         return
     depth = 0
     for j in range(open_, len(toks)):
@@ -1187,3 +1223,315 @@ def _check_mid_target(
             ):
                 _variable_required(ctx, name, absolute_span(span, target))
             return
+
+
+@dataclass(frozen=True, slots=True)
+class _Operand:
+    """A variable, an element of one or a field reached from one, by its declared type."""
+
+    # What it holds; 'array' for a whole array.
+    kind: _Category | Literal["array"]
+    # The declared type as written, for a message.
+    type_name: str
+    # Known to hold an object reference: an Object, a Collection, a class of the
+    # project, a variable declared As New.
+    object: bool
+    # What each element holds, for a whole array.
+    element_kind: _Category | None = None
+    # The module Type it is a value of, lowercased, when its fields are this
+    # module's to read.
+    type: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TypeReading:
+    kind: _Category | None
+    type: str | None
+    object: bool
+
+
+def _type_of(ctx: _Context, written: str, owned: bool) -> _TypeReading:
+    """What a declared type is, as category() reads a variable's, and whether it is
+    known to be an object. A type name no scalar or Type claims is called a class
+    there, and is one here only when known: a library's Enum, such as
+    VbMsgBoxResult, is no object. `type` is its name, lowercased, unless it is
+    qualified by another module, `Module2.T1`, or `owned` says the declaration is
+    another module's, whose Types this module cannot read. Such a name that this
+    module also gives a Type or Enum of its own is not known at all: Module2's Enum
+    T1 is no Type, though this module's T1 is one."""
+    dot = written.rfind(".")
+    bare = js_trim(written[dot + 1 :])
+    qualifier = None if dot < 0 else js_trim(written[:dot]).lower()
+    lower = bare.lower()
+    own_module = qualifier == ctx.symbols.module_name.lower()
+    if (not owned if qualifier is None else not own_module) and lower in ctx.own_types:
+        return _TypeReading(None, None, False)
+    kind = _type_category(ctx, bare)
+    object_ = kind == "object" or (
+        kind == "class"
+        and (
+            (lower == "collection" and (qualifier is None or qualifier == "vba"))
+            or (qualifier is None and lower in ctx.classes)
+        )
+    )
+    type_ = normalize_type(bare) if own_module or (owned and qualifier is None) else None
+    return _TypeReading(kind, type_, object_)
+
+
+def _operand_of(ctx: _Context, proc_sym: VbaSymbol | None, toks: Sequence[VbaToken]) -> _Operand | None:
+    """What `toks` name when they are exactly a variable, `s` or `s$`, an element of
+    an array variable, `a(1)`, or a field of a module Type reached from one, `t.n`,
+    `ts(1).t.o`. Anything else, an expression or a call, is None."""
+    first = _at(toks, 0)
+    name = token_name(first) if first is not None else None
+    variable = (
+        _variable_named(ctx, proc_sym, name)
+        if name and first is not None and first.kind is not TokenKind.KEYWORD
+        else None
+    )
+    if variable is None:
+        return None
+    owned = variable.module_name.lower() == ctx.symbols.module_name.lower()
+    # No type and no type character: the module's DefType lines decide. A
+    # ParamArray they would type is refused where it is declared, "ParamArray
+    # must be declared as an array of Variant", and is read as one here.
+    declared: str | None
+    if variable.as_type is not None:
+        declared = variable.as_type
+    elif ctx.untyped_is_variant or variable.param_array:
+        declared = "Variant"
+    elif owned:
+        declared = def_type_of(ctx.symbols, variable.name) or "Variant"
+    else:
+        declared = None
+    # A type character glued to the name, `s$`. One that names another type than
+    # the declaration is type-suffix-mismatch's.
+    suffix = (
+        _SUFFIX_TYPES.get(toks[1].raw_text) if len(toks) == 2 and toks[1].start == toks[0].end else None
+    )
+    if declared is None or (suffix is not None and suffix != normalize_type(declared)):
+        return None
+
+    def value(is_array: bool, written: str, fixed_length: bool, auto_instance: bool) -> _Operand | None:
+        # A fixed-length String, `s As String * 3`, is a String.
+        read = _TypeReading("string", None, False) if fixed_length else _type_of(ctx, written, owned)
+        type_name = "String" if fixed_length else written
+        if is_array:
+            return _Operand("array", type_name, False, element_kind=read.kind, type=read.type)
+        if read.kind is None:
+            return None
+        return _Operand(read.kind, type_name, read.object or auto_instance, type=read.type)
+
+    fixed = variable.fixed_length is not None
+    auto_instance = variable.is_auto_instantiated is True
+    if len(toks) == 1 or suffix is not None:
+        return value(variable.is_array is True, declared, fixed, auto_instance)
+    # Inside a procedure, its own name followed by anything is not read: with
+    # arguments, `Fo(1)` in `Function Fo(i As Long) As Object()`, it is a call,
+    # not an element of its result; nor is a member, `Ft.o`, followed.
+    if proc_sym is not None and variable.name.lower() == proc_sym.name.lower():
+        return None
+    close = match_paren_from(toks, 1) if variable.is_array and toks[1].raw_text == "(" else -1
+    if close == len(toks) - 1:
+        # `a()` with nothing between the parentheses is the whole array.
+        return value(close == 2, declared, fixed, auto_instance)
+    # The fields of a Type of another module are not known here, even where this
+    # module has a Type of the same name.
+    root = None if _type_of(ctx, declared, owned).type is None else variable_root(toks, 0, variable, ctx.types)
+    steps = field_chain(toks, root, ctx.types) if root is not None else []
+    last = steps[-1] if steps else None
+    if (
+        last is None
+        or (last.close if last.close is not None else last.at) != len(toks) - 1
+        or any(
+            _type_of(ctx, step.field.type_name if step.field.type_name is not None else "Variant", True).type
+            is None
+            for step in steps[:-1]
+        )
+    ):
+        return None
+    # A field with no As is a Variant, whatever the DefType lines say.
+    field = last.field
+    whole = field.is_array and (last.open is None or last.close == last.open + 1)
+    return value(
+        whole,
+        field.type_name if field.type_name is not None else "Variant",
+        field.fixed_length is not None,
+        False,
+    )
+
+
+def _type_holds_object(ctx: _Context, type_: str) -> bool | None:
+    """Whether a value of the module Type holds an object at any depth, an array
+    field counting as its elements: `oa(2) As Object` holds objects. None when a
+    member's type is not known."""
+    fields = ctx.types.get(type_)
+    # Each Type is read once; one met again while it is being read, `x As A`
+    # inside Type A, is unknown.
+    if fields is None or type_ in ctx.holds_object:
+        return ctx.holds_object.get(type_)
+    ctx.holds_object[type_] = None
+    result: bool | None = False
+    for field in fields.values():
+        read = (
+            _TypeReading("string", None, False)
+            if field.fixed_length is not None
+            else _type_of(ctx, field.type_name if field.type_name is not None else "Variant", True)
+        )
+        nested = _type_holds_object(ctx, read.type) if read.kind == "udt" and read.type else None
+        if read.object or nested is True:
+            result = True
+            break
+        if read.kind is None or (read.kind == "class" and not read.object) or (read.kind == "udt" and nested is None):
+            result = None
+    ctx.holds_object[type_] = result
+    return result
+
+
+def _is_project_name(ctx: _Context, proc_sym: VbaSymbol | None, name: str) -> bool:
+    """Whether a name the module can see takes the statement's place: `Sub
+    Unload(a)` in it or a Public one in another module; another module's Private
+    one is not seen. No name takes the Mid statement's: with `Function Mid(a, b)`
+    or `Dim Mid As Variant`, `Mid(n, 1) = "x"` is still the statement."""
+    binding = source_identifier_binding(
+        ctx.symbols, proc_sym, ctx.project_visible_symbols, name, BareIdentifierContext.CALL
+    )
+    return binding.scope is not BareIdentifierResolutionScope.UNRESOLVED
+
+
+def _top_level_parts(toks: Sequence[VbaToken], start: int, end: int) -> list[list[VbaToken]]:
+    """The parts of `toks` from `start` to `end`, split at the commas outside parentheses."""
+    parts: list[list[VbaToken]] = [[]]
+    depth = 0
+    for i in range(start, end):
+        raw = toks[i].raw_text
+        depth += 1 if raw == "(" else -1 if raw == ")" else 0
+        if depth == 0 and raw == ",":
+            parts.append([])
+        else:
+            parts[-1].append(toks[i])
+    return parts
+
+
+def _describe(operand: _Operand) -> str:
+    return "an array" if operand.kind == "array" else f"declared As {operand.type_name}"
+
+
+def _is_literal(tok: VbaToken | None) -> bool:
+    return tok is not None and (
+        tok.kind in _LITERAL_KINDS or token_text(tok) == "true" or token_text(tok) == "false"
+    )
+
+
+# The statement words this rule reads: Line Input, Mid, MidB, Load, Unload, Get and Put.
+_OPERAND_STATEMENTS = frozenset({"line", "mid", "midb", "load", "unload", "get", "put"})
+
+
+def _check_operand_types(
+    ctx: _Context, proc_sym: VbaSymbol | None, toks: Sequence[VbaToken], span: Span
+) -> None:
+    """`Line Input #f, n` and `Mid(n, 1) = "x"` with n a Long, `Unload "x"`,
+    `Put #f, , o` with o an object: an operand of a type the statement refuses
+    (statement-operand-type)."""
+    head = token_text(_at(toks, 0))
+    if head not in _OPERAND_STATEMENTS:
+        return
+    end = next(
+        (k for k, tok in enumerate(toks) if tok.kind is TokenKind.COLON or tok.kind is TokenKind.COMMENT), -1
+    )
+    stmt = toks if end < 0 else toks[:end]
+
+    def report(operand: Sequence[VbaToken], message: str) -> None:
+        ctx.push(
+            "statementOperandType",
+            message,
+            Span(span.start + operand[0].start, span.start + operand[-1].end),
+        )
+
+    def display(operand: Sequence[VbaToken]) -> str:
+        return "".join(tok.raw_text for tok in operand)
+
+    def string_target(operand: Sequence[VbaToken], statement: str, verb: str, type_reported: bool) -> None:
+        target = _operand_of(ctx, proc_sym, operand) if len(operand) > 0 else None
+        if (
+            target is not None
+            and target.kind != "string"
+            and target.kind != "variant"
+            and not (type_reported and target.kind == "udt" and len(operand) == 1)
+        ):
+            report(
+                operand,
+                f"{statement} {verb} a String or a Variant, and '{display(operand)}' is "
+                f"{_describe(target)}. This is a VBE compile error: Type mismatch.",
+            )
+
+    if head == "line" and token_text(_at(stmt, 1)) == "input" and _raw_at(stmt, 2) == "#":
+        parts = _top_level_parts(stmt, 3, len(stmt))
+        if len(parts) == 2:
+            string_target(parts[1], "Line Input #", "reads a line into", False)
+        return
+    mid_open = _mid_statement_open(stmt)
+    if mid_open is not None:
+        close = match_paren_from(stmt, mid_open)
+        if close < 0 or _raw_at(stmt, close + 1) != "=":
+            return
+        parts = _top_level_parts(stmt, mid_open + 1, close)
+        if 2 <= len(parts) <= 3:
+            # A Type variable as the target is udt-variant-coercion's, which reads
+            # it as the Mid function's argument.
+            string_target(parts[0], "The Mid statement", "writes into", True)
+        # The value goes into a String, which a Type cannot (udt-value-mismatch).
+        value = stmt[close + 2 :]
+        value_read = _operand_of(ctx, proc_sym, value) if len(value) > 0 else None
+        if value_read is not None and value_read.kind == "udt":
+            _udt_mismatch(ctx, display(value), Span(span.start + value[0].start, span.start + value[-1].end))
+        return
+    if (head == "load" or head == "unload") and len(stmt) > 1 and not _is_project_name(ctx, proc_sym, stmt[0].raw_text):
+        operand = stmt[1:]
+        if operand[0].raw_text in (".", "!", "=", "(") and not (
+            operand[0].raw_text == "(" and match_paren_from(operand, 0) == len(operand) - 1
+        ):
+            return
+        # Grouping parentheses make a value of what they hold: `Unload (n)`.
+        inner = operand[1:-1] if operand[0].raw_text == "(" else operand
+        literal = (len(inner) == 1 and _is_literal(inner[0])) or (
+            len(inner) == 2 and inner[0].raw_text == "-" and _is_literal(inner[1])
+        )
+        target = None if literal else _operand_of(ctx, proc_sym, inner)
+        # A whole array is no object, even one of objects.
+        if literal or (target is not None and target.kind not in ("variant", "object", "class")):
+            word = "Load" if head == "load" else "Unload"
+            what = "a literal" if literal or target is None else _describe(target)
+            report(
+                operand,
+                f"{word} takes an object, such as a UserForm, and '{display(operand)}' is {what}. "
+                "This is a VBE compile error: Type mismatch.",
+            )
+        return
+    if (head == "get" or head == "put") and _raw_at(stmt, 1) == "#":
+        parts = _top_level_parts(stmt, 2, len(stmt))
+        if len(parts) != 3 or len(parts[2]) == 0:
+            return
+        operand = parts[2]
+        word = "Get" if head == "get" else "Put"
+        action = "read into" if head == "get" else "write"
+
+        def message(what: str) -> str:
+            return (
+                f"{word} cannot {action} an object, and '{display(operand)}' is {what}. This is a VBE "
+                "compile error: Can not Get or Put an object reference variable or a variable of "
+                "user-defined type containing an object reference."
+            )
+
+        if head == "put" and len(operand) == 1 and token_text(operand[0]) == "nothing":
+            report(operand, message("an object reference"))
+            return
+        target = _operand_of(ctx, proc_sym, operand)
+        if target is None:
+            return
+        element_kind = target.element_kind if target.kind == "array" else target.kind
+        if target.object:
+            report(operand, message(_describe(target)))
+        elif element_kind == "udt" and target.type and _type_holds_object(ctx, target.type):
+            what = "an array of" if target.kind == "array" else "declared As"
+            report(operand, message(f"{what} {target.type_name}, a user-defined type holding an object"))

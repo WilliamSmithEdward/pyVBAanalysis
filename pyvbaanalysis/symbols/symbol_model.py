@@ -203,6 +203,10 @@ class VbaProjectClassMember:
     # "propertySet"): an implementation must pass each as the interface does
     # (XLIDE issue #291). None for a variable.
     procedure_params: dict[str, list[VbaProcedureParam]] | None = None
+    # An event's parameters, each typed as VBA types it: its As clause or type
+    # character, else the declaring module's DefType (XLIDE issue #1493).
+    # `signature` keeps the event as written.
+    event_params: list[VbaProcedureParam] | None = None
     attributes: list[VbaSymbolAttribute] | None = None
 
 
