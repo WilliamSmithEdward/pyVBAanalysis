@@ -87,6 +87,9 @@ _HOST_BY_EXTENSION = {
     "ppsm": "powerpoint",
     "ppam": "powerpoint",
     "ppt": "powerpoint",
+    # A PowerPoint 97-2003 template and show (XLIDE #1538).
+    "pot": "powerpoint",
+    "pps": "powerpoint",
     "ppa": "powerpoint",
     "accdb": "access",
     "accda": "access",

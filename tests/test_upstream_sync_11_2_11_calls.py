@@ -9,7 +9,7 @@ import re
 
 import pytest
 
-from pyvbaanalysis import analyze_module, analyze_module_options_for
+from pyvbaanalysis import analyze_module, analyze_module_options_for, host_token_for_file_name
 from pyvbaanalysis.conditional import ConditionalCompilationEnvironment
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions
 from pyvbaanalysis.diagnostics.rule_metadata import diagnostic_metadata_for_code
@@ -246,3 +246,17 @@ def test_1493_vba_collection_and_a_standard_module_named_collection() -> None:
         [ModuleInput("Collection", ModuleSymbolKind.STANDARD, "Option Explicit\r\n"), _listener("Collection")]
     )
     assert len(found) == 1 and "A module is not a valid type" in found[0]
+
+
+# -- ca38c7bf: .pot and .pps are PowerPoint files (#1538) ---------------------
+
+
+@pytest.mark.parametrize("name", ["Deck.pot", "Show.PPS", "Deck.ppt"])
+def test_1538_legacy_powerpoint_names_are_powerpoint(name: str) -> None:
+    assert host_token_for_file_name(name) == "powerpoint"
+
+
+def test_1538_legacy_powerpoint_file_reports_its_members() -> None:
+    source = "Sub T()\n    Debug.Print ActivePresentation.Slides.Nope\nEnd Sub\n"
+    opts = AnalyzeModuleOptions(host=host_token_for_file_name("Deck.pot"))
+    assert [d.code for d in analyze_module(source, opts) if d.severity.value == "error"] == ["member-not-found"]
