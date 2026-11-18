@@ -230,3 +230,114 @@ def test_block_headers_that_compile_are_left_alone(lines: list[str]) -> None:
 def test_block_header_in_an_inactive_arm_is_left_alone() -> None:
     source = _procedure("#If False Then", "For Each v", "Next", "Do Until", "Loop", "#End If")
     assert _by_code(source, "malformed-statement") == []
+
+
+# -- 1b98a0e3: End, Stop, Error and On statements in a shape the VBE refuses --
+
+_STATEMENT_SHAPES = _measured("statement_shape_")
+
+
+def _shape_procedure(*lines: str) -> str:
+    """Upstream statementShapes.test.ts procedure(): the lines as given."""
+    return "\r\n".join(["Option Explicit", "Sub Main()", "    Dim v As Variant, n As Long", *lines, "End Sub", ""])
+
+
+def _shapes(source: str, host: str = "excel") -> list[VbaDiagnostic]:
+    return _by_code(source, "malformed-statement", host)
+
+
+def test_statement_shapes_cover_every_host() -> None:
+    assert {_HOSTS.get(case.id, "excel") for case in _STATEMENT_SHAPES} == {"excel", "word", "powerpoint", "access"}
+
+
+@pytest.mark.parametrize("case", _STATEMENT_SHAPES, ids=lambda case: case.id)
+def test_statement_shape_agrees_with_the_vbe(case: OracleCase) -> None:
+    expected = 1 if case.expected == "rejected" else 0
+    assert len(_shapes(case.modules[0].source, _HOSTS.get(case.id, "excel"))) == expected
+
+
+@pytest.mark.parametrize("line, span, message", [
+    ("    End 1", "End 1", "'End' stops the program and takes nothing after it, so '1' cannot follow it."),
+    ("    If v Then End Else Beep", "End Else", "so 'Else' cannot follow it"),
+    ("    End While", "End While", "a While loop ends at Wend"),
+    ("    Stop n", "Stop n", "'Stop' takes no argument."),
+    ("    Error", "Error", "needs an error number"),
+    ("    Error 5, 6", "Error 5, 6", "takes one error number"),
+    ("    On Error GoTo -2", "On Error GoTo -2", "one line label, line number, 0 or -1"),
+    ("    On Error Resume 0", "On Error Resume 0", "takes only Next"),
+    ("    On Error Resume Next 1", "On Error Resume Next 1", "and nothing after it"),
+    ("    On Error GoTo 0 1", "On Error GoTo 0 1", "and nothing after it"),
+    ("    On n GoSub A, , B\r\nA:\r\nB:", "GoSub A, , B", "in each place of its list"),
+])
+def test_statement_shape_reports(line: str, span: str, message: str) -> None:
+    source = _shape_procedure(line)
+    found = _shapes(source)
+    assert len(found) == 1
+    assert _span_text(source, found[0]) == span
+    assert message in found[0].message
+
+
+@pytest.mark.parametrize("line", [
+    "    Beep: Stop 1", "L: Error", "10 End 1", "    If v Then If n Then Stop 1",
+    "    If v Then Beep Else On Error Resume", "    Beep: Error: Beep",
+    "    If v Then Beep: Error Else Beep", "    If v Then Beep: Beep Else Stop 1",
+    "    If v Then Beep: Beep Else End 1", "    If v Then Beep: End Else Beep", "    If v Then Beep Else Beep: Stop 1",
+    "    If v Then\r\n        Beep\r\n    Else If n Then Stop 1\r\n    End If",
+    "    If v Then\r\n        Beep\r\n    Else Stop 1\r\n    End If",
+    "    If v Then\r\n        Beep\r\n    Else Error\r\n    End If",
+    "    If v Then\r\n        Beep\r\n    Else On Error Resume Next 1\r\n    End If",
+])
+def test_statement_shape_after_a_colon_a_label_a_line_number_and_in_one_line_ifs(line: str) -> None:
+    assert len(_shapes(_shape_procedure(line))) == 1
+
+
+def test_statement_shape_on_an_else_if_line_a_procedure_line_and_before_a_block_if() -> None:
+    for source in [
+        _shape_procedure("    If False Then", "        Beep", "    ElseIf True Then Stop 1", "    End If"),
+        _shape_procedure("    If False Then", "        Beep", "    ElseIf True Then Error", "    End If"),
+        "Option Explicit\r\nSub Other(): Stop 1: End Sub\r\n",
+        _shape_procedure("    If True Then Stop 1: If True Then", "        Beep", "    End If"),
+    ]:
+        assert len(_shapes(source)) == 1, source
+    for source in [
+        _shape_procedure("    If False Then", "        Beep", "    ElseIf True Then Stop", "    End If"),
+        _shape_procedure("    If False Then", "        Beep", "    ElseIf True Then", "        Stop", "    End If"),
+        "Option Explicit\r\nSub Other(): Stop: End Sub\r\n",
+    ]:
+        assert _compile_errors(source) == [], source
+
+
+@pytest.mark.parametrize("line", [
+    "    On Error GoTo Next 1", "    On Error Resume Stop", "    On Error Resume If",
+    "    If v Then On Error Resume Else Beep", "    If v Then Beep: On Error Resume Else Beep",
+    "    If v Then On Error GoTo Else Beep",
+])
+def test_statement_shape_leaves_a_reserved_jump_target_to_its_check(line: str) -> None:
+    found = _shapes(_shape_procedure(line))
+    assert len(found) == 1
+    assert "cannot name a line label" in found[0].message
+
+
+@pytest.mark.parametrize("line", [
+    "    End", "    End ' note", "    If v Then End", "    If v Then Beep Else End", "    If v Then End: Beep",
+    "    Stop", "    If v Then Stop Else Beep", "Stop: Beep",
+    "    Error 5", "    Error (5)", "    If v Then Error 5 Else Beep", "Error: Beep", "10 Error: Beep",
+    "    Error _\r\n        5", "    Error$ 5",
+    "    v = Error", "    v = Error(5)", "    Debug.Print Error",
+    "    On Error GoTo 0", "    On Error GoTo -1", "    On Error GoTo - 1", "    On Error GoTo L\r\nL:",
+    "    On Error GoTo 10\r\n10 Beep",
+    "    On Error Resume Next", "    On Local Error Resume Next", "    If v Then On Error Resume Next Else Beep",
+    "    On n GoTo A, B\r\nA:\r\nB:", "    On n GoSub A\r\n    Exit Sub\r\nA:\r\n    Return",
+    "    Dim r As Object\r\n    Set r = Nothing\r\n    If v Then r.End(1).Select",
+    "    With Nothing\r\n        .End 1\r\n        .Stop 1\r\n    End With",
+    "    If v Then Beep: Stop Else Beep", "    If v Then\r\n        End\r\n    End If",
+    "    If v Then\r\n        Beep\r\n    Else If n Then Stop Else Beep\r\n    End If",
+    "    If v Then\r\n        Beep\r\n    Else Stop\r\n    End If",
+])
+def test_statement_shapes_that_compile_are_left_alone(line: str) -> None:
+    assert _compile_errors(_shape_procedure(line)) == []
+
+
+def test_statement_shape_in_an_inactive_arm_is_left_alone() -> None:
+    source = _shape_procedure("#If False Then", "    End 1", "    Stop 1", "    Error", "#End If")
+    assert _shapes(source) == []

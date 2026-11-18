@@ -59,6 +59,7 @@ from ...lexer.token_helpers import (
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...lexer.tokenize import tokenize_cached
 from ...parser.nodes import EnumNode, ModuleNode, ProcedureNode, Span, VariableGroupNode
+from ...parser.parser_state import is_then_or_else_keyword_at
 from ..context import PushFn
 from ..walker import (
     active_module_members,
@@ -482,6 +483,9 @@ def _check_statement_forms(
         nonlocal line
         words = [tok for tok in line if tok.kind is not TokenKind.COMMENT]
         line = []
+        # Read statement by statement: `Sub Main(): Stop 1: End Sub` has
+        # statements of the procedure on the line that declares it.
+        _check_statement_shapes(words, lambda first, last: in_procedure(at(first, last)), report)
         if len(words) == 0 or not in_procedure(at(words[0], words[-1])):
             return
         # `Else If b Then` with nothing after Then: Else and a block If header.
@@ -505,6 +509,221 @@ def _check_statement_forms(
         else:
             line.append(tok)
     flush_line()
+
+
+# What may follow `End` in a statement: the blocks End closes.
+_END_BLOCK_WORDS = frozenset({"if", "sub", "function", "property", "select", "with", "type", "enum"})
+
+_Report = Callable[[VbaToken, VbaToken, str, str], None]
+
+
+def _check_statement_shapes(
+    words: Sequence[VbaToken],
+    in_procedure: Callable[[VbaToken, VbaToken], bool],
+    report: _Report,
+) -> None:
+    """End, Stop, Error, On Error and On ... GoTo in a shape the VBE refuses, each
+    a Syntax error (measured in Excel, Word, PowerPoint and Access 16.0, build
+    20527):
+
+    - `End 1`, `End n`, `End (1)`, and `If v Then End Else Beep`: nothing may
+      follow End but the block it closes, not even a one-line If's Else.
+    - `Stop 1`: Stop takes nothing, though a one-line If's Else may follow it.
+    - `Error`, with no number, also before a one-line If's Else, and
+      `Error 5, 6`. `Error: Beep` at the start of a line is the label Error.
+    - `On Error GoTo` with no target, a negative one but -1 (`-2`, `-0`), or
+      anything after its target (`On Error GoTo 0 1`).
+    - `On Error Resume` followed by anything but Next, by nothing, or by
+      anything after Next (`On Error Resume Next 1`).
+      A reserved word after GoTo or Resume, a one-line If's Else among them,
+      is the jump-target check's (control_flow.py), which reports it as a label.
+    - `On n GoTo A, , B`: an empty place in the list, first, last or between.
+
+    `words` is one line's tokens without comments. Its statements end at its
+    colons, and from a one-line If on, also at each Then and Else, past any
+    colon: in `If v Then Beep: Stop Else Beep`, Stop is a statement of its own.
+    A block If's Else line starts its statement after the Else, and an ElseIf
+    line with more after its Then is read as a one-line If is."""
+    line_start = 1 if is_decimal_line_number(_at(words, 0)) else 0
+    in_if = False
+    from_ = line_start
+    depth = 0
+    for k in range(line_start, len(words) + 1):
+        tok = _at(words, k)
+        # A block If's Else line may carry a statement: `Else If n Then Stop`.
+        if k == from_ and not in_if and is_then_or_else_keyword_at(words, k, "else"):
+            from_ = k + 1
+            continue
+        # An If or ElseIf whose Then ends the line heads a block; with more
+        # after its Then, its statements follow on this line.
+        if (
+            k == from_
+            and not in_if
+            and (token_text(tok) == "if" or token_text(tok) == "elseif")
+            and not _ends_at_its_then(words, k)
+        ):
+            in_if = True
+        if tok is not None and tok.raw_text == "(":
+            depth += 1
+        elif tok is not None and tok.raw_text == ")":
+            depth -= 1
+        colon = tok is not None and tok.kind is TokenKind.COLON
+        branch = (
+            tok is not None
+            and in_if
+            and depth == 0
+            and (
+                is_then_or_else_keyword_at(words, k, "then")
+                or is_then_or_else_keyword_at(words, k, "else")
+            )
+        )
+        if tok is not None and not colon and not branch:
+            continue
+        # A name and a colon at the line's start, past a line number, is a label.
+        label = from_ == line_start and k == from_ + 1 and colon
+        if not label and k > from_ and in_procedure(words[from_], words[k - 1]):
+            _check_shape(words, from_, k, report)
+        if colon:
+            depth = 0
+        from_ = k + 1
+
+
+def _ends_at_its_then(words: Sequence[VbaToken], at_index: int) -> bool:
+    """True when the If or ElseIf at `at_index` heads a block: its Then, outside
+    parentheses, is the line's last word."""
+    depth = 0
+    for k in range(at_index + 1, len(words)):
+        raw = words[k].raw_text
+        if raw == "(":
+            depth += 1
+        elif raw == ")":
+            depth -= 1
+        elif depth == 0 and is_then_or_else_keyword_at(words, k, "then"):
+            return k == len(words) - 1
+    return False
+
+
+def _check_shape(words: Sequence[VbaToken], from_: int, to: int, report: _Report) -> None:
+    """Checks the statement `words[from_:to]`, which ends at a colon, a one-line
+    If's Then or Else, or the line's end."""
+    head = words[from_]
+    if head.kind is not TokenKind.KEYWORD:
+        return
+    last = words[to - 1]
+    word = token_text(head)
+    if word == "end":
+        # Not even the Else of a one-line If may follow End; a colon may.
+        following = _at(words, from_ + 1)
+        next_ = None if following is not None and following.kind is TokenKind.COLON else following
+        if next_ is not None and token_text(next_) == "while":
+            report(head, next_, "'End While' is no statement: a While loop ends at Wend.", "Syntax error")
+        elif next_ is not None and token_text(next_) not in _END_BLOCK_WORDS:
+            report(
+                head,
+                next_,
+                f"'End' stops the program and takes nothing after it, so '{next_.raw_text}' cannot "
+                "follow it.",
+                "Syntax error",
+            )
+    elif word == "stop":
+        if to > from_ + 1:
+            report(head, last, "'Stop' takes no argument.", "Syntax error")
+    elif word == "error":
+        # `Error$ 5` compiles; this check leaves the function's spelling alone.
+        following = _at(words, from_ + 1)
+        if following is not None and following.raw_text == "$" and following.start == head.end:
+            return
+        if to == from_ + 1:
+            report(head, head, "The Error statement needs an error number: Error 5.", "Syntax error")
+        elif len(_top_level_commas(words, from_ + 1, to)) > 0:
+            report(head, last, "The Error statement takes one error number.", "Syntax error")
+    elif word == "on":
+        _check_on_statement(words, from_, to, report)
+
+
+def _check_on_statement(words: Sequence[VbaToken], from_: int, to: int, report: _Report) -> None:
+    """`On [Local] Error GoTo|Resume ...` and `On n GoTo|GoSub a, b, ...`."""
+    k = from_ + 1
+    if token_text(_at(words, k)) == "local":
+        k += 1
+    last = words[to - 1]
+    if token_text(_at(words, k)) == "error":
+        verb = token_text(words[k + 1]) if k + 1 < to else None
+        # `On Error Resume Stop`, and `Resume Else` in a one-line If: the
+        # jump-target check (control_flow.py) reports the reserved word as a
+        # label. Resume Next is the statement's own; GoTo Next is no target.
+        after = _at(words, k + 2)
+        resume_next = verb == "resume" and token_text(after) == "next"
+        if (
+            after is not None
+            and after.kind is not TokenKind.INTEGER_LITERAL
+            and is_reserved_identifier(after.raw_text)
+            and not resume_next
+        ):
+            return
+        if verb == "goto":
+            # One label or line number, or -1 (a minus and 1, spaced or not).
+            target = list(words[k + 2 : to])
+            minus_one = (
+                len(target) == 2
+                and target[0].raw_text == "-"
+                and target[1].kind is TokenKind.INTEGER_LITERAL
+                and target[1].raw_text == "1"
+            )
+            if len(target) != 1 and not minus_one:
+                report(
+                    words[from_],
+                    last,
+                    "On Error GoTo takes one line label, line number, 0 or -1, and nothing after it.",
+                    "Syntax error",
+                )
+        elif verb == "resume" and (k + 3 != to or token_text(_at(words, k + 2)) != "next"):
+            report(
+                words[from_],
+                last,
+                "On Error Resume takes only Next: On Error Resume Next, and nothing after it.",
+                "Syntax error",
+            )
+        return
+    depth = 0
+    jump = -1
+    for j in range(k, to):
+        raw = words[j].raw_text
+        if raw == "(":
+            depth += 1
+        elif raw == ")":
+            depth -= 1
+        elif depth == 0 and (token_text(words[j]) == "goto" or token_text(words[j]) == "gosub"):
+            jump = j
+            break
+    if jump < 0:
+        return
+    start = jump + 1
+    for comma in [*_top_level_commas(words, jump + 1, to), to]:
+        if comma == start:
+            report(
+                words[jump],
+                last,
+                f"{words[jump].raw_text} needs a line label or line number in each place of its list.",
+                "Syntax error",
+            )
+            return
+        start = comma + 1
+
+
+def _top_level_commas(words: Sequence[VbaToken], from_: int, to: int) -> list[int]:
+    """The indices of the commas in `words[from_:to]` outside parentheses."""
+    out: list[int] = []
+    depth = 0
+    for k in range(from_, to):
+        raw = words[k].raw_text
+        if raw == "(":
+            depth += 1
+        elif raw == ")":
+            depth -= 1
+        elif raw == "," and depth == 0:
+            out.append(k)
+    return out
 
 
 def _split_statements(words: Sequence[VbaToken]) -> list[list[VbaToken]]:
