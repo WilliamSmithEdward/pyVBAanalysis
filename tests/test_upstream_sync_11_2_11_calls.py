@@ -402,3 +402,122 @@ def test_1649_sheet_with_a_designer_class_still_reports_what_it_lacks(body: str,
 
 def test_1649_designer_class_members_default_to_excel() -> None:
     assert "usedrange" in designer_class_member_names("Excel.Worksheet", None)
+
+
+# -- 3eca9bec: a statement that calls a control gets the VBE's message (#1555) -
+
+_BUTTON = [ImplicitMember("CommandButton1", "Object")]
+_CONTROL_HOSTS: dict[str, dict] = {
+    "sheet": dict(module_name="Sheet1", module_kind=ModuleSymbolKind.DOCUMENT, document_type="worksheet",
+                  designer_class="Excel.Worksheet", host="excel", implicit_members=_BUTTON),
+    "document": dict(module_name="ThisDocument", module_kind=ModuleSymbolKind.DOCUMENT,
+                     designer_class="Word.Document", host="word", implicit_members=_BUTTON),
+    "slide": dict(module_name="Slide1", module_kind=ModuleSymbolKind.DOCUMENT,
+                  designer_class="PowerPoint.Slide", host="powerpoint", implicit_members=_BUTTON),
+    "form": dict(module_name="Form1", module_kind=ModuleSymbolKind.USERFORM, host="excel",
+                 implicit_members=[ImplicitMember("CommandButton1", "MSForms.CommandButton")]),
+    "access": dict(module_name="Form_Frm1", module_kind=ModuleSymbolKind.USERFORM, designer_class="Access.Form",
+                   host="access", implicit_members=[
+                       ImplicitMember("Detail", "Access.Section"),
+                       ImplicitMember("CommandButton1", "Access.CommandButton"),
+                   ]),
+}
+_CONTROL_CALLS = ["CommandButton1", "Call CommandButton1", "CommandButton1 1", "Call CommandButton1(1)"]
+_AS_VARIABLE = (
+    "non-callable-call CommandButton1: Cannot call 'CommandButton1' because it is a control, not a Sub or "
+    "Function. This is a VBE compile error: Expected procedure, not variable."
+)
+_AS_PROPERTY = (
+    "invalid-property-use CommandButton1: 'CommandButton1' is a control, and a statement cannot call one. "
+    "This is a VBE compile error: Invalid use of property."
+)
+
+
+def _control_errors(body: str, known_procedures: frozenset[str] = frozenset(), **options: object) -> list[str]:
+    src = f"Option Explicit\nPublic Sub Probe()\n    {body}\nEnd Sub\n"
+    opts = AnalyzeModuleOptions(known_identifiers=set(), known_procedures=set(known_procedures), **options)  # type: ignore[arg-type]
+    return [
+        f"{d.code} {src[d.span.start : d.span.end]}: {d.message}"
+        for d in analyze_module(src, opts)
+        if d.severity.value == "error"
+    ]
+
+
+@pytest.mark.parametrize("where", ["sheet", "document", "slide"])
+def test_1555_a_document_control_is_expected_procedure_not_variable(where: str) -> None:
+    for body in _CONTROL_CALLS:
+        assert _control_errors(body, **_CONTROL_HOSTS[where]) == [_AS_VARIABLE], body
+
+
+@pytest.mark.parametrize("where", ["form", "access"])
+def test_1555_a_form_control_is_invalid_use_of_property(where: str) -> None:
+    for body in _CONTROL_CALLS:
+        assert _control_errors(body, **_CONTROL_HOSTS[where]) == [_AS_PROPERTY], body
+
+
+def test_1555_names_an_access_section_as_a_section() -> None:
+    expected = [
+        "invalid-property-use Detail: 'Detail' is a section, and a statement cannot call one. This is a VBE "
+        "compile error: Invalid use of property."
+    ]
+    assert _control_errors("Detail", **_CONTROL_HOSTS["access"]) == expected
+    report = {**_CONTROL_HOSTS["access"], "module_name": "Report_Rpt1", "designer_class": "Access.Report"}
+    assert _control_errors("Detail", **report) == expected
+
+
+@pytest.mark.parametrize("where", list(_CONTROL_HOSTS))
+def test_1555_a_member_of_the_control_is_left_alone(where: str) -> None:
+    assert _control_errors("CommandButton1.SetFocus", **_CONTROL_HOSTS[where]) == []
+    assert _control_errors("Call CommandButton1.SetFocus", **_CONTROL_HOSTS[where]) == []
+
+
+def test_1555_a_name_that_is_no_control_is_still_not_defined() -> None:
+    for where in ("sheet", "form"):
+        assert _control_errors("Nope", **_CONTROL_HOSTS[where]) == [
+            "unknown-call Nope: Sub or Function not defined: 'Nope'."
+        ]
+
+
+def test_1555_what_the_procedure_or_module_declares_takes_the_name() -> None:
+    sheet = _CONTROL_HOSTS["sheet"]
+    found = _control_errors("Dim CommandButton1 As Long\n    CommandButton1", **sheet)
+    assert [line.split(":")[0] for line in found] == ["non-callable-call CommandButton1"]
+    src = "Option Explicit\nPublic Sub Probe()\n    CommandButton1\nEnd Sub\nPrivate Sub CommandButton1()\nEnd Sub\n"
+    opts = AnalyzeModuleOptions(known_identifiers=set(), known_procedures={"probe", "commandbutton1"}, **sheet)  # type: ignore[arg-type]
+    assert [d for d in analyze_module(src, opts) if d.code in ("non-callable-call", "unknown-call")] == []
+    for where in ("sheet", "form"):
+        with_enum = (
+            "Option Explicit\nPrivate Enum Kinds\n    CommandButton1 = 1\nEnd Enum\nPublic Sub Probe()\n"
+            "    Call CommandButton1\nEnd Sub\n"
+        )
+        opts = AnalyzeModuleOptions(known_identifiers=set(), known_procedures={"probe"}, **_CONTROL_HOSTS[where])  # type: ignore[arg-type]
+        assert [d.message for d in analyze_module(with_enum, opts) if d.severity.value == "error"] == [
+            "Cannot call 'CommandButton1' because it resolves to an enum member, not a Sub or Function."
+        ]
+
+
+def test_1555_the_control_wins_over_a_procedure_elsewhere() -> None:
+    known = frozenset({"commandbutton1"})
+    assert _control_errors("CommandButton1", known, **_CONTROL_HOSTS["sheet"]) == [_AS_VARIABLE]
+    assert _control_errors("Call CommandButton1", known, **_CONTROL_HOSTS["form"]) == [_AS_PROPERTY]
+
+
+@pytest.mark.parametrize("name", ["Beep", "Calculate"])
+def test_1555_the_control_wins_over_vba_and_host_names(name: str) -> None:
+    form = {**_CONTROL_HOSTS["form"], "implicit_members": [ImplicitMember(name, "MSForms.CommandButton")]}
+    assert _control_errors(name, **form) == [
+        f"invalid-property-use {name}: '{name}' is a control, and a statement cannot call one. This is a VBE "
+        "compile error: Invalid use of property."
+    ]
+
+
+def test_1555_an_access_form_arriving_as_a_document_module() -> None:
+    access = {**_CONTROL_HOSTS["access"], "module_kind": ModuleSymbolKind.DOCUMENT}
+    assert _control_errors("CommandButton1", **access) == [_AS_PROPERTY]
+
+
+def test_1555_vb6_forms_keep_the_old_message() -> None:
+    vb6 = {**_CONTROL_HOSTS["form"], "host": "vb6", "designer_class": "VB.Form"}
+    assert _control_errors("CommandButton1", **vb6) == [
+        "unknown-call CommandButton1: Sub or Function not defined: 'CommandButton1'."
+    ]

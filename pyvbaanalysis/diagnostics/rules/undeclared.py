@@ -551,10 +551,15 @@ def check_unknown_call_statement(
     push: PushFn,
     project_types: Sequence[VbaProjectClassMembers] | None = None,
     own_members: AbstractSet[str] = frozenset(),
+    *,
+    controls: Sequence[ImplicitMember] = (),
+    module_kind: ModuleSymbolKind | None = None,
+    host: str | None = None,
 ) -> ProcedureStatementVisitor:
     """A bare call statement whose callee resolves to nothing: "Sub or Function not
     defined". Resolution covers project procedures, source bindings, Application
     members, host globals, and the VBA runtime, so only truly-unknown names fire."""
+    called_control = _control_call_message(controls, module_kind, designer_class, host)
     known = {name.lower() for name in known_procedures}
     # The host injects Application's members into the global scope, so a bare call
     # may legitimately bind to one of them (Calculate, Volatile, ...).
@@ -605,11 +610,45 @@ def check_unknown_call_statement(
             or resolve_runtime_function(name) is not None
         )
 
+    # What the module and the procedure declare themselves, which a control does
+    # not override. A procedure elsewhere in the project does not take the name
+    # from a control either: the control is the module's own, so `CommandButton1`
+    # stays the control with a Public Sub CommandButton1 in Module1 (XLIDE #1650,
+    # measured in Excel 16.0, build 20527).
+    module_names = {
+        symbol.name.lower()
+        for symbol in symbols.all
+        if not symbol.container_name or symbol.kind is VbaSymbolKind.ENUM_MEMBER
+    }
+
     def factory(member: ProcedureNode) -> Callable[[LeafStatementNode], None] | None:
         proc_sym = procedure_symbol_for(symbols, member)
+        procedure_names = (
+            {
+                name.lower()
+                for name in [
+                    *(param.name for param in member.params),
+                    *(child.name for child in (proc_sym.children if proc_sym is not None else None) or ()),
+                ]
+            }
+            if called_control is not None
+            else None
+        )
 
         def visitor(stmt: LeafStatementNode) -> None:
             hit = call_statement_target(source, stmt.span)
+            control = (
+                called_control(hit.name)
+                if hit is not None
+                and called_control is not None
+                and procedure_names is not None
+                and hit.name.lower() not in procedure_names
+                and hit.name.lower() not in module_names
+                else None
+            )
+            if hit is not None and control is not None:
+                push(control[0], control[1], hit.span)
+                return
             if hit is not None and not is_known(hit.name, proc_sym):
                 call = extract_call(source, stmt.span)
                 data = (
@@ -637,6 +676,52 @@ def check_unknown_call_statement(
         return visitor
 
     return factory
+
+
+_MEASURED_CONTROL_HOSTS = frozenset({"excel", "word", "powerpoint", "access"})
+
+
+def _control_call_message(
+    controls: Sequence[ImplicitMember],
+    module_kind: ModuleSymbolKind | None,
+    designer_class: str | None,
+    host: str | None,
+) -> Callable[[str], tuple[str, str] | None] | None:
+    """What the VBE says when a statement calls one of the module's controls, as
+    `CommandButton1`, `Call CommandButton1` or `CommandButton1 1`, measured in
+    Excel, Word, PowerPoint and Access 16.0 (build 20527) through the VBE oracle
+    (XLIDE #1650). A control on a sheet, document or slide is a variable of the
+    module, so that is "Expected procedure, not variable". A UserForm's controls,
+    and an Access form's or report's controls and sections, are properties of it,
+    so that is "Invalid use of property". None for a module with no controls, or
+    one of a host not measured, such as VB6. No host means Excel, as it does
+    throughout the analyzer. The result is (rule, message)."""
+    office = host is None or host.lower() in _MEASURED_CONTROL_HOSTS
+    access = designer_class is not None and designer_class.startswith("Access.")
+    as_variable = module_kind is ModuleSymbolKind.DOCUMENT and not access
+    as_property = access or (module_kind is ModuleSymbolKind.USERFORM and designer_class is None)
+    if len(controls) == 0 or not office or (not as_variable and not as_property):
+        return None
+    by_name = {control.name.lower(): control for control in controls}
+
+    def message(name: str) -> tuple[str, str] | None:
+        control = by_name.get(name.lower())
+        if control is None:
+            return None
+        what = "a section" if control.type == "Access.Section" else "a control"
+        if as_variable:
+            return (
+                "nonCallableCallStatement",
+                f"Cannot call '{name}' because it is {what}, not a Sub or Function. This is a VBE "
+                "compile error: Expected procedure, not variable.",
+            )
+        return (
+            "invalidPropertyUse",
+            f"'{name}' is {what}, and a statement cannot call one. This is a VBE compile error: "
+            "Invalid use of property.",
+        )
+
+    return message
 
 
 def _create_procedure_stub_data(source: str, call: CallArguments) -> VbaDiagnosticData | None:

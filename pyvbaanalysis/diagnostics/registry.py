@@ -293,6 +293,9 @@ def _unknown_call_statement(ctx: RulePassContext, push: PushFn) -> ProcedureStat
         push,
         ctx.opts.project_class_members,
         own_object_member_names(ctx.opts),
+        controls=ctx.opts.implicit_members or (),
+        module_kind=ctx.opts.module_kind,
+        host=ctx.opts.host,
     )
 
 
