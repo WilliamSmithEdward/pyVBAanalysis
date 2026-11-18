@@ -20,6 +20,7 @@ __all__ = [
     "split_logical_statements",
     "StatementCursor",
     "code_tokens",
+    "is_then_or_else_keyword_at",
     "token_word",
 ]
 
@@ -82,7 +83,7 @@ def split_logical_statements(tokens: Sequence[VbaToken]) -> list[LogicalStatemen
         # find it. The If header keeps `ended_by_colon`, which stops it reading as
         # a block If, and the opener statement is a tail of it.
         nonlocal current, in_single_line_if
-        split = _single_line_if_tail_opener_index(current)
+        split = _single_line_if_tail_opener_index(current, in_single_line_if)
         if split < 0:
             return
         tail = current[split:]
@@ -107,23 +108,31 @@ def split_logical_statements(tokens: Sequence[VbaToken]) -> list[LogicalStatemen
 _TAIL_BLOCK_OPENERS: frozenset[str] = frozenset({"with", "for", "do", "while", "select"})
 
 
-def _single_line_if_tail_opener_index(tokens: Sequence[VbaToken]) -> int:
-    """Index of the block opener a one-line If's Then/Else tail starts with, or -1."""
+def _single_line_if_tail_opener_index(tokens: Sequence[VbaToken], in_single_line_if: bool) -> int:
+    """Index of the block opener a one-line If's Then/Else tail starts with, or -1.
+
+    `in_single_line_if` takes `Else With e` after a `:` as that If's Else part, as
+    in `If a Then b = 1: Else With e: .Add 3: End With` (XLIDE issue #1496).
+    """
     head = 1 if tokens and is_decimal_line_number(tokens[0]) else 0
-    if token_word(tokens[head] if head < len(tokens) else None) != "if":
+    head_word = token_word(tokens[head] if head < len(tokens) else None)
+    else_part = in_single_line_if and head_word == "else"
+    if head_word != "if" and not else_part:
         return -1
     depth = 0
-    last = -1
+    last = head if else_part else -1
     for i in range(head + 1, len(tokens)):
         raw = tokens[i].raw_text
         if raw == "(":
             depth += 1
         elif raw == ")":
             depth -= 1
-        elif depth == 0:
-            word = token_word(tokens[i])
-            if word == "then" or word == "else":
-                last = i
+        elif depth == 0 and (
+            is_then_or_else_keyword_at(tokens, i, "then")
+            or is_then_or_else_keyword_at(tokens, i, "else")
+        ):
+            # `With d.Else` ends in a member, not the keyword.
+            last = i
     if last < 0 or last == len(tokens) - 1:
         return -1
     opener = token_word(tokens[last + 1])
@@ -152,7 +161,7 @@ def _is_single_line_if(statement: LogicalStatement) -> bool:
     head = 1 if tokens and tokens[0].kind is TokenKind.INTEGER_LITERAL and tokens[0].raw_text.isdigit() else 0
     if head >= len(tokens) or token_word(tokens[head]) != "if":
         return False
-    return token_word(tokens[-1]) != "then" or statement.ended_by_colon
+    return not is_then_or_else_keyword_at(tokens, len(tokens) - 1, "then") or statement.ended_by_colon
 
 
 class StatementCursor:

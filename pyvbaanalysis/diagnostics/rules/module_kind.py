@@ -20,7 +20,7 @@ from ...conditional import (
     ConditionalActivityTracker,
     ConditionalCompilationEnvironment,
 )
-from ...conditional.conditional_compilation import compiler_constants_with_defaults
+from ...conditional.conditional_compilation import host_win64
 from ...constants.integer_constant_expression import parse_vba_integer_literal
 from ...js_compat import js_number_to_string, js_trim
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
@@ -207,7 +207,34 @@ def check_with_events_declarations(
             # #124, measured in Excel 16.0). An intrinsic type is no object at all.
             # A host or project class is not judged here.
             normalized = normalize_type(decl.as_type)
+            # `As Collection` is VBA's, unless the project has a Collection of
+            # its own that declares an Event, which a WithEvents variable can
+            # listen to. `As VBA.Collection` is always VBA's, in every spelling
+            # the VBE reads as that name, and `[VBA.Collection]` is one name no
+            # type has (XLIDE issue #1493, measured in Excel, Word, PowerPoint
+            # and Access 16.0).
             parts = _type_name_parts(decl.as_type)
+            project_type = (
+                next((candidate for candidate in project_classes if candidate.name.lower() == "collection"), None)
+                if len(parts) > 0 and parts[-1] == "collection"
+                else None
+            )
+            if len(parts) == 1 and parts[0] == "vba.collection":
+                push(
+                    "withEventsDeclaration",
+                    f"WithEvents variable '{decl.name}' is declared As {decl.as_type}, a single name no "
+                    "type has. This is a VBE compile error: User-defined type not defined.",
+                    name_span,
+                )
+                continue
+            if len(parts) == 2 and parts[0] == "vba" and parts[1] == "collection":
+                push(
+                    "withEventsDeclaration",
+                    f"WithEvents variable '{decl.name}' is declared As {decl.as_type}, VBA's Collection, "
+                    "which does not source automation events.",
+                    name_span,
+                )
+                continue
             standard_module = (
                 next(
                     (
@@ -220,13 +247,19 @@ def check_with_events_declarations(
                 if len(parts) == 1
                 else None
             )
-            if standard_module is not None:
+            if (project_type is not None and project_type.kind == "standardModule") or standard_module is not None:
+                module_name = standard_module.name if standard_module is not None else "Collection"
                 push(
                     "withEventsDeclaration",
-                    f"WithEvents variable '{decl.name}' is declared As {decl.as_type}, and {standard_module.name} is a standard module of this project. This is a VBE compile error: A module is not a valid type.",
+                    f"WithEvents variable '{decl.name}' is declared As {decl.as_type}, and {module_name} is a "
+                    "standard module of this project. This is a VBE compile error: A module is not a "
+                    "valid type.",
                     name_span,
                 )
                 continue
+            project_collection_with_events = project_type is not None and any(
+                member.kind == "event" for member in project_type.members
+            )
             if normalized is None or normalized in ("object", "variant"):
                 named = f"'{decl.as_type}'" if decl.as_type else "no type"
                 push(
@@ -235,7 +268,7 @@ def check_with_events_declarations(
                     name_span,
                 )
             elif (
-                normalized == "collection"
+                (normalized == "collection" and not project_collection_with_events)
                 or is_known_scalar_type(normalized)
                 or (len(parts) == 1 and object_module_without_events(parts[0]))
             ):
@@ -255,23 +288,26 @@ def check_with_events_declarations(
             for_each_variable_group(member.body, inspect_in_procedure, activity)
 
 
-_TYPE_NAME_CONTINUATION = re.compile(r"[ \t]*_[ \t]*\r?\n[ \t]*")
-_TYPE_NAME_DOT = re.compile(r"\s*\.\s*")
-_WHOLE_BRACKETED = re.compile(r"^\[[^\]]*\]\Z")
-_PART_BRACKETS = re.compile(r"^\[(.*)\]\Z")
+_TYPE_NAME_CONTINUATION_RE = re.compile(r"[ \t]*_[ \t]*\r?\n[ \t]*")
+_TYPE_NAME_DOT_RE = re.compile(r"\s*\.\s*")
+_WHOLE_BRACKETED_RE = re.compile(r"^\[[^\]]*\]\Z")
+_BRACKETED_PART_RE = re.compile(r"^\[(.*)\]\Z")
 
 
 def _type_name_parts(as_type: str | None) -> list[str]:
-    """Port of typeNameParts: a declared type's name as the VBE reads it, lowercased.
-    Line continuations and spaces around the dots go, and each part loses its
-    brackets, so `[VBA] _` / `.Collection` is `vba`, `collection`. A name
-    bracketed whole, `[VBA.Collection]`, is one name with a dot in it."""
-    text = js_trim(_TYPE_NAME_CONTINUATION.sub("", as_type)) if as_type else ""
+    """A declared type's name as the VBE reads it, lowercased: line continuations
+    and spaces around the dots go, and each part loses its brackets, so
+    `[VBA] _` / `.Collection` is `vba`, `collection`. A name bracketed whole,
+    `[VBA.Collection]`, is one name with a dot in it."""
+    text = js_trim(_TYPE_NAME_CONTINUATION_RE.sub("", as_type)) if as_type is not None else ""
     if not text:
         return []
-    if _WHOLE_BRACKETED.match(text):
+    if _WHOLE_BRACKETED_RE.match(text):
         return [js_trim(text[1:-1]).lower()]
-    return [js_trim(_PART_BRACKETS.sub(r"\1", part)).lower() for part in _TYPE_NAME_DOT.split(text)]
+    return [
+        js_trim(_BRACKETED_PART_RE.sub(r"\1", part, count=1)).lower()
+        for part in _TYPE_NAME_DOT_RE.split(text)
+    ]
 
 
 # -- checkFriendDeclarations -----------------------------------------------
@@ -688,14 +724,14 @@ def check_declare_ptr_safe_for_win64(
     push: PushFn,
 ) -> None:
     """In 64-bit Office a Declare needs PtrSafe, "The code in this project must be
-    updated for use on 64-bit systems". Win64 is read with the default compiler
-    constants merged in, as the branch activity reads it, so an active Declare is
-    checked unless the caller says Win64 is off (issue #215, measured in 64-bit
-    Excel and Word). VB6 has no PtrSafe and is never 64-bit."""
+    updated for use on 64-bit systems". Win64 is the host's, with the default
+    compiler constants merged in, so an active Declare is checked unless the
+    caller says the host's Win64 is off (issue #215, measured in 64-bit Excel and
+    Word). A project argument or a `#Const` Win64 does not count (see
+    host_win64). VB6 has no PtrSafe and is never 64-bit."""
     if host is not None and host.lower() == "vb6":
         return
-    constants = compiler_constants_with_defaults(conditional_compilation)
-    if not _conditional_value_truthy(constants.get("win64")):
+    if not _conditional_value_truthy(host_win64(conditional_compilation)):
         return
     for member in active_module_members(mod, activity):
         if not isinstance(member, DeclareNode) or member.ptr_safe:

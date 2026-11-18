@@ -33,7 +33,7 @@ declared As Long.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from ...completion.member_access import MemberCompletionContext
@@ -42,7 +42,8 @@ from ...host.event_signatures_data import HOST_EVENT_SIGNATURES
 from ...host.host_model import get_host_type, resolve_host_alias
 from ...js_compat import JS_WHITESPACE, js_trim
 from ...parser.nodes import ModuleNode, ParameterNode, ProcedureNode, ProcKind, VariableGroupNode
-from ...symbols.symbol_model import ModuleSymbolKind, is_access_designer_class
+from ...symbols.symbol_model import ModuleSymbolKind, def_type_for, is_access_designer_class
+from ...types.type_inference import same_by_ref_type
 from ...types.type_names import normalize_type
 from ..context import AnalyzeModuleOptions, PushFn
 from ..walker import active_module_members
@@ -50,8 +51,13 @@ from ..walker import active_module_members
 
 @dataclass(frozen=True, slots=True)
 class _Event:
+    """An event: its parameters as written, for the message, and for a project
+    event as VBA types them, where an untyped one takes its own module's DefType
+    (XLIDE issue #1493)."""
+
     name: str
     params: str
+    typed: list[_EventParam] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +114,8 @@ def check_event_handler_signatures(
     member_ctx: MemberCompletionContext,
     activity: ConditionalActivityTracker | None,
     push: PushFn,
+    # The module's DefType letters, which type its handlers' untyped parameters.
+    def_types: Mapping[str, str] | None = None,
 ) -> None:
     # Each prefix a handler may take, with the classes whose events it raises.
     sources: dict[str, list[str]] = {}
@@ -191,7 +199,12 @@ def check_event_handler_signatures(
         project_event = project_source[1].get(event_name) if project_source is not None else None
         if project_source is not None and project_event is not None:
             problem = _mismatch(
-                proc, project_event.params, lambda type_: _bare_type(type_) in project_enums
+                proc,
+                project_event.typed
+                if project_event.typed is not None
+                else _parse_event_params(project_event.params),
+                lambda type_: _bare_type(type_) in project_enums,
+                def_types,
             )
             if problem:
                 push(
@@ -214,7 +227,12 @@ def check_event_handler_signatures(
         if found is None:
             continue
         owner, event = found
-        problem = _mismatch(proc, event.params, lambda type_: bool(_HOST_ENUM_RE.search(type_)))
+        problem = _mismatch(
+            proc,
+            _parse_event_params(event.params),
+            lambda type_: bool(_HOST_ENUM_RE.search(type_)),
+            def_types,
+        )
         if problem:
             owner_name = owner.name[owner.name.find(".") + 1 :]
             push(
@@ -252,7 +270,20 @@ def _project_events_of(
         signature = member.signature if member.signature is not None else ""
         open_ = signature.find("(")
         if member.kind == "event" and open_ >= 0 and signature.endswith(")"):
-            events[member.name.lower()] = _Event(member.name, signature[open_ + 1 : -1])
+            events[member.name.lower()] = _Event(
+                member.name,
+                signature[open_ + 1 : -1],
+                [
+                    _EventParam(
+                        by_val=param.by_val is True,
+                        type=param.type_ if param.type_ is not None else "Variant",
+                        is_array=param.is_array,
+                    )
+                    for param in member.event_params
+                ]
+                if member.event_params is not None
+                else None,
+            )
     return type_.name, events
 
 
@@ -330,11 +361,15 @@ def _parse_event_params(params: str) -> list[_EventParam]:
     return out
 
 
-def _mismatch(proc: ProcedureNode, event_params: str, is_enum: Callable[[str], bool]) -> str | None:
+def _mismatch(
+    proc: ProcedureNode,
+    expected: Sequence[_EventParam],
+    is_enum: Callable[[str], bool],
+    def_types: Mapping[str, str] | None,
+) -> str | None:
     """Why the handler differs from the event, or None when it matches."""
     if proc.proc_kind is not ProcKind.SUB:
         return "an event handler is a Sub"
-    expected = _parse_event_params(event_params)
     actual = proc.params
     if len(actual) != len(expected):
         plural = "" if len(expected) == 1 else "s"
@@ -353,15 +388,18 @@ def _mismatch(proc: ProcedureNode, event_params: str, is_enum: Callable[[str], b
             )
         if param.by_val != want.by_val:
             return f"{label} must be ByVal" if want.by_val else f"{label} must be ByRef, not ByVal"
-        if not _same_type(param, want.type, is_enum):
-            return f"{label} is {_declared_type(param)}, and the event's is {want.type}"
+        if not _same_type(param, want.type, is_enum, def_types):
+            return f"{label} is {_declared_type(param, def_types)}, and the event's is {want.type}"
     return None
 
 
-def _declared_type(param: ParameterNode) -> str:
-    if param.as_type is not None:
+def _declared_type(param: ParameterNode, def_types: Mapping[str, str] | None) -> str:
+    if param.as_type:
         return param.as_type
-    return f"{param.type_suffix} (a type suffix)" if param.type_suffix else "Variant"
+    if param.type_suffix:
+        return f"{param.type_suffix} (a type suffix)"
+    def_type = def_type_for(def_types, param.name)
+    return f"{def_type} (by the module's DefType)" if def_type else "Variant"
 
 
 _SUFFIX_TYPES: Mapping[str, str] = {
@@ -374,18 +412,29 @@ _SUFFIX_TYPES: Mapping[str, str] = {
 }
 
 
-def _same_type(param: ParameterNode, expected: str, is_enum: Callable[[str], bool]) -> bool:
+def _same_type(
+    param: ParameterNode,
+    expected: str,
+    is_enum: Callable[[str], bool],
+    def_types: Mapping[str, str] | None,
+) -> bool:
     """Whether a parameter's type is the event's. A library prefix names the same
-    type, and an enum - an Office or MSForms one (XlXmlExportResult, fmAction)
-    or the project's own - may be declared As Long, as measured."""
+    type, LongPtr is LongLong in 64-bit Office, and an enum - an Office or MSForms
+    one (XlXmlExportResult, fmAction) or the project's own - may be declared As
+    Long but not As LongPtr, as measured."""
+    # An untyped parameter takes the handler module's DefType, as the event's
+    # does its own module's (XLIDE issue #1493, measured in Excel, Word,
+    # PowerPoint and Access 16.0): DefBool C makes `Cancel` the Boolean a
+    # library event passes. A type character wins over both.
     if param.as_type:
         actual = _bare_type(param.as_type)
     elif param.type_suffix:
         actual = _SUFFIX_TYPES.get(param.type_suffix, "")
     else:
-        actual = "variant"
+        def_type = def_type_for(def_types, param.name)
+        actual = _bare_type(def_type if def_type is not None else "Variant")
     want = _bare_type(expected)
-    if actual == want:
+    if same_by_ref_type(actual, want):
         return True
     return actual == "long" and is_enum(expected)
 

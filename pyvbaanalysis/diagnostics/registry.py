@@ -298,6 +298,9 @@ def _unknown_call_statement(ctx: RulePassContext, push: PushFn) -> ProcedureStat
         ctx.opts.project_class_members,
         own_object_member_names(ctx.opts),
         has_unread_project_reference(ctx.opts.referenced_projects, ctx.opts.referenced_project_surfaces),
+        controls=ctx.opts.implicit_members or (),
+        module_kind=ctx.opts.module_kind,
+        host=ctx.opts.host,
     )
 
 
@@ -644,7 +647,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
     DiagnosticRuleEntry(
         name="eventHandlerSignatures",
         run=lambda ctx, push: check_event_handler_signatures(
-            ctx.mod, ctx.module_kind, ctx.opts, ctx.member_ctx, ctx.activity, push
+            ctx.mod, ctx.module_kind, ctx.opts, ctx.member_ctx, ctx.activity, push, ctx.symbols.def_types
         ),
     ),
     DiagnosticRuleEntry(
@@ -975,6 +978,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
             ctx.opts.project_procedures,
             ctx.opts.project_class_members,
             ctx.opts.conditional_compilation,
+            ctx.opts.host,
             ctx.activity,
             push,
         ),

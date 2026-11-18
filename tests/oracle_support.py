@@ -139,9 +139,15 @@ def oracle_module_input(module: dict[str, Any]) -> ModuleInput:
     else:
         implicit = None
     code_name = module.get("codeName")
+    designer_class = module.get("designerClass")
     return ModuleInput(
         code_name if code_name is not None else module["name"],
-        _kind(module.get("type", "standard")),
+        # The engine lists an Access form or report as a designer module
+        # (accessform), as the oracle's document modules of Access are
+        # (upstream oracleModuleInput.ts, XLIDE issue #1493).
+        ModuleSymbolKind.USERFORM
+        if designer_class is not None and designer_class.startswith("Access.")
+        else _kind(module.get("type", "standard")),
         module["source"],
         implicit_members=implicit,
         predeclared_id=module.get("predeclaredId"),

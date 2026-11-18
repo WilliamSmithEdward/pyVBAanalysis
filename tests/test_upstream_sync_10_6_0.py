@@ -223,7 +223,7 @@ def test_a_member_returning_an_array_takes_its_empty_argument_list(body: str) ->
 def test_a_missing_argument_to_a_member_returning_an_array_is_still_reported() -> None:
     source, hits = _argument_count(_THING, "x = t.Pair()")
     assert [source[d.span.start : d.span.end] for d in hits] == ["Pair"]
-    assert "expected 1 argument, but got 0" in hits[0].message
+    assert "'a' is required by 'Thing.Pair', which got 0 arguments" in hits[0].message
 
 
 def test_a_display_signature_is_read_to_its_own_closing_parenthesis() -> None:

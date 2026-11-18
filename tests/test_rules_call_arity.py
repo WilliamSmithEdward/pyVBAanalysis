@@ -70,8 +70,11 @@ def test_host_member_call_arity() -> None:
     messages = [d.message for d in analyze_module(src) if d.code == "argument-count"]
     assert messages == [
         "Wrong number of arguments to 'Calculate': expected 0 arguments, but got 1.",
-        "Wrong number of arguments to 'Raise': expected between 1 and 5 arguments, but got 0.",
-        "Wrong number of arguments to 'Assert': expected 1 argument, but got 0.",
+        # Too few is "Argument not optional", and Debug.Assert the VBE's Syntax
+        # error (XLIDE #1667).
+        "'Number' is required by 'Raise', which got 0 arguments. This is a VBE compile error: "
+        "Argument not optional.",
+        "The call to 'Assert' gives 0 of its 1 required argument. This is a VBE compile error: Syntax error.",
     ]
 
 
