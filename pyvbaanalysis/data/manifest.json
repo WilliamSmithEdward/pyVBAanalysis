@@ -1,23 +1,23 @@
 {
   "sourceRepo": "WilliamSmithEdward/xlide_vscode",
-  "xlideVersion": "11.2.1",
-  "xlideCommit": "4f728e9c2f76438686aa4f0d32b4bfb9bfe14961",
+  "xlideVersion": "11.2.11",
+  "xlideCommit": "ec9c8a4343653d023b509304f70791a8e67a897b",
   "files": {
     "vbe_oracle_cases.json": {
-      "sha256": "6da554b3e1df203f9e54341bdf4050139a1359efc6343c2263a3ce1f8c044822",
-      "bytes": 10851408
+      "sha256": "09b6cd6feb75477731b9673f45555ee502ec15da35b37f97445f6dd2ba639da1",
+      "bytes": 13925749
     },
     "diagnostic_influence_audit.json": {
-      "sha256": "faba5392d6e3fca1c205893da3a60aa101cde91723c3fc7cc9a7f076d8c584ef",
-      "bytes": 750222
+      "sha256": "12902ccdcc2f110c89d2b15ac79233f9633c42823460ace0a4877c19efa71bdf",
+      "bytes": 810064
     },
     "rule_metadata.json": {
-      "sha256": "fcff116c91e02c3605e728caa4c50bb4191d9d1d093868a56f8a5a98e7c30b64",
-      "bytes": 92239
+      "sha256": "6d640118eb4523a2244fc63cec44567305a138719fe1640f1e6099a1c00a75ac",
+      "bytes": 92806
     }
   },
-  "oracleCaseCount": 14868,
-  "diagnosticCodeCount": 229,
+  "oracleCaseCount": 17975,
+  "diagnosticCodeCount": 230,
   "diagnosticCodes": [
     "addressof-misuse",
     "ambiguous-enum-member",
@@ -212,6 +212,7 @@
     "sheet-name-invalid",
     "sheet-not-in-workbook",
     "statement-before-first-case",
+    "statement-operand-type",
     "statement-outside-procedure",
     "static-outside-procedure",
     "stray-character",
@@ -249,7 +250,7 @@
     "withevents-declaration",
     "wrong-number-of-dimensions"
   ],
-  "ruleCount": 226,
+  "ruleCount": 227,
   "ruleNames": [
     "addressOfMisuse",
     "ambiguousEnumMember",
@@ -442,6 +443,7 @@
     "sheetNameInvalid",
     "sheetNotInWorkbook",
     "statementBeforeFirstCase",
+    "statementOperandType",
     "statementOutsideProcedure",
     "staticOutsideProcedure",
     "strayCharacter",
