@@ -43,6 +43,7 @@ from ...host.host_model import get_host_type, resolve_host_alias
 from ...js_compat import JS_WHITESPACE, js_trim
 from ...parser.nodes import ModuleNode, ParameterNode, ProcedureNode, ProcKind, VariableGroupNode
 from ...symbols.symbol_model import ModuleSymbolKind, def_type_for, is_access_designer_class
+from ...types.type_inference import same_by_ref_type
 from ...types.type_names import normalize_type
 from ..context import AnalyzeModuleOptions, PushFn
 from ..walker import active_module_members
@@ -418,8 +419,9 @@ def _same_type(
     def_types: Mapping[str, str] | None,
 ) -> bool:
     """Whether a parameter's type is the event's. A library prefix names the same
-    type, and an enum - an Office or MSForms one (XlXmlExportResult, fmAction)
-    or the project's own - may be declared As Long, as measured."""
+    type, LongPtr is LongLong in 64-bit Office, and an enum - an Office or MSForms
+    one (XlXmlExportResult, fmAction) or the project's own - may be declared As
+    Long but not As LongPtr, as measured."""
     # An untyped parameter takes the handler module's DefType, as the event's
     # does its own module's (XLIDE issue #1493, measured in Excel, Word,
     # PowerPoint and Access 16.0): DefBool C makes `Cancel` the Boolean a
@@ -432,7 +434,7 @@ def _same_type(
         def_type = def_type_for(def_types, param.name)
         actual = _bare_type(def_type if def_type is not None else "Variant")
     want = _bare_type(expected)
-    if actual == want:
+    if same_by_ref_type(actual, want):
         return True
     return actual == "long" and is_enum(expected)
 

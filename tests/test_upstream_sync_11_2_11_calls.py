@@ -193,13 +193,11 @@ def test_1494_module_variable_of_the_same_name_takes_precedence() -> None:
 
 # -- 8506a287: event parameters by DefType, WithEvents Collections (#1493) ----
 
-_ISSUE_1493 = [
-    raw for raw in _RAW_CASES if raw["id"].startswith("issue1493_") and "longptr" not in raw["id"]
-]
+_ISSUE_1493 = [raw for raw in _RAW_CASES if raw["id"].startswith("issue1493_")]
 
 
 def test_1493_has_the_measured_cases() -> None:
-    assert len(_ISSUE_1493) >= 118
+    assert len(_ISSUE_1493) == 164
 
 
 @pytest.mark.parametrize("raw", _ISSUE_1493, ids=[raw["id"] for raw in _ISSUE_1493])
