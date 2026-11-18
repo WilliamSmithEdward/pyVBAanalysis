@@ -1020,7 +1020,18 @@ def check_undeclared_variables(
             scalar_target = bare_assignment_target(source, span)
             object_target = None if scalar_target is not None else set_assignment_target(source, span)
             target = scalar_target if scalar_target is not None else object_target
-            if target is not None:
+            # `Date = #1/1/2020#` is VBA's Date statement, which sets the system
+            # date, as `Time = t` sets the time. `Date` is a keyword, so no
+            # declaration names it. `Let Date = d` and `Set Date = o` are Syntax
+            # errors and still reach the report (XLIDE #1664, measured in Excel,
+            # Word, PowerPoint and Access 16.0). The tokens, not the text, say
+            # whether a `Let` comes first: `Let _` continues onto the next line.
+            date_statement = (
+                scalar_target is not None
+                and scalar_target[0].lower() == "date"
+                and not _starts_with_let(statement_tokens(source, span))
+            )
+            if target is not None and not date_statement:
                 report(
                     target[0], target[1], "assigning to it", BareIdentifierContext.ASSIGNMENT_TARGET
                 )
@@ -1151,6 +1162,12 @@ def _redim_target_names_in(
                     if name and k + 1 < len(toks) and toks[k + 1].raw_text == "(":
                         out.add(name.lower())
     return out
+
+
+def _starts_with_let(toks: Sequence[VbaToken]) -> bool:
+    """Whether a statement's first executable token, past a line number or label, is `Let`."""
+    i = first_executable_token_index(toks)
+    return token_text(toks[i] if 0 <= i < len(toks) else None) == "let"
 
 
 def _library_qualifier_names(

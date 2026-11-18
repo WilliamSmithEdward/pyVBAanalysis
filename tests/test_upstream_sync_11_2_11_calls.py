@@ -521,3 +521,56 @@ def test_1555_vb6_forms_keep_the_old_message() -> None:
     assert _control_errors("CommandButton1", **vb6) == [
         "unknown-call CommandButton1: Sub or Function not defined: 'CommandButton1'."
     ]
+
+
+# -- a40a5501: accept the Date statement under Option Explicit (#1664) -------
+
+_DEFAULT_REFERENCES = {
+    "excel": ["stdole", "Office"], "word": ["stdole", "Normal", "Office"],
+    "powerpoint": ["stdole", "Office"], "access": ["stdole", "DAO"],
+}
+_PROJECT_NAMES = {"excel": "VBAProject", "word": "Project", "powerpoint": "VBAProject", "access": "Database1"}
+_DATE_FIXTURES = [raw for raw in _RAW_CASES if raw["id"].startswith("date_statement_")]
+
+
+def _date_codes(source: str, host: str = "excel") -> list[str]:
+    """Each error code, with the project known as the extension knows it, which
+    turns on the undeclared-name check."""
+    index = ProjectIndex(ProjectIndexOptions(ConditionalCompilationEnvironment(project_constants={})))
+    index.set_module(ModuleInput("Module1", ModuleSymbolKind.STANDARD, source))
+    opts = analyze_module_options_for(
+        index, "Module1", ModuleSymbolKind.STANDARD, host=host,
+        referenced_libraries=_DEFAULT_REFERENCES[host], project_name=_PROJECT_NAMES[host],
+    )
+    return [d.code for d in analyze_module(source, opts) if d.severity.value == "error"]
+
+
+def _date_procedure(*lines: str) -> str:
+    return "\r\n".join(
+        ["Option Explicit", "Sub Main()", "    Dim d As Date", *(f"    {line}" for line in lines), "End Sub", ""]
+    )
+
+
+def test_1664_fixtures_cover_every_office_host() -> None:
+    assert {raw["host"] for raw in _DATE_FIXTURES} == {"excel", "word", "powerpoint", "access"}
+
+
+@pytest.mark.parametrize("raw", _DATE_FIXTURES, ids=[raw["id"] for raw in _DATE_FIXTURES])
+def test_1664_date_statement_fixture(raw: dict) -> None:
+    expected = [] if raw["expected"] == "accepted" else ["undeclared-variable"]
+    assert _date_codes(raw["modules"][0]["source"], raw["host"]) == expected
+
+
+@pytest.mark.parametrize("lines", [
+    ("date = d",), ("d = Now: Date = d",), ("Here: Date = d",), ("10 Date = d",), ("Date _", "    = d"),
+    ("Date = #1/1/2020#",), ("Date = Date",), ("Date() = d",), ('Date = "let me"',),
+])
+def test_1664_date_statement_is_accepted(lines: tuple[str, ...]) -> None:
+    assert _date_codes(_date_procedure(*lines)) == []
+
+
+@pytest.mark.parametrize("lines", [
+    ("Date = nope",), ("Here: Let Date = d",), ("10 Let Date = d",), ("Dim o As Object", "Set Date = o"),
+])
+def test_1664_its_value_and_let_or_set_date_still_report(lines: tuple[str, ...]) -> None:
+    assert _date_codes(_date_procedure(*lines)) == ["undeclared-variable"]
