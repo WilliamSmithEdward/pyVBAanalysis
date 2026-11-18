@@ -37,7 +37,13 @@ from ...completion.member_access import (
 from ...completion.event_handlers import event_handler_document_type_for_context
 from ...conditional import ConditionalActivityTracker
 from ...host.host_default_members import HOST_DEFAULT_MEMBERS
-from ...host.host_model import HostMember, get_host_members, get_host_type, resolve_host_alias
+from ...host.host_model import (
+    HostMember,
+    get_host_members,
+    get_host_type,
+    host_display_name,
+    resolve_host_alias,
+)
 from ...host.type_extensibility import host_type_resolves_when_compiling
 from ...js_compat import js_trim
 from ...lexer.token_kinds import TokenKind, VbaToken
@@ -525,6 +531,64 @@ def _project_document_host_types(member_ctx: MemberCompletionContext) -> dict[st
     return cast(dict[str, str], _PROJECT_DOCUMENT_HOST_TYPES_CACHE.put(types, member_ctx, members))
 
 
+_DOCUMENT_MODULE_HOST_CLASSES_CACHE = IdentityLru()
+
+
+def _document_module_host_classes(member_ctx: MemberCompletionContext) -> dict[str, str]:
+    """Lowercased document module name -> the lowercased host class it is, where
+    that class is the current host's own (XLIDE issue #1494): its designer class,
+    then its document type, then its name. An Access form or report module is
+    named after its object, `Form_Orders`, `Report_Sales`. A module whose class
+    is another host's, or unknown, is left out, so nothing judges it."""
+    members = member_ctx.project_class_members
+    cached = _DOCUMENT_MODULE_HOST_CLASSES_CACHE.get(member_ctx, members)
+    if cached is not None:
+        return cast(dict[str, str], cached)
+    host = host_display_name(member_ctx.model).lower()
+    classes: dict[str, str] = {}
+    for candidate in members or []:
+        # The engine lists an Access form or report as a designer module
+        # (accessform), which carries its Access class; the oracle's files
+        # list it as a document.
+        access_design = candidate.kind == "userform" and (candidate.designer_class or "").lower().startswith(
+            "access."
+        )
+        if candidate.kind != "document" and not access_design:
+            continue
+        lower = candidate.name.lower()
+        host_class = candidate.designer_class
+        if not host_class and host == "access":
+            host_class = (
+                "Access.Form" if lower.startswith("form_")
+                else "Access.Report" if lower.startswith("report_")
+                else None
+            )
+        elif not host_class:
+            document_type = event_handler_document_type_for_context(
+                candidate.name, ModuleSymbolKind.DOCUMENT, candidate.document_type
+            )
+            host_class = {
+                "workbook": "Excel.Workbook",
+                "worksheet": "Excel.Worksheet",
+                "chart": "Excel.Chart",
+                "document": "Word.Document",
+            }.get(document_type or "")
+        if host_class and host_class.lower().startswith(f"{host}."):
+            classes[lower] = host_class.lower()
+    return cast(dict[str, str], _DOCUMENT_MODULE_HOST_CLASSES_CACHE.put(classes, member_ctx, members))
+
+
+def document_module_named(name: str, member_ctx: MemberCompletionContext | None) -> str | None:
+    """The document module a bare name is, as a value, or None (XLIDE issue #1494)."""
+    if member_ctx is None or name.lower() not in _document_module_host_classes(member_ctx):
+        return None
+    lower = name.lower()
+    for candidate in member_ctx.project_class_members or []:
+        if candidate.kind in ("document", "userform") and candidate.name.lower() == lower:
+            return candidate.name
+    return None
+
+
 def _implements_object_type(
     actual: KnownObjectAssignmentType, expected: KnownObjectAssignmentType
 ) -> bool:
@@ -627,6 +691,25 @@ def object_assignment_incompatibility_reason(
         return None
     if actual_object.kind == "project" and _implements_object_type(actual_object, expected):
         return None
+    # A document module is its host's object and nothing else: Sheet1 into a
+    # Workbook, a Range, a Chart, a class or an interface it does not
+    # implement raises 13, and into a Worksheet it runs (XLIDE issue #1494, run
+    # in Excel, Word and Access 16.0).
+    document_class = (
+        _document_module_host_classes(member_ctx).get(actual_object.key)
+        if actual_object.kind == "project"
+        else None
+    )
+    if document_class and expected.kind in ("host", "project"):
+        return (
+            None
+            if expected.kind == "host"
+            and (
+                document_class == expected.key
+                or _HOST_VALUES_ALSO_OF_TYPE.get(document_class) == expected.key
+            )
+            else f"This object type is not compatible with {expected.display}."
+        )
     # A Set between two class types is checked when it runs, by QueryInterface,
     # so it compiles whenever the object could support the target (XLIDE issue
     # #109). The class an interface is implemented by can hold the interface's
