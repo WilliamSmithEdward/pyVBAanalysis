@@ -41,6 +41,7 @@ LIBRARY_NAMES = {
     "{50A7E9B0-70EF-11D1-B75A-00A0C90564FE}": "Shell32",
     "{00062FFF-0000-0000-C000-000000000046}": "Outlook",
     "{00020813-0000-0000-C000-000000000046}": "Excel",
+    "{4AC9E1DA-5BAD-4AC7-86E3-24F4CDCECA28}": "DAO",
 }
 # What a new file of each host records before any reference is added, and its
 # project's name (measured).
@@ -86,9 +87,15 @@ def oracle_module_input(module: dict[str, Any]) -> ModuleInput:
     else:
         implicit = None
     code_name = module.get("codeName")
+    designer_class = module.get("designerClass")
     return ModuleInput(
         code_name if code_name is not None else module["name"],
-        _kind(module.get("type", "standard")),
+        # The engine lists an Access form or report as a designer module
+        # (accessform), as the oracle's document modules of Access are
+        # (upstream oracleModuleInput.ts, XLIDE issue #1493).
+        ModuleSymbolKind.USERFORM
+        if designer_class is not None and designer_class.startswith("Access.")
+        else _kind(module.get("type", "standard")),
         module["source"],
         implicit_members=implicit,
         predeclared_id=module.get("predeclaredId"),
