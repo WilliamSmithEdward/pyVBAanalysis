@@ -47,7 +47,7 @@ from ...call.call_context import bare_call_statement_target
 from ...conditional import ConditionalActivityTracker
 from ...constants.integer_constant_expression import parse_vba_integer_literal
 from ...flow.procedure_labels import jump_target_label_declaration
-from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
+from ...lexer.token_helpers import is_decimal_line_number, match_paren_from, split_top_level_token_groups
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import (
     BodyNode,
@@ -164,10 +164,15 @@ def check_file_statements(
     project_opened: OpenedFileNumbers | None = None,
     project_callables: Iterable[str] = (),
 ) -> None:
+    # The callables may come as an iterator, which reads once: read it here
+    # for every procedure.
+    project_callable_names = list(project_callables)
+    # A statement refused for its shape runs nothing, so it is not followed.
+    refused_shapes = _check_file_statement_shapes(source, mod, activity, push)
     for member in active_module_members(mod, activity):
         if not isinstance(member, ProcedureNode):
             continue
-        _check_procedure(source, member, activity, push, {node.name.lower() for node in mod.members if isinstance(node, ProcedureNode)} | {name.lower() for name in project_callables})
+        _check_procedure(source, member, activity, push, {node.name.lower() for node in mod.members if isinstance(node, ProcedureNode)} | {name.lower() for name in project_callable_names}, refused_shapes)
 
 
 def _check_procedure(
@@ -176,6 +181,7 @@ def _check_procedure(
     activity: ConditionalActivityTracker | None,
     push: PushFn,
     callables: AbstractSet[str],
+    refused_shapes: AbstractSet[int],
 ) -> None:
     states: _FileStates = {}
     track_state = re.search(r"\bon\s+error\b", source[member.span.start:member.span.end], re.IGNORECASE) is None
@@ -204,6 +210,10 @@ def _check_procedure(
         if token_text(toks[0]) == "on" and token_text(_token_at(toks, 1)) == "error":
             resume_next = token_text(_token_at(toks, 2)) == "resume"
             return
+        # A statement refused for its shape never runs: nothing it would raise
+        # or change is followed.
+        if node.span.start + toks[0].start in refused_shapes:
+            return
         if not track_state:
             _check_statement(node.span, toks, {}, push, resume_next)
             return
@@ -212,8 +222,10 @@ def _check_procedure(
         if isinstance(node, StatementNode) and node.single_line_if_branches is not None:
             _mark_checked(states, toks)
             for span in node.single_line_if_branches:
-                branch = statement_tokens_after_leading_label(source, span)
-                _check_statement(span, branch[1:] if branch and token_text(branch[0]) == "else" else branch, dict(states), push, resume_next)
+                tokens = statement_tokens_after_leading_label(source, span)
+                branch = tokens[1:] if tokens and token_text(tokens[0]) == "else" else tokens
+                if len(branch) > 0 and span.start + branch[0].start not in refused_shapes:
+                    _check_statement(span, branch, dict(states), push, resume_next)
             # A single-line If runs its statement on one path only.
             for key in _file_number_keys_in(toks):
                 states.pop(key, None)
@@ -1200,3 +1212,316 @@ def _file_keys_touched_by(source: str, node: LeafStatementNode) -> set[str]:
     if target is not None:
         out.add(target[0].lower())
     return out
+
+
+# The Access an Open of each mode takes; Binary and Random take any.
+_OPEN_ACCESS: Mapping[str, tuple[str, ...]] = {
+    "append": ("write", "read write"),
+    "input": ("read",),
+    "output": ("write",),
+}
+
+_ShapeReport = Callable[..., None]
+
+
+def _check_file_statement_shapes(
+    source: str,
+    mod: ModuleNode,
+    activity: ConditionalActivityTracker | None,
+    push: PushFn,
+) -> set[int]:
+    """File statements in a shape the VBE refuses, each a Syntax error unless
+    noted (measured in Excel, Word, PowerPoint and Access 16.0, build 20527):
+
+    - Open with an Access its mode doesn't take: For Append takes Write or
+      Read Write, For Input Read, For Output Write; `Access` with nothing.
+    - `Width f, 80`, without `#`; Width with other than two arguments.
+    - `Print #f` and `Write #f` with nothing after the number, and
+      `Print #f; 1`: the number is followed by a comma.
+    - Input with no variable, or with a value that is no variable
+      (`Input #f, 1`, `Input #f, s & "x"`); Line Input with other than one
+      variable.
+    - Get with no variable after the record, and Put with no value;
+      `Get #f, , 1` is "Variable required - can't assign to this
+      expression", and so is `Me.s` as the target of Input, Line Input or
+      Get.
+    - Name without `As` and the new name.
+
+    Width and Name are these statements wherever they head one, also before
+    an element list and where a procedure has the name, except a member, a
+    label or an assignment to the name (see _named_use). Returns where each
+    refused statement starts, its first token's offset."""
+    refused: set[int] = set()
+
+    def check(base: Span, raw: Sequence[VbaToken]) -> None:
+        toks = raw[1:] if is_decimal_line_number(_token_at(raw, 0)) else raw
+
+        def text(part: Sequence[VbaToken]) -> str:
+            return source[base.start + part[0].start : base.start + part[-1].end]
+
+        def report(first: VbaToken, last: VbaToken, what: str, error: str = "Syntax error") -> None:
+            refused.add(base.start + toks[0].start)
+            push(
+                "malformedStatement",
+                f"{what} This is a VBE compile error: {error}.",
+                Span(base.start + first.start, base.start + last.end),
+            )
+
+        # Width, Line, Name and Access are names to the lexer, not keywords.
+        head = token_text(_token_at(toks, 0))
+        if not head:
+            return
+        last = toks[-1]
+        second = _token_at(toks, 1)
+        if head == "open":
+            _check_open_access(toks, report)
+        elif head == "width" and second is not None and not _named_use(toks):
+            parts = split_top_level_token_groups(toks, 1, ",")
+            if second.raw_text != "#":
+                report(toks[0], last, "Width names its file number with #: Width #f, 80.")
+            elif len(parts) != 2 or len(parts[0]) < 2 or len(parts[1]) == 0:
+                report(toks[0], last, "Width takes a file number and a width: Width #f, 80.")
+        elif (head == "print" or head == "write") and _raw_at(toks, 1) == "#":
+            after = _number_end(toks, 2)
+            word = toks[0].raw_text
+            if after >= len(toks):
+                report(
+                    toks[0],
+                    last,
+                    f"{word} #f needs a comma after the file number: {word} #f, or {word} #f, s.",
+                )
+            elif toks[after].raw_text == ";":
+                report(toks[0], toks[after], f"{word} #f takes a comma after the file number, not a semicolon.")
+        elif head == "input" and _raw_at(toks, 1) == "#":
+            _check_variables(toks, 2, "Input #f reads into one or more variables: Input #f, s.", None, report, text)
+        elif head == "line" and token_text(second) == "input" and _raw_at(toks, 2) == "#":
+            _check_variables(toks, 3, "Line Input #f reads into one variable: Line Input #f, s.", 1, report, text)
+        elif head == "get" or head == "put":
+            parts = split_top_level_token_groups(toks, 1, ",")
+            if len(parts) != 3 or len(parts[2]) == 0:
+                word = toks[0].raw_text
+                kind = "variable" if head == "get" else "value"
+                report(toks[0], last, f"{word} takes a file number, a record and a {kind}: {word} #f, , v.")
+            elif head == "get" and not _is_variable_reference(parts[2]):
+                target = parts[2]
+                report(
+                    target[0],
+                    target[-1],
+                    f"Get reads into a variable, and '{text(target)}' is none.",
+                    "Variable required - can't assign to this expression",
+                )
+        elif head == "name" and second is not None and not _named_use(toks):
+            as_at = next(
+                (
+                    k
+                    for k, tok in enumerate(toks)
+                    if k > 0 and tok.kind is TokenKind.KEYWORD and token_text(tok) == "as"
+                ),
+                -1,
+            )
+            if as_at < 0 or as_at == len(toks) - 1:
+                report(toks[0], last, 'Name renames with As: Name "old" As "new".')
+
+    def check_span(span: Span) -> None:
+        toks = statement_tokens_after_leading_label(source, span)
+        start = 1 if token_text(_token_at(toks, 0)) == "else" else 0
+        for statement in split_top_level_token_groups(toks, start, ":"):
+            if len(statement) > 0:
+                check(span, statement)
+
+    def visit(node: BodyNode) -> None:
+        if isinstance(node, StatementNode) and node.single_line_if_branches is not None:
+            for span in node.single_line_if_branches:
+                check_span(span)
+            return
+        check_span(node.span)
+
+    for member in active_module_members(mod, activity):
+        if isinstance(member, ProcedureNode):
+            for_each_statement(member.body, visit, activity)
+    return refused
+
+
+def _check_open_access(toks: Sequence[VbaToken], report: _ShapeReport) -> None:
+    """`Open ... For Append Access Read`: an Access the mode doesn't take."""
+    mode = "random"
+    # Access comes straight after For's mode, or, with no For, after the whole
+    # path: a path that names a variable access, as in `Open (access) For
+    # Input` or `"x" & access`, has no Access clause.
+    mode_at = -1
+    depth = 0
+    for i in range(1, len(toks)):
+        word = token_text(toks[i])
+        # Inside parentheses is the path's own expression: `CStr(Not access)`.
+        if toks[i].raw_text == "(":
+            depth += 1
+        elif toks[i].raw_text == ")":
+            depth -= 1
+        if depth != 0:
+            continue
+        if word == "as" and toks[i].kind is TokenKind.KEYWORD:
+            return
+        if word == "for" and toks[i].kind is TokenKind.KEYWORD:
+            mode_at = i + 1
+            following = token_text(_token_at(toks, i + 1))
+            if following in _FILE_MODES:
+                mode = following
+        elif (
+            word == "access"
+            and not _is_member_access_name(toks, i)
+            and (i == mode_at + 1 if mode_at >= 0 else i > 1 and not _operand_before(toks[i - 1]))
+        ):
+            first = token_text(_token_at(toks, i + 1))
+            access = "read write" if first == "read" and token_text(_token_at(toks, i + 2)) == "write" else first
+            end = _token_at(toks, i + 2 if access == "read write" else i + 1) or toks[i]
+            allowed_access = _OPEN_ACCESS.get(mode)
+            if access not in ("read", "write", "read write"):
+                report(toks[i], toks[i], "Access takes Read, Write or Read Write.")
+            elif allowed_access is not None and access not in allowed_access:
+                allowed = " or ".join(
+                    " ".join(part[:1].upper() + part[1:] for part in option.split(" ")) for option in allowed_access
+                )
+                report(toks[i], end, f"For {_mode_word(mode)} takes Access {allowed}.")
+            return
+
+
+def _number_end(toks: Sequence[VbaToken], from_: int) -> int:
+    """Where the file number starting at `from_` ends: the next comma or semicolon
+    outside parentheses."""
+    depth = 0
+    for k in range(from_, len(toks)):
+        raw = toks[k].raw_text
+        if raw == "(":
+            depth += 1
+        elif raw == ")":
+            depth -= 1
+        elif depth == 0 and (raw == "," or raw == ";"):
+            return k
+    return len(toks)
+
+
+def _check_variables(
+    toks: Sequence[VbaToken],
+    from_: int,
+    what: str,
+    count: int | None,
+    report: _ShapeReport,
+    text: Callable[[Sequence[VbaToken]], str],
+) -> None:
+    """Input's and Line Input's list after the file number: each place a variable,
+    `count` of them if given."""
+    parts = split_top_level_token_groups(toks, from_, ",")
+    items = parts[1:]
+    last = toks[-1]
+    if (
+        len(items) == 0
+        or (count is not None and len(items) != count)
+        or any(not _is_variable_reference(item) and not _is_me_member(item) for item in items)
+    ):
+        report(toks[0], last, what)
+        return
+    # `Me.s` has a variable's shape but is a property of the module's object.
+    me = next((item for item in items if _is_me_member(item)), None)
+    if me is not None:
+        report(
+            me[0],
+            me[-1],
+            f"'{text(me)}' is a property of Me, not a variable to read into.",
+            "Variable required - can't assign to this expression",
+        )
+
+
+# The word operators an operand named access may follow in an Open path: `Not access`.
+_WORD_OPERATORS = frozenset({"not", "and", "or", "xor", "eqv", "imp", "mod", "like", "is"})
+
+
+def _operand_before(tok: VbaToken) -> bool:
+    """True when what follows `tok` in an Open path is an operand: after any
+    operator token (`&`, `<>`, `>=`, ...), a word operator, `(` or `,`, as in
+    `"x" & access` or `"x" <> access`."""
+    return (
+        tok.kind is TokenKind.OPERATOR
+        or tok.raw_text == "("
+        or tok.raw_text == ","
+        or token_text(tok) in _WORD_OPERATORS
+    )
+
+
+_TYPE_CHARACTERS = frozenset({"$", "%", "&", "!", "#", "@", "^"})
+
+
+def _is_variable_reference(item: Sequence[VbaToken]) -> bool:
+    """A variable, by its shape: a name, then any of a member (`.f`, `!k`), an
+    element or argument list (`(1)`) and a type character glued to a name
+    (`s$`), as in `s`, `t.f`, `a(1)`, `b$(1)`, `o!k`, a With block's `.s`. A
+    literal, an operator or a second name (`s And s`, `s s`) is none, nor is
+    `Me.s` (see _is_me_member)."""
+    k = 1 if _raw_at(item, 0) in (".", "!") else 0
+    first = _token_at(item, k)
+    if first is None or (
+        first.kind is not TokenKind.IDENTIFIER and first.kind is not TokenKind.BRACKETED_IDENTIFIER
+        if k == 0
+        else not token_name(first)
+    ):
+        return False
+    k += 1
+    while k < len(item):
+        tok = item[k]
+        glued = tok.start == item[k - 1].end
+        following = _token_at(item, k + 1)
+        if (
+            (tok.raw_text == "." or tok.raw_text == "!")
+            and following is not None
+            and token_name(following)
+            and (tok.raw_text == "." or following.start == tok.end)
+        ):
+            k += 1
+        elif tok.raw_text == "(":
+            close = match_paren_from(item, k)
+            if close < 0:
+                return False
+            k = close
+        elif not (glued and tok.raw_text in _TYPE_CHARACTERS and token_name(item[k - 1])):
+            return False
+        k += 1
+    return True
+
+
+def _is_me_member(item: Sequence[VbaToken]) -> bool:
+    """A member of the module's own object, `Me.s` or `Me!k`: a property, which the
+    VBE reads as a place to store into but refuses, "Variable required - can't
+    assign to this expression", even for a class's Public variable."""
+    return (
+        token_text(_token_at(item, 0)) == "me"
+        and _raw_at(item, 1) in (".", "!")
+        and len(item) > 2
+        and _is_variable_reference(item[2:])
+    )
+
+
+def _named_use(toks: Sequence[VbaToken]) -> bool:
+    """A use of something named Width or Name, which is no such statement: a
+    member straight after the name (`Width.Add 1, 2`, `Width!k = 1`), a label
+    (`Width:`), or an assignment to the name itself, with any type character
+    glued to it (`Width = 300`, `Name = "x"`, `Width# = 300`, `Name$ = "x"`).
+    Anything else is the statement, as the VBE reads it: with an element list
+    after the name (`Width(1) = n`, `Name(1).Add 1`), where a procedure is
+    named Width or Name, and in `Width f, 80 = 80` or `Name "a" = "b"`."""
+    second = _token_at(toks, 1)
+    typed = (
+        second is not None
+        and second.raw_text in _TYPE_CHARACTERS
+        and second.start == toks[0].end
+        and _raw_at(toks, 2) == "="
+    )
+    after = second.raw_text if second is not None else None
+    return typed or after in (".", "!", ":", "=")
+
+
+def _is_member_access_name(toks: Sequence[VbaToken], k: int) -> bool:
+    """True for a member's name, `t.access`, `t!access`: after a `.`, or a `!`
+    touching it."""
+    previous = _token_at(toks, k - 1)
+    return previous is not None and (
+        previous.raw_text == "." or (previous.raw_text == "!" and previous.end == toks[k].start)
+    )

@@ -341,3 +341,209 @@ def test_statement_shapes_that_compile_are_left_alone(line: str) -> None:
 def test_statement_shape_in_an_inactive_arm_is_left_alone() -> None:
     source = _shape_procedure("#If False Then", "    End 1", "    Stop 1", "    Error", "#End If")
     assert _shapes(source) == []
+
+
+# -- 8a6f7172: file statements in a shape the VBE refuses --------------------
+
+_FILE_STATEMENT_SHAPES = _measured("file_statement_shape_")
+
+_MODULE_KINDS = {
+    "class": ModuleSymbolKind.CLASS,
+    "userform": ModuleSymbolKind.USERFORM,
+    "document": ModuleSymbolKind.DOCUMENT,
+}
+
+
+def _file_procedure(*lines: str) -> str:
+    """Upstream fileStatementShapes.test.ts procedure()."""
+    return "\r\n".join([
+        "Option Explicit",
+        "Sub Main()",
+        "    Dim f As Integer, s As String, n As Long, v As Variant, a(2) As Variant",
+        "    f = FreeFile",
+        *("    " + line for line in lines),
+        "End Sub",
+        "",
+    ])
+
+
+def _kind_shapes(source: str, kind: ModuleSymbolKind | None) -> list[VbaDiagnostic]:
+    options = AnalyzeModuleOptions(host="excel", module_kind=kind)
+    return [d for d in analyze_module(source, options) if d.code == "malformed-statement"]
+
+
+def test_file_statement_shapes_cover_every_host() -> None:
+    assert {_HOSTS.get(case.id, "excel") for case in _FILE_STATEMENT_SHAPES} == {
+        "excel", "word", "powerpoint", "access"
+    }
+
+
+@pytest.mark.parametrize("case", _FILE_STATEMENT_SHAPES, ids=lambda case: case.id)
+def test_file_statement_shape_agrees_with_the_vbe(case: OracleCase) -> None:
+    # Each module as its own kind: a class's or a form's statements are read too.
+    host = _HOSTS.get(case.id, "excel")
+    found = [
+        d
+        for module in case.modules
+        for d in analyze_module(module.source, AnalyzeModuleOptions(host=host, module_kind=_MODULE_KINDS.get(module.module_type)))
+        if d.code == "malformed-statement"
+    ]
+    assert len(found) == (1 if case.expected == "rejected" else 0)
+
+
+@pytest.mark.parametrize("line, span, message", [
+    ('Open "x" For Append Access Read As #f', "Access Read", "For Append takes Access Write or Read Write."),
+    ('Open "x" For Input Access Read Write As #f', "Access Read Write", "For Input takes Access Read."),
+    ('Open "x" For Output Access Read As #f', "Access Read", "For Output takes Access Write."),
+    ('Open "x" For Append Access As #f', "Access", "Access takes Read, Write or Read Write."),
+    ("Width f, 80", "Width f, 80", "Width names its file number with #"),
+    ("Width #f, 80, 1", "Width #f, 80, 1", "Width takes a file number and a width"),
+    ("Print #f", "Print #f", "needs a comma after the file number"),
+    ("Print #f; 1", "Print #f;", "not a semicolon"),
+    ('Input #f, s & "x"', 'Input #f, s & "x"', "reads into one or more variables"),
+    ('Line Input #f, "x"', 'Line Input #f, "x"', "reads into one variable"),
+    ("Put #f, 1", "Put #f, 1", "a record and a value"),
+    ("Get #f, 1", "Get #f, 1", "a record and a variable"),
+    ("Get #f, , 1", "1", "Variable required - can't assign to this expression"),
+    ('Name "a" As', 'Name "a" As', "Name renames with As"),
+])
+def test_file_statement_shape_reports(line: str, span: str, message: str) -> None:
+    source = _file_procedure(line)
+    found = _by_code(source, "malformed-statement")
+    assert len(found) == 1
+    assert _span_text(source, found[0]) == span
+    assert message in found[0].message
+
+
+def test_file_statement_shape_reads_variables_paths_and_parts() -> None:
+    for line in [
+        "Input #f, s And s", "Input #f, s s", 'Name ("a") "b"', "Name (s) As", 'Open "x" Access As #f', "Width #, 80",
+        "Get #f, , v, v", "Put #f, , v, v", 'Name "a" = "b"', 'Name "a" = "b" As', "Get #f, , -1", "Get #f, , 1 + 2",
+        'Get #f, , s & "x"',
+    ]:
+        assert len(_by_code(_file_procedure(line), "malformed-statement")) == 1, line
+    for line in ["Input #f, s$", "Line Input #f, s$", "Input #f, a(1), v", 'Name ("a") As "b"', 'Open "x" Access Read As #f']:
+        source = _file_procedure("Dim b(2) As String", "If False Then " + line, "If False Then Input #f, b$(1)")
+        assert _by_code(source, "malformed-statement") == [], line
+
+
+def test_file_statement_shape_follows_no_state_through_a_refused_statement() -> None:
+    opened = _file_procedure('Open "x" For Input As #f', 'Name "x" As', "Close #f")
+    codes = [d.code for d in analyze_module(opened, AnalyzeModuleOptions(host="excel"))]
+    assert "file-already-open" not in codes
+    assert "file-path-open" not in codes
+    assert len(_by_code(opened, "malformed-statement")) == 1
+
+
+@pytest.mark.parametrize("line", [
+    "If False Then Print #f", "If False Then Beep Else Write #f", "Beep: Input #f", '10 Name "a" "b"',
+])
+def test_file_statement_shape_in_a_one_line_if_after_a_colon_and_a_line_number(line: str) -> None:
+    assert len(_by_code(_file_procedure(line), "malformed-statement")) == 1
+
+
+@pytest.mark.parametrize("line", [
+    'Open "x" For Binary Access Read Write Lock Read As #f Len = 128', 'Open "x" For Append Access Read Write As #f',
+    'Open "x" Access Read As #f', "Width #f, 80", "Print #f,", "Print #f, s; n", "Write #f, s, n",
+    "Input #f, s, n, a(1)", "Line Input #f, s", "Get #f, , v", "Get f, 1, v", "Put #f, , v", "Put f, 1, a(1)",
+    'Name "a" As "b"', 'Name s & "x" As s', "Debug.Print s",
+])
+def test_file_statement_shapes_that_compile_are_left_alone(line: str) -> None:
+    assert _compile_errors(_file_procedure("If False Then", "    " + line, "End If")) == []
+
+
+def test_file_statement_shape_leaves_names_that_only_look_like_the_statements() -> None:
+    # A path that names a variable access has no Access clause.
+    opens = [
+        "Open access For Input As #f", "Open (access) For Input As #f", 'Open "x" & access For Input As #f',
+        "Open CStr(Not access) For Input As #f", "Open CStr(Not access) As #f", 'Open "x" & Not access As #f',
+        "Open CStr(1 Mod access) Access Read As #f",
+        *(f'Open "x" {op} access As #f' for op in ["<>", "<=", ">=", "=<", "=>", "><", "=", "<", ">", "&", "+"]),
+    ]
+    for line in opens:
+        assert _by_code(_file_procedure("Dim access As String", "If False Then " + line), "malformed-statement") == [], line
+    # A member named access is part of the path.
+    members = "\r\n".join([
+        "Option Explicit", "Private Type R", "    access As String", "    s As String", "End Type", "Sub Main()",
+        "    Dim t As R, f As Integer", "    f = FreeFile", "    If False Then Open t.access For Input As #f",
+        "    If False Then Open t!access Access Read As #f", '    If False Then Open "x" & t.access For Input As #f',
+        "End Sub", "",
+    ])
+    assert _by_code(members, "malformed-statement") == []
+    # A member straight after Width or Name, a label, or an assignment to the
+    # name itself is no such statement.
+    for source in [
+        "Option Explicit\r\nSub Main()\r\n    Dim Name As String\r\n    Name$ = \"x\"\r\n    Name = \"y\"\r\nEnd Sub\r\n",
+        "Option Explicit\r\nSub Main(ByVal Width As Object, ByVal Name As Object)\r\n    Width.Add 1, 2\r\n"
+        "    Width!k = 1\r\n    Width = 300\r\n    Name.Add 1\r\n    Name!k = 1\r\nWidth:\r\nName:\r\nEnd Sub\r\n",
+        "Option Explicit\r\nSub Main()\r\n    Dim Width As Double\r\n    Width# = 300\r\nEnd Sub\r\n"
+        "Sub Other()\r\n    Dim Width As Single\r\n    Width! = 1\r\nEnd Sub\r\n",
+    ]:
+        assert _by_code(source, "malformed-statement") == [], source
+    # A With block's member is a variable to read into.
+    record = "\r\n".join([
+        "Option Explicit", "Private Type R", "    s As String", "End Type", "Sub Main()", "    Dim t As R, f As Integer",
+        "    f = FreeFile", "    With t", "        If False Then Input #f, .s", "        If False Then Line Input #f, .s",
+        "    End With", "End Sub", "",
+    ])
+    assert _by_code(record, "malformed-statement") == []
+    # A form's Width and Name are its properties.
+    form = 'Option Explicit\r\nPrivate Sub UserForm_Initialize()\r\n    Width = 300\r\n    Name = "x"\r\nEnd Sub\r\n'
+    assert _kind_shapes(form, ModuleSymbolKind.USERFORM) == []
+
+
+def test_file_statement_shape_past_an_element_list_or_a_procedure_of_the_name() -> None:
+    for line in [
+        "Width f, 80 = 80", "Width (f), 80", "Width(1) = 2", "Width(1).Add 1, 2", "Width(1)(2).Add 1, 2",
+        "Width#(1) = 300", "Name(1).Add 1, 2", "Name(1)(2).Add 1", 'Name(1) = "x"', 'Name(1).s = "x"',
+        'Name$(1) = "x"',
+    ]:
+        assert len(_by_code(_file_procedure(line), "malformed-statement")) == 1, line
+    calls = (
+        "Option Explicit\r\nSub Width(ByVal a As Long, ByVal b As Long)\r\nEnd Sub\r\n"
+        "Sub Name(ByVal a As String, ByVal b As String)\r\nEnd Sub\r\nSub Main()\r\n    Width 1, 80\r\n"
+        '    Name "a", "b"\r\nEnd Sub\r\n'
+    )
+    assert len(_by_code(calls, "malformed-statement")) == 2
+
+
+def test_file_statement_shape_refuses_me_member_as_a_place_to_read_into() -> None:
+    def source(line: str) -> str:
+        return (
+            "Option Explicit\r\nPublic s As String\r\nSub Load()\r\n    Dim f As Integer\r\n    f = FreeFile\r\n"
+            f"    If False Then {line}\r\nEnd Sub\r\n"
+        )
+
+    for line in ["Input #f, Me.s", "Line Input #f, Me.s", "Get #f, , Me.s"]:
+        found = _kind_shapes(source(line), ModuleSymbolKind.CLASS)
+        assert len(found) == 1, line
+        assert "Variable required - can't assign to this expression." in found[0].message
+    # Another place that is no variable's shape makes it a Syntax error.
+    mixed = _kind_shapes(source("Input #f, Me.s, 1"), ModuleSymbolKind.CLASS)
+    assert len(mixed) == 1
+    assert "Syntax error." in mixed[0].message
+
+
+def test_file_statement_shape_reports_no_run_time_file_error() -> None:
+    source = _file_procedure('Open "x" For Input As #f', "Print #f", "Close #f")
+    codes = [d.code for d in analyze_module(source, AnalyzeModuleOptions(host="excel"))]
+    assert [code for code in codes if code != "malformed-statement" and code.startswith("file-")] == []
+    assert len(_by_code(source, "malformed-statement")) == 1
+
+
+def test_file_statements_still_know_the_project_procedures() -> None:
+    # OtherHelper may close and reopen the file, so nothing is known after it,
+    # in the module's first procedure and in its second.
+    first = _file_procedure('Open "x" For Output As #f', "n = OtherHelper", "Line Input #f, s", "Close #f")
+    helper = "Option Explicit\r\nPublic Function OtherHelper() As Long\r\nEnd Function\r\n"
+    for source in [first, first.replace("Sub Main()", "Sub Other()\r\nEnd Sub\r\nSub Main()")]:
+        index = ProjectIndex()
+        index.set_module(ModuleInput("Module1", ModuleSymbolKind.STANDARD, source))
+        index.set_module(ModuleInput("Module2", ModuleSymbolKind.STANDARD, helper))
+        opts = analyze_module_options_for(
+            index,
+            "Module1",
+            ModuleSymbolKind.STANDARD,
+            conditional_compilation=ConditionalCompilationEnvironment(project_constants={}),
+        )
+        assert "file-mode-mismatch" not in [d.code for d in analyze_module(source, opts)]
