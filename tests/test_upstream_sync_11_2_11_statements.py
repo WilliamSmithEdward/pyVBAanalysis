@@ -547,3 +547,132 @@ def test_file_statements_still_know_the_project_procedures() -> None:
             conditional_compilation=ConditionalCompilationEnvironment(project_constants={}),
         )
         assert "file-mode-mismatch" not in [d.code for d in analyze_module(source, opts)]
+
+
+# -- 8893e3d0: DefDec, and a Declare without Lib after its name --------------
+
+_DECLARATION_LINES = _measured("declaration_line_")
+
+
+def _compile_diagnostics(source: str, host: str = "excel") -> list[VbaDiagnostic]:
+    out = []
+    for d in analyze_module(source, AnalyzeModuleOptions(host=host)):
+        meta = diagnostic_metadata_for_code(d.code)
+        if meta is not None and meta.diagnostic_kind == DiagnosticEvidenceKind.COMPILE_ERROR:
+            out.append(d)
+    return out
+
+
+def _module(*lines: str) -> str:
+    return "\r\n".join(["Option Explicit", *lines, ""])
+
+
+def test_declaration_lines_cover_every_host() -> None:
+    assert {_HOSTS.get(case.id, "excel") for case in _DECLARATION_LINES} == {"excel", "word", "powerpoint", "access"}
+
+
+@pytest.mark.parametrize("case", _DECLARATION_LINES, ids=lambda case: case.id)
+def test_declaration_line_agrees_with_the_vbe(case: OracleCase) -> None:
+    # A Def statement in a one-line If also gets its letters' Variable not defined.
+    found = [
+        d
+        for d in _compile_diagnostics(case.modules[0].source, _HOSTS.get(case.id, "excel"))
+        if d.code != "undeclared-variable"
+    ]
+    assert len(found) == (1 if case.expected == "rejected" else 0)
+
+
+@pytest.mark.parametrize("lines, span, message", [
+    (["DefDec A-Z", "Sub Main()", "End Sub"], "DefDec", "Expected: line number or label or statement or end of statement"),
+    (["Sub Main()", "End Sub", "DefDec A-Z"], "DefDec", "Syntax error"),
+    (["Sub Main()", "    DefDec A-Z", "End Sub"], "DefDec", "Syntax error"),
+    (["Private Declare PtrSafe Function F () As Long", "Sub Main()", "End Sub"], "(", "Expected: Lib"),
+    (
+        ['Private Declare PtrSafe Function F Alias "GetTickCount" Lib "kernel32" () As Long', "Sub Main()", "End Sub"],
+        "Alias",
+        "Expected: Lib",
+    ),
+    (["Private Declare PtrSafe Sub S", "Sub Main()", "End Sub"], "S", "Expected: Lib"),
+])
+def test_declaration_line_reports(lines: list[str], span: str, message: str) -> None:
+    source = _module(*lines)
+    found = _compile_diagnostics(source)
+    assert len(found) == 1
+    assert _span_text(source, found[0]) == span
+    assert message in found[0].message
+
+
+@pytest.mark.parametrize("lines", [
+    ["DefInt I", "DefLngLng L", "DefCur C"],
+    ['Private Declare PtrSafe Function F Lib "kernel32" Alias "GetTickCount" () As Long'],
+    ['Private Declare PtrSafe Function F& Lib "kernel32" Alias "GetTickCount" ()'],
+    ['Private Declare PtrSafe Function F CDecl Lib "kernel32" Alias "GetTickCount" () As Long'],
+    ["Private Declare PtrSafe Function F _", '    Lib "kernel32" Alias "GetTickCount" () As Long'],
+    ['Private Declare PtrSafe Sub S Lib "kernel32" Alias "Sleep" (ByVal ms As Long)'],
+])
+def test_declaration_lines_that_compile_are_left_alone(lines: list[str]) -> None:
+    assert _compile_errors(_module(*lines, "Sub Main()", "End Sub")) == []
+
+
+@pytest.mark.parametrize("name", ["9Sleep", *(f"9Sleep{suffix}" for suffix in ["$", "%", "&", "!", "#", "@", "^"])])
+def test_declare_digit_start_name_is_left_to_the_invalid_name_check(name: str) -> None:
+    source = _module(f'Private Declare PtrSafe Function {name} Lib "kernel32" Alias "GetTickCount" ()', "Sub Main()", "End Sub")
+    assert _by_code(source, "invalid-proc-header") == []
+
+
+def test_def_dec_claims_no_letters() -> None:
+    messages = [d.message for d in _compile_diagnostics(_module("DefDec A", "DefInt A", "Sub Main()", "End Sub"))]
+    assert len(messages) == 1
+    assert "'DefDec' is a reserved word" in messages[0]
+
+
+def _def_dec_messages(*lines: str) -> list[str]:
+    return [
+        d.message
+        for d in _compile_diagnostics(_module(*lines))
+        if "'DefDec' is a reserved word and no statement" in d.message
+    ]
+
+
+def test_def_dec_after_a_line_number_in_a_one_line_if_and_in_an_if_arm() -> None:
+    above = "Expected: line number or label or statement or end of statement"
+    for lines, error in [
+        (["Sub Main()", "10 DefDec:", "End Sub"], "Syntax error"),
+        (["Sub Main()", "    If False Then DefDec A-Z", "End Sub"], "Syntax error"),
+        (["Sub Main()", "    If True Then Beep Else DefDec A", "End Sub"], "Syntax error"),
+        (["#If False Then", "Sub Other()", "End Sub", "#Else", "DefDec A-Z", "#End If", "Sub Main()", "End Sub"], above),
+        (["#If False Then", "Sub Other()", "End Sub", "#End If", "DefDec A-Z", "Sub Main()", "End Sub"], above),
+    ]:
+        found = _def_dec_messages(*lines)
+        assert len(found) == 1, lines
+        assert error in found[0], lines
+    for line in ["    Beep: DefDec:", "foo: DefDec:", "    If True Then Beep: DefDec:", "    DefDec _\r\n:", " _\r\nDefDec:"]:
+        found = _def_dec_messages("Sub Main()", line, "End Sub")
+        assert len(found) == 1, line
+        assert "Syntax error" in found[0], line
+
+
+def test_def_dec_label_outside_the_procedures() -> None:
+    found = [d.message for d in _compile_diagnostics(_module("DefDec:", "Sub Main()", "End Sub"))]
+    assert len(found) == 1
+    assert "'DefDec' is a reserved word and no statement" in found[0]
+    found = [d.message for d in _compile_diagnostics(_module("Sub Main()", "End Sub", "DefDec:"))]
+    assert len(found) == 1
+    assert "Syntax error" in found[0]
+
+
+@pytest.mark.parametrize("source", [
+    "Option Explicit\rSub Main()\rDefDec:\rEnd Sub\r",
+    "Option Explicit\rSub Main()\r\tDefDec:\rEnd Sub\r",
+    "Option Explicit\nSub Main()\nDefDec:\nEnd Sub\n",
+    "Option Explicit\rSub Main()\r _\rDefDec:\rEnd Sub\r",
+    "Option Explicit\rSub Main()\r _  \rDefDec:\rEnd Sub\r",
+    "Option Explicit\r\nSub Main()\r\n _\r\nDefDec:\r\nEnd Sub\r\n",
+])
+def test_def_dec_label_gets_one_report_with_any_line_end(source: str) -> None:
+    assert len([d for d in _compile_diagnostics(source) if "DefDec" in d.message]) == 1
+
+
+def test_def_dec_label_is_left_to_the_reserved_label_check() -> None:
+    messages = [d.message for d in _compile_diagnostics(_module("Function Main() As Variant", "DefDec:", "    Main = 1", "End Function"))]
+    assert messages == ["'DefDec' is a reserved word, so 'DefDec:' cannot be a line label. This is a VBE compile error: Syntax error."]

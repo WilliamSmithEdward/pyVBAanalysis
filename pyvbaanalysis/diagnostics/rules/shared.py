@@ -23,7 +23,8 @@ from ...conditional import ConditionalActivityTracker, collect_conditional_direc
 from ...constants.integer_constant_expression import bankers_round
 from ...js_compat import js_trim
 from ...lexer.keyword_table import is_reserved_identifier
-from ...lexer.token_helpers import is_decimal_line_number
+from ...lexer.token_helpers import first_token_at_or_after, is_decimal_line_number
+from ...lexer.tokenize import tokenize_cached
 from ...lexer.token_kinds import TokenKind, VbaToken
 from ...parser.nodes import (
     BodyNode,
@@ -168,6 +169,65 @@ DEFTYPE_KEYWORDS: frozenset[str] = frozenset(
         "deflng", "deflnglng", "deflngptr", "defobj", "defsng", "defstr", "defvar",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class DefDecHead:
+    token: VbaToken
+    label: bool
+
+
+_BLANK_RE = re.compile(r"[ \t]*\Z")
+_CONTINUED_LINE_RE = re.compile(r"[ \t]_[ \t]*\r?\n\Z")
+
+
+def def_dec_head(source: str, span: Span) -> DefDecHead | None:
+    """Port of defDecHead: the `DefDec` token heading the statement at `span`, if
+    one does, and whether it is a label, `DefDec:`. The keyword table lists DefDec
+    among the future-reserved words: VBA has no Decimal variable, so DefDec is no
+    Def statement. It stays in DEFTYPE_KEYWORDS so that nothing reads it as a
+    call, and the Def rules leave it to the report of its own (measured in Excel,
+    Word, PowerPoint and Access 16.0, build 20527)."""
+    first = _at(statement_tokens_after_leading_label(source, span), 0)
+    if first is None or token_text(first) != "defdec":
+        return None
+    # `DefDec:` is a label, which the reserved-label check (control_flow.py)
+    # reports, when that check reads it as one: the first word of its physical
+    # line, with the colon on that line and no ` _` continuing the line above.
+    # After a line number (`10 DefDec:`, XLIDE issue #230), another statement
+    # (`Beep: DefDec:`) or a continuation, it is the statement here.
+    toks = tokenize_cached(source)
+    at = first_token_at_or_after(toks, span.start + first.start)
+    before = _at(toks, at - 1)
+    colon = _at(toks, at + 1)
+    # Lines end at CR LF, CR or LF, and the line above continues this one only
+    # when its ` _` ends at an LF: the reserved-label check's own tests, kept
+    # the same so that one of the two reports each line.
+    start = span.start + first.start
+    line_start = max(source.rfind("\n", 0, start), source.rfind("\r", 0, start)) + 1
+    label = (
+        (before is None or before.kind is TokenKind.NEWLINE)
+        and colon is not None
+        and colon.kind is TokenKind.COLON
+        and _BLANK_RE.match(source[span.start + first.end : colon.start]) is not None
+        and _BLANK_RE.match(source[line_start:start]) is not None
+        and _CONTINUED_LINE_RE.search(source[max(0, line_start - 64) : line_start]) is None
+    )
+    return DefDecHead(first, label)
+
+
+def def_dec_message(above_procedures: bool) -> str:
+    """What the VBE says of a DefDec statement: above the first procedure, or after
+    one or inside one."""
+    error = (
+        "Expected: line number or label or statement or end of statement"
+        if above_procedures
+        else "Syntax error"
+    )
+    return (
+        "'DefDec' is a reserved word and no statement: VBA has no Decimal variable to give a "
+        f"default type. This is a VBE compile error: {error}."
+    )
 
 
 def leading_declaration_modifier_count(toks: Sequence[VbaToken]) -> int:
@@ -814,6 +874,7 @@ def builtin_name_before(toks: Sequence[VbaToken], index: int) -> int:
 
 __all__ = [
     "DEFTYPE_KEYWORDS",
+    "DefDecHead",
     "ONE_VALUE_BUILTINS",
     "ConditionalBranchOrderIssue",
     "ConditionalBranchOrderScan",
@@ -823,6 +884,8 @@ __all__ = [
     "body_may_leave_loop",
     "builtin_name_before",
     "declaration_name_hit",
+    "def_dec_head",
+    "def_dec_message",
     "for_each_undeclared_reference_span",
     "is_bare_or_vba_qualified_intrinsic_call",
     "leading_declaration_modifier_count",

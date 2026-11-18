@@ -91,6 +91,8 @@ from .shared import (
     DEFTYPE_KEYWORDS,
     NameTokenHit,
     declaration_name_hit,
+    def_dec_head,
+    def_dec_message,
     leading_declaration_modifier_count,
     module_declaration_statement_in_procedure,
     name_token_hit,
@@ -2327,7 +2329,8 @@ def _keyword_span(source: str, span: Span, *keywords: str) -> Span:
 def _deftype_module_declaration_hit(source: str, span: Span) -> tuple[str, Span] | None:
     toks = statement_tokens_after_leading_label(source, span)
     first = toks[0] if toks else None
-    if first is None or token_text(first) not in DEFTYPE_KEYWORDS:
+    # DefDec is no Def statement; check_module_level_statements_outside_procedures reports it.
+    if first is None or token_text(first) not in DEFTYPE_KEYWORDS or token_text(first) == "defdec":
         return None
     label = (first.canonical_text if first.canonical_text is not None else first.raw_text) + " statements"
     return (label, absolute_span(span, first))
@@ -2415,6 +2418,18 @@ def _is_alternative_procedure_header_statement(source: str, span: Span, procedur
 
 def check_module_declarations_in_procedure_bodies(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
     def inspect_statement(stmt: LeafStatementNode) -> None:
+        # DefDec in a one-line If's branch: `If v Then DefDec A-Z`.
+        if isinstance(stmt, StatementNode):
+            for span in stmt.single_line_if_branches or ():
+                branch = def_dec_head(source, span)
+                if branch is not None:
+                    push("malformedStatement", def_dec_message(False), absolute_span(span, branch.token))
+        def_dec = def_dec_head(source, stmt.span)
+        if def_dec is not None:
+            # A `DefDec:` label is the reserved-label check's.
+            if not def_dec.label:
+                push("malformedStatement", def_dec_message(False), absolute_span(stmt.span, def_dec.token))
+            return
         hit = module_declaration_statement_in_procedure(source, stmt.span)
         if hit is None:
             return
@@ -2483,9 +2498,12 @@ _PROCEDURE_CLOSER_RE = re.compile(r"^\s*End\s+(?:Sub|Function|Property)(?![A-Za-
 def check_module_level_statements_outside_procedures(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, push: PushFn) -> None:
     active = {id(member) for member in active_module_members(mod, activity)}
     procedure_end: Span | None = None
+    procedures_above: list[Span] = []
     for member in mod.members:
         if isinstance(member, ProcedureNode):
             procedure_end = Span(max(member.span.start, member.span.end - 1), member.span.end)
+            if id(member) in active:
+                procedures_above.append(member.span)
         if not isinstance(member, StatementNode) or id(member) not in active:
             continue
         # `End Function` in both arms of an #If: the procedure ended at the
@@ -2497,6 +2515,17 @@ def check_module_level_statements_outside_procedures(source: str, mod: ModuleNod
             and activity.mutually_exclusive(procedure_end, member.span)
             and _PROCEDURE_CLOSER_RE.match(source[member.span.start:member.span.end])
         ):
+            continue
+        # The reserved-label check reads procedure bodies only, so a module-level
+        # `DefDec:` is reported here too, with the same message as the statement.
+        def_dec = def_dec_head(source, member.span)
+        if def_dec is not None:
+            # Above every procedure compiled beside it: one in another #If arm doesn't count.
+            above = not any(
+                activity is None or not activity.mutually_exclusive(span, member.span)
+                for span in procedures_above
+            )
+            push("malformedStatement", def_dec_message(above), absolute_span(member.span, def_dec.token))
             continue
         toks = statement_tokens_after_leading_label(source, member.span)
         first = toks[0] if toks else None
