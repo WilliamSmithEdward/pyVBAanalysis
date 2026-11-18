@@ -41,6 +41,7 @@ LIBRARY_NAMES = {
     "{50A7E9B0-70EF-11D1-B75A-00A0C90564FE}": "Shell32",
     "{00062FFF-0000-0000-C000-000000000046}": "Outlook",
     "{00020813-0000-0000-C000-000000000046}": "Excel",
+    "{4AC9E1DA-5BAD-4AC7-86E3-24F4CDCECA28}": "DAO",
 }
 # What a new file of each host records before any reference is added, and its
 # project's name (measured).

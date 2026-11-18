@@ -864,19 +864,20 @@ def _is_new_type_reference(kind: _TypeNameReferenceKind) -> bool:
     return kind == "newExpression" or kind == "newDeclaration"
 
 
-def _collect_with_events_new_declaration_spans(
-    mod: ModuleNode, activity: ConditionalActivityTracker | None
+def _collect_with_events_declaration_spans(
+    mod: ModuleNode, activity: ConditionalActivityTracker | None, new_only: bool
 ) -> list[Span]:
-    """Port of collectWithEventsNewDeclarationSpans: the spans of `WithEvents x As
-    New T` declarations. `New` on a WithEvents declaration is legal (the field is
-    initialized lazily), so its New reference is exempt from invalidNewTypeName."""
+    """Port of collectWithEventsDeclarationSpans: the spans of WithEvents
+    declarations, with new_only those of `WithEvents x As New T`. `New` on a
+    WithEvents declaration is legal (the field is initialized lazily), so its New
+    reference is exempt from invalidNewTypeName."""
     spans: list[Span] = []
 
     def inspect(group: VariableGroupNode) -> None:
         if not group.with_events or is_inactive_node(activity, group):
             return
         for decl in group.declarations:
-            if decl.is_new:
+            if decl.is_new or not new_only:
                 spans.append(decl.span)
 
     for member in active_module_members(mod, activity):
@@ -896,14 +897,46 @@ _SCRIPTING_TYPE_NAMES = frozenset({"dictionary", "filesystemobject", "textstream
 
 
 def check_invalid_as_type_names(source: str, mod: ModuleNode, activity: ConditionalActivityTracker | None, opts: AnalyzeModuleOptions, push: PushFn) -> None:
-    with_events_new_spans = _collect_with_events_new_declaration_spans(mod, activity)
+    with_events_new_spans = _collect_with_events_declaration_spans(mod, activity, True)
+    with_events_spans: list[Span] | None = None
     known_non_type_names = opts.known_non_type_names or frozenset()
     variables: set[str] | None = None
     own_types: set[str] | None = None
+    standard_modules: set[str] | None = None
     qualified_enum_types: set[str] | None = None
     for ref in _collect_type_name_references(source, mod):
         if activity is not None and activity.is_inactive(ref.span):
             continue
+        # A standard module's name is no type, and it wins over another
+        # module's Public Type, VBA's Collection and a host type of that name.
+        # Only a Type or Enum of that name in this module itself, or a
+        # qualified name, is the type. WithEvents says so itself (XLIDE issue
+        # #1530, measured in Excel, Word, PowerPoint and Access 16.0).
+        if not ref.qualifier and ref.kind in ("declaration", "newDeclaration"):
+            lower = ref.name.lower()
+            if standard_modules is None:
+                standard_modules = {
+                    type_.name.lower() for type_ in opts.project_class_members or () if type_.kind == "standardModule"
+                }
+                if opts.module_kind == ModuleSymbolKind.STANDARD and opts.module_name:
+                    standard_modules.add(opts.module_name.lower())
+            if own_types is None:
+                own_types = {
+                    member.name.lower()
+                    for member in active_module_members(mod, activity)
+                    if isinstance(member, (TypeNode, EnumNode))
+                }
+            if lower in standard_modules and lower not in own_types:
+                if with_events_spans is None:
+                    with_events_spans = _collect_with_events_declaration_spans(mod, activity, False)
+                if not any(_contains_span(span, ref.span) for span in with_events_spans):
+                    push(
+                        "invalidAsTypeName",
+                        f"'{ref.name}' is a standard module of this project, and a module is not a "
+                        "type. This is a VBE compile error: A module is not a valid type.",
+                        ref.span,
+                    )
+                    continue
         lookup_name = _type_reference_lookup_name(ref)
         if ref.kind == "declaration" and ref.qualifier:
             if qualified_enum_types is None:

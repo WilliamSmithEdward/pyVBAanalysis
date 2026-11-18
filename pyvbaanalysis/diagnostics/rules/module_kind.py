@@ -174,15 +174,17 @@ def check_with_events_declarations(
     project_classes: Sequence[VbaProjectClassMembers] = (),
 ) -> None:
     # A project class whose member list is complete and holds no Event:
-    # `WithEvents s As Plain` (issue #445, measured in Excel 16.0).
-    def class_without_events(lower: str) -> bool:
+    # `WithEvents s As Plain` (issue #445, measured in Excel 16.0). A UserForm
+    # or document module sources only the Events its code declares; its
+    # controls and the host's own events do not count, so its code members
+    # settle it (issue #1530, measured in Excel, Word, PowerPoint and Access
+    # 16.0).
+    def object_module_without_events(lower: str) -> bool:
         found = next((candidate for candidate in project_classes if candidate.name.lower() == lower), None)
-        return (
-            found is not None
-            and found.kind == "class"
-            and found.exhaustive is True
-            and not any(member.kind == "event" for member in found.members)
-        )
+        if found is None:
+            return False
+        settled = found.exhaustive is True if found.kind == "class" else found.kind in ("userform", "document")
+        return settled and not any(member.kind == "event" for member in found.members)
 
     def inspect(group: VariableGroupNode, inside_procedure: bool) -> None:
         if not group.with_events or is_inactive_node(activity, group):
@@ -205,6 +207,26 @@ def check_with_events_declarations(
             # #124, measured in Excel 16.0). An intrinsic type is no object at all.
             # A host or project class is not judged here.
             normalized = normalize_type(decl.as_type)
+            parts = _type_name_parts(decl.as_type)
+            standard_module = (
+                next(
+                    (
+                        candidate
+                        for candidate in project_classes
+                        if candidate.kind == "standardModule" and candidate.name.lower() == parts[0]
+                    ),
+                    None,
+                )
+                if len(parts) == 1
+                else None
+            )
+            if standard_module is not None:
+                push(
+                    "withEventsDeclaration",
+                    f"WithEvents variable '{decl.name}' is declared As {decl.as_type}, and {standard_module.name} is a standard module of this project. This is a VBE compile error: A module is not a valid type.",
+                    name_span,
+                )
+                continue
             if normalized is None or normalized in ("object", "variant"):
                 named = f"'{decl.as_type}'" if decl.as_type else "no type"
                 push(
@@ -215,7 +237,7 @@ def check_with_events_declarations(
             elif (
                 normalized == "collection"
                 or is_known_scalar_type(normalized)
-                or class_without_events(normalized)
+                or (len(parts) == 1 and object_module_without_events(parts[0]))
             ):
                 push(
                     "withEventsDeclaration",
@@ -231,6 +253,25 @@ def check_with_events_declarations(
             inspect(member, False)
         elif isinstance(member, ProcedureNode):
             for_each_variable_group(member.body, inspect_in_procedure, activity)
+
+
+_TYPE_NAME_CONTINUATION = re.compile(r"[ \t]*_[ \t]*\r?\n[ \t]*")
+_TYPE_NAME_DOT = re.compile(r"\s*\.\s*")
+_WHOLE_BRACKETED = re.compile(r"^\[[^\]]*\]\Z")
+_PART_BRACKETS = re.compile(r"^\[(.*)\]\Z")
+
+
+def _type_name_parts(as_type: str | None) -> list[str]:
+    """Port of typeNameParts: a declared type's name as the VBE reads it, lowercased.
+    Line continuations and spaces around the dots go, and each part loses its
+    brackets, so `[VBA] _` / `.Collection` is `vba`, `collection`. A name
+    bracketed whole, `[VBA.Collection]`, is one name with a dot in it."""
+    text = js_trim(_TYPE_NAME_CONTINUATION.sub("", as_type)) if as_type else ""
+    if not text:
+        return []
+    if _WHOLE_BRACKETED.match(text):
+        return [js_trim(text[1:-1]).lower()]
+    return [js_trim(_PART_BRACKETS.sub(r"\1", part)).lower() for part in _TYPE_NAME_DOT.split(text)]
 
 
 # -- checkFriendDeclarations -----------------------------------------------
