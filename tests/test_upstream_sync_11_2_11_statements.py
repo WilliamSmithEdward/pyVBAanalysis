@@ -924,3 +924,292 @@ def test_redim_with_bounds_is_accepted() -> None:
         "        ReDim .x(1)\n    End With\n#If False Then\n    ReDim a()\n#End If\nEnd Sub\n"
     )
     assert _hits(source, "malformed-statement") == []
+
+
+# -- 633f5f2e: a statement operand the statement refuses ----------------------
+
+_STATEMENT_OPERANDS = _measured("statement_operand_type_")
+
+_OPERAND_TYPES = "\r\n".join([
+    "Private Type T1", "    s As String", "    n As Long", "End Type",
+    "Private Type T2", "    o As Object", "End Type",
+    "Private Type T3", "    t As T2", "End Type",
+    "Private Type T4", "    v As Variant", "End Type",
+    "Private Type T6", "    oa(2) As Object", "End Type",
+    "Private Type T7", "    oa(2) As Object", "    sa(2) As String", "End Type",
+])
+
+
+def _operand_procedure(dims: str, *lines: str) -> str:
+    """Upstream statementOperandTypes.test.ts procedure()."""
+    return "\r\n".join([
+        "Option Explicit",
+        _OPERAND_TYPES,
+        "Sub Main()",
+        "    Dim f As Integer" + (", " + dims if dims else ""),
+        "    f = FreeFile",
+        *("    " + line for line in lines),
+        "End Sub",
+        "",
+    ])
+
+
+def _operand_types(source: str, kind: ModuleSymbolKind | None = None) -> list[VbaDiagnostic]:
+    options = AnalyzeModuleOptions(host="excel", module_kind=kind)
+    return [d for d in analyze_module(source, options) if d.code == "statement-operand-type"]
+
+
+def _project_error_codes(*modules: tuple[str, ModuleSymbolKind, str]) -> list[str]:
+    inputs = [ModuleInput(name, kind, source) for name, kind, source in modules]
+    return [line.split(": ")[1] for line in _project_errors(inputs, "excel")]
+
+
+_STD = ModuleSymbolKind.STANDARD
+
+
+def test_statement_operands_cover_every_host() -> None:
+    assert {_HOSTS.get(case.id, "excel") for case in _STATEMENT_OPERANDS} == {"excel", "word", "powerpoint", "access"}
+
+
+@pytest.mark.parametrize("case", _STATEMENT_OPERANDS, ids=lambda case: case.id)
+def test_statement_operand_agrees_with_the_vbe(case: OracleCase) -> None:
+    errors = [line.split(": ")[1] for line in _case_errors(case)]
+    # The Type as Mid's value is the existing udt-value-mismatch's.
+    code = "udt-value-mismatch" if "_mid_value_udt_" in case.id else "statement-operand-type"
+    assert errors == ([code] if case.expected == "rejected" else [])
+
+
+@pytest.mark.parametrize("dims, line, span, message", [
+    ("n As Long", "Line Input #f, n", "n", "Line Input # reads a line into a String or a Variant, and 'n' is declared As Long. This is a VBE compile error: Type mismatch."),
+    ("sa(2) As String", "Line Input #f, sa", "sa", "and 'sa' is an array."),
+    ("sa(2) As String", "Line Input #f, sa()", "sa()", "and 'sa()' is an array."),
+    ("fsa(2) As String * 3", 'Mid(fsa, 1) = "x"', "fsa", "and 'fsa' is an array."),
+    ("ta(2) As T1", 'Mid(ta(0), 1) = "x"', "ta(0)", "and 'ta(0)' is declared As T1."),
+    ("n As Long", "Unload (n)", "(n)", "and '(n)' is declared As Long."),
+    ("oa(2) As Object", "Unload oa", "oa", "Unload takes an object, such as a UserForm, and 'oa' is an array."),
+    ("va() As Variant", "Unload va", "va", "and 'va' is an array."),
+    ("oa(2) As Object", "Load oa", "oa", "Load takes an object, such as a UserForm, and 'oa' is an array."),
+    ("n As Long, Mid(2, 2) As Long", "Mid(n, 1) = 5", "n", "The Mid statement writes into a String or a Variant, and 'n' is declared As Long."),
+    ("ba() As Byte", 'Mid(ba, 1) = "x"', "ba", "and 'ba' is an array."),
+    ("t7 As T7", 'Mid(t7.sa(), 1) = "x"', "t7.sa()", "and 't7.sa()' is an array."),
+    ("t7 As T7", "Put #f, , t7.oa(1)", "t7.oa(1)", "and 't7.oa(1)' is declared As Object."),
+    ("t As T1", "Line Input #f, t.n", "t.n", "and 't.n' is declared As Long."),
+    ("o As Object", "Line Input #f, o", "o", "and 'o' is declared As Object."),
+    ("n As Long", 'Mid(n, 1) = "x"', "n", "The Mid statement writes into a String or a Variant, and 'n' is declared As Long. This is a VBE compile error: Type mismatch."),
+    ("na(2) As Long", 'MidB$(na(1), 1, 1) = "x"', "na(1)", "and 'na(1)' is declared As Long."),
+    ("", 'Unload "x"', '"x"', "Unload takes an object, such as a UserForm, and '\"x\"' is a literal. This is a VBE compile error: Type mismatch."),
+    ("", 'Unload ("x")', '("x")', "is a literal."),
+    ("", "Unload -1", "-1", "is a literal."),
+    ("s As String", "Load s", "s", "Load takes an object, such as a UserForm, and 's' is declared As String."),
+    ("t As T1", "Unload t", "t", "and 't' is declared As T1."),
+    ("o As Object", "Put #f, , o", "o", "Put cannot write an object, and 'o' is declared As Object. This is a VBE compile error: Can not Get or Put an object reference variable or a variable of user-defined type containing an object reference."),
+    ("c As New Collection", "Get #f, 1, c", "c", "Get cannot read into an object, and 'c' is declared As Collection."),
+    ("t3 As T3", "Put #f, , t3", "t3", "and 't3' is declared As T3, a user-defined type holding an object."),
+    ("ta(2) As T2", "Get #f, , ta", "ta", "and 'ta' is an array of T2, a user-defined type holding an object."),
+    ("t3 As T3", "Put #f, , t3.t.o", "t3.t.o", "and 't3.t.o' is declared As Object."),
+    ("", "Put #f, , Nothing", "Nothing", "and 'Nothing' is an object reference."),
+    ("t6 As T6", "Put #f, , t6", "t6", "and 't6' is declared As T6, a user-defined type holding an object."),
+])
+def test_statement_operand_reports(dims: str, line: str, span: str, message: str) -> None:
+    source = _operand_procedure(dims, "If False Then", "    " + line, "End If")
+    found = _operand_types(source)
+    assert len(found) == 1
+    assert _span_text(source, found[0]) == span
+    assert message in found[0].message
+
+
+def test_statement_operand_in_a_one_line_if_after_a_colon_a_line_number_and_a_deftype() -> None:
+    for line in ["If f = 0 Then Line Input #f, n", "If f = 0 Then f = 1 Else Put #f, , o", 'f = 1: Mid(n, 1) = "x"', "10 Unload n"]:
+        assert len(_operand_types(_operand_procedure("n As Long, o As Object", line))) == 1, line
+    def_lng = "\r\n".join([
+        "Option Explicit", "DefLng X", "Sub Main(ByRef p As Long)", "    Dim f As Integer, x", "    Line Input #f, x",
+        '    Mid(x, 1) = "x"', "    Line Input #f, p", "End Sub", "",
+    ])
+    assert len(_operand_types(def_lng)) == 3
+
+
+def test_statement_operand_leaves_a_type_character_to_type_suffix_mismatch() -> None:
+    source = _operand_procedure("n As Long", "If False Then Line Input #f, n$")
+    assert _operand_types(source) == []
+    assert len(_by_code(source, "type-suffix-mismatch")) == 1
+
+
+@pytest.mark.parametrize("line", [
+    "Line Input #f, s", "Line Input #f, v", "Line Input #f, x", "Line Input #f, fs", "Line Input #f, s$",
+    "Line Input #f, sa(1)", "Line Input #f, t.s",
+    'Mid(s, 1) = "x"', 'Mid$(v, 1, 1) = "x"', "Mid(fs, 1) = n", "Mid(t.s, 1) = o",
+    "Unload v", "Unload o", "Unload c", "Unload Nothing", "Unload Empty", "Unload Null", "Unload oa(1)",
+    "Unload va(1)", "Unload t2.o", "Load o",
+    "Put #f, , v", "Get #f, , t", "Put #f, , t4", "Put #f, , t4.v", "Get #f, , oa", "Put #f, , oa()",
+    "Put #f, , va", "Put #f, 1, s",
+    'Mid(fsa(1), 1) = "x"', "Unload (o)", "Put #f, , t7.oa", "Put #f, , t7.oa()",
+])
+def test_statement_operands_that_compile_are_left_alone(line: str) -> None:
+    dims = (
+        "t7 As T7, fsa(2) As String * 3, s As String, v As Variant, x, fs As String * 5, sa(2) As String, "
+        "n As Long, o As Object, c As New Collection, oa(2) As Object, va(2) As Variant, t As T1, t2 As T2, t4 As T4"
+    )
+    assert _operand_types(_operand_procedure(dims, "If False Then", "    " + line, "End If")) == []
+
+
+def test_statement_operand_reads_each_type_once() -> None:
+    # T30 holds two T29s, each holding two T28s, down to T0: 2^30 paths, 31 Types.
+    types = ["Private Type T0", "    n As Long", "End Type"]
+    for i in range(1, 31):
+        types += [f"Private Type T{i}", f"    a As T{i - 1}", f"    b As T{i - 1}", "End Type"]
+    source = "\r\n".join([
+        "Option Explicit", *types, "Private Type H", "    t As T30", "    o As Object", "End Type", "Sub Main()",
+        "    Dim f As Integer, x As T30, h As H", "    Put #f, , x", "    Put #f, , h", "End Sub", "",
+    ])
+    messages = [d.message for d in _operand_types(source)]
+    assert len(messages) == 1
+    assert "'h' is declared As H, a user-defined type holding an object" in messages[0]
+
+
+def test_statement_operand_follows_no_field_of_another_modules_type() -> None:
+    module1 = "\r\n".join([
+        "Option Explicit", "Private Type T1", "    s As Long", "End Type", "Sub Main()",
+        "    Dim f As Integer, x As Module2.T1", "    Line Input #f, x.s", "End Sub", "",
+    ])
+    module2 = "Option Explicit\r\nPublic Type T1\r\n    s As String\r\nEnd Type\r\n"
+    assert _project_error_codes(("Module1", _STD, module1), ("Module2", _STD, module2)) == []
+
+
+def test_statement_operand_get_put_object_only_when_known() -> None:
+    # A library's Enum is no object, and nor is a Type holding one.
+    enums = "\r\n".join([
+        "Option Explicit", "Private Type T8", "    a As VbMsgBoxResult", "    n As Long", "End Type", "Sub Main()",
+        "    Dim f As Integer, r As VbMsgBoxResult, ra(2) As VbMsgBoxResult, t As T8, p As POINTAPI",
+        "    Put #f, , r", "    Put #f, , ra(1)", "    Get #f, , t", "    Put #f, , p", "End Sub", "",
+    ])
+    assert _operand_types(enums) == []
+    # A project class and a variable declared As New are.
+    classes = _project_error_codes(
+        (
+            "Module1",
+            _STD,
+            "Option Explicit\r\nSub Main()\r\n    Dim f As Integer, k As Class1, d As New Class1\r\n"
+            "    Put #f, , k\r\n    Get #f, , d\r\nEnd Sub\r\n",
+        ),
+        ("Class1", ModuleSymbolKind.CLASS, "Option Explicit\r\nPublic s As String\r\n"),
+    )
+    assert classes == ["statement-operand-type", "statement-operand-type"]
+    # A Collection is one, with New or not.
+    assert len(_operand_types(_operand_procedure("c As Collection, c2 As VBA.Collection", "Put #f, , c", "Put #f, , c2"))) == 2
+    # As New makes an object of a class XLIDE does not know; the same type without New is unknown.
+    auto = (
+        "Option Explicit\r\nSub Main()\r\n    Dim f As Integer, d As New Scripting.Dictionary, e As Scripting.Dictionary\r\n"
+        "    Put #f, , d\r\n    Put #f, , e\r\nEnd Sub\r\n"
+    )
+    messages = [d.message for d in _operand_types(auto)]
+    assert len(messages) == 1
+    assert "'d' is declared As Scripting.Dictionary." in messages[0]
+
+
+def test_statement_operand_reads_another_modules_variable_by_its_type() -> None:
+    module1 = (
+        "Option Explicit\r\nSub Main()\r\n    Dim f As Integer\r\n    If False Then\r\n        Line Input #f, gN\r\n"
+        "        Put #f, , gO\r\n        Unload gS\r\n    End If\r\nEnd Sub\r\n"
+    )
+    module2 = "Option Explicit\r\nPublic gN As Long, gO As Object, gS As String\r\n"
+    assert _project_error_codes(("Module1", _STD, module1), ("Module2", _STD, module2)) == [
+        "statement-operand-type", "statement-operand-type", "statement-operand-type",
+    ]
+
+
+def test_statement_operand_reads_another_modules_variable_by_its_own_modules_types() -> None:
+    # Module1's T1 has a Long s and an object; Module2's, which gT is, a String s only.
+    main = [
+        "Private Type T1", "    s As Long", "    o As Object", "End Type", "Private Type H", "    inner As Module2.T1",
+        "End Type", "Private h As H",
+    ]
+    module1 = "\r\n".join([
+        "Option Explicit", *main, "Sub Main()", "    Dim f As Integer", "    Line Input #f, gT.s", "    Put #f, , gT",
+        "    Put #f, , h.inner", "End Sub", "",
+    ])
+    module2 = "\r\n".join(["Option Explicit", "Public Type T1", "    s As String", "End Type", "Public gT As T1", ""])
+    assert _project_error_codes(("Module1", _STD, module1), ("Module2", _STD, module2)) == []
+
+
+def test_statement_operand_another_modules_enum_of_this_modules_type_name() -> None:
+    # gE is Module2's Enum T1, not Module1's Type T1.
+    module1 = "\r\n".join([
+        "Option Explicit", "Private Type T1", "    n As Long", "End Type", "Sub Main()", "    Dim f As Integer, s As String",
+        "    If False Then", "        Mid(s, 1) = gE", "        Line Input #f, gE", "        Unload gE", "    End If",
+        "End Sub", "",
+    ])
+    module2 = "Option Explicit\r\nPublic Enum T1\r\n    E1A = 1\r\nEnd Enum\r\nPublic gE As T1\r\n"
+    assert _project_error_codes(("Module1", _STD, module1), ("Module2", _STD, module2)) == []
+
+
+def test_statement_operand_reads_a_procedures_own_name_as_its_result() -> None:
+    def inner(header: str, end: str, line: str) -> list[VbaDiagnostic]:
+        return _operand_types("\r\n".join(["Option Explicit", header, "    Dim f As Integer", f"    If False Then {line}", end, ""]))
+
+    assert len(inner("Function Fn() As Long", "End Function", "Line Input #f, Fn")) == 1
+    assert len(inner("Function Fn() As Long", "End Function", "Unload Fn")) == 1
+    found = inner("Property Get P() As Object", "End Property", "Put #f, , P")
+    assert len(found) == 1
+    assert "'P' is declared As Object." in found[0].message
+    # With arguments the name is a call, not an element of the result.
+    assert inner("Function Fo(i As Long) As Object()", "End Function", "Put #f, , Fo(1)") == []
+    assert inner("Function Fa() As Long()", "End Function", "Line Input #f, Fa(1)") == []
+    # Nor is a member of the result followed.
+    member = "\r\n".join([
+        "Option Explicit", "Private Type T2", "    o As Object", "    n As Long", "End Type", "Function Ft() As T2",
+        "    Dim f As Integer", "    If False Then Put #f, , Ft.o", "    If False Then Line Input #f, Ft.n",
+        "End Function", "",
+    ])
+    assert _operand_types(member) == []
+
+
+def test_statement_operand_type_qualified_by_another_module() -> None:
+    module1 = "\r\n".join([
+        "Option Explicit", "Private Type T1", "    n As Long", "End Type", "Private Type H", "    e As Module2.T1",
+        "End Type", "Sub Main()", "    Dim f As Integer, s As String, x As Module2.T1, h As H", "    If False Then",
+        "        Mid(s, 1) = x", "        Mid(s, 1) = h.e", "        Put #f, , x", "    End If", "End Sub", "",
+    ])
+    module2 = "Option Explicit\r\nPublic Type T1\r\n    o As Object\r\nEnd Type\r\n"
+    codes = _project_error_codes(("Module1", _STD, module1), ("Module2", _STD, module2))
+    assert [code for code in codes if code in ("statement-operand-type", "udt-value-mismatch")] == []
+
+
+def test_statement_operand_leaves_a_param_array_under_deftype() -> None:
+    source = "\r\n".join([
+        "Option Explicit", "DefLng A-Z", "Sub Main(ParamArray x())", "    Dim f As Integer", "    Line Input #f, x(0)",
+        '    Mid(x(0), 1) = "x"', "    Unload x(0)", "End Sub", "",
+    ])
+    assert _operand_types(source) == []
+
+
+def test_statement_operand_stops_at_a_type_that_holds_itself() -> None:
+    source = "\r\n".join([
+        "Option Explicit", "Private Type A", "    x As A", "    n As Long", "End Type", "Sub Main()",
+        "    Dim f As Integer, t As A", "    Put #f, , t", "End Sub", "",
+    ])
+    assert _operand_types(source) == []
+
+
+def test_statement_operand_in_a_class_module_with_its_own_unload() -> None:
+    def lines(*body: str) -> str:
+        return "\r\n".join(["Option Explicit", "Public Count As Long", "Sub Run()", "    Dim f As Integer", *("    " + line for line in body), "End Sub", ""])
+
+    assert len(_operand_types(lines("Line Input #f, Count", 'Unload "x"'), ModuleSymbolKind.CLASS)) == 2
+    assert _operand_types(lines("Unload Me") + "Sub Unload(a)\r\nEnd Sub\r\n", ModuleSymbolKind.CLASS) == []
+    assert _operand_types(lines('Unload "x"') + "Sub Unload(a)\r\nEnd Sub\r\n", ModuleSymbolKind.CLASS) == []
+
+
+def test_statement_operand_a_project_name_takes_the_statements_place() -> None:
+    other = "Option Explicit\r\nSub Unload(a)\r\nEnd Sub\r\nSub Load(a)\r\nEnd Sub\r\n"
+    main = _operand_procedure("", 'Unload "x"', 'Load "x"')
+    assert _project_error_codes(("Module1", _STD, main), ("Module2", _STD, other)) == []
+    # Another module's Private one is not seen.
+    main = _operand_procedure("", 'If False Then Unload "x"')
+    other = "Option Explicit\r\nPrivate Sub Unload(a)\r\nEnd Sub\r\n"
+    assert _project_error_codes(("Module1", _STD, main), ("Module2", _STD, other)) == ["statement-operand-type"]
+    # No name takes the Mid statement's place, in this module or another.
+    main = _operand_procedure("n As Long", 'Mid(n, 1) = "x"')
+    other = "Option Explicit\r\nFunction Mid(a, b)\r\nEnd Function\r\n"
+    assert _project_error_codes(("Module1", _STD, main), ("Module2", _STD, other)) == ["statement-operand-type"]
+    assert len(_operand_types(main + "Function Mid(a, b)\r\nEnd Function\r\n")) == 1
+    assert len(_operand_types(_operand_procedure("n As Long, Mid As Variant", 'Mid(n, 1) = "x"'))) == 1
