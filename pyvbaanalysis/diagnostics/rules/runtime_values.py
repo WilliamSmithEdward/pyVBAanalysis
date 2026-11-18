@@ -796,8 +796,12 @@ def _number_argument_group(toks: Sequence[VbaToken], index: int) -> list[VbaToke
 def _integer_group_value(
     source: str, span: Span, group: Sequence[VbaToken], constants: IntegerConstantLookup
 ) -> float | None:
-    # Upstream reads group[0].start unguarded, so an empty group throws there and
-    # the shared statement walk stops; the IndexError here does the same.
+    """The integer a token group evaluates to. An empty group, the missing
+    argument of `Mid(s, ) = "z"` or `DateSerial(2026, , 1)`, has no value: read
+    unguarded it threw, and the rule's visitor stopped for the rest of the module
+    (XLIDE issue #1564)."""
+    if len(group) == 0:
+        return None
     return evaluate_integer_constant_expression(
         source[span.start + group[0].start : span.start + group[-1].end], constants
     )

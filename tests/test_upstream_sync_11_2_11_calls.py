@@ -9,7 +9,13 @@ import re
 
 import pytest
 
-from pyvbaanalysis import analyze_module, analyze_module_options_for, host_token_for_file_name
+from pyvbaanalysis import (
+    AnalysisFailure,
+    analyze_module,
+    analyze_module_options_for,
+    host_token_for_file_name,
+)
+from pyvbaanalysis.diagnostics.analyze_module import _run_rules, with_resolved_host_model
 from pyvbaanalysis.conditional import ConditionalCompilationEnvironment, parse_project_conditional_constants
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions
 from pyvbaanalysis.diagnostics.rule_metadata import diagnostic_metadata_for_code
@@ -312,3 +318,48 @@ def test_1551_vb6_leaves_the_three_rules_off() -> None:
     rules = {"declare-missing-ptrsafe", "longlong-narrowing", "addressof-misuse"}
     for _name, _rule, body in _WIN64_CASES:
         assert [c for c in _win64_error_codes(body, "Win64 = 0", "vb6") if c in rules] == []
+
+
+# -- c4d3b5c2: an empty argument no longer stops the runtime value checks -----
+# XLIDE issue #1564, which the port's rules fuzzer found first.
+
+
+def _runtime_value_lines(*procedure_a: str) -> list[str]:
+    """The trimmed line of each runtime-argument-value finding."""
+    source = "\r\n".join([
+        "Option Explicit", "Public Sub A()", "    Dim s As String", "    Dim d As Date", '    s = "abc"',
+        *(f"    {line}" for line in procedure_a),
+        "End Sub", "Public Sub B()", "    Err.Raise 0", "End Sub", "",
+    ])
+    lines = source.split("\r\n")
+    return [
+        lines[source[: d.span.start].count("\r\n")].strip()
+        for d in analyze_module(source)
+        if d.code == "runtime-argument-value"
+    ]
+
+
+def test_1564_reports_err_raise_0_without_an_empty_argument() -> None:
+    assert _runtime_value_lines('Mid(s, 2) = "z"') == ["Err.Raise 0"]
+
+
+@pytest.mark.parametrize("line", [
+    'Mid(s, ) = "z"',
+    'Mid$(s, ) = "z"',
+    'MidB(s, ) = "z"',
+    'MidB$("abc", ) = "z"',
+    'Mid(s, , 1) = "z"',
+    'd = DateAdd("d", , d)',
+    'd = DateAdd("d", 1, DateSerial(2026, , 1))',
+    'd = DateAdd("d", 1, DateSerial(2026, 1, ))',
+])
+def test_1564_still_reports_err_raise_0_after_an_empty_argument(line: str) -> None:
+    assert "Err.Raise 0" in _runtime_value_lines(line)
+
+
+def test_1564_rules_do_not_raise_on_mid_with_an_empty_start() -> None:
+    def raise_error(error: BaseException, where: AnalysisFailure) -> None:
+        raise error
+
+    source = 'Sub A()\n    Dim s As String\n    Mid(s, ) = "z"\nEnd Sub\n'
+    _run_rules(source, with_resolved_host_model(AnalyzeModuleOptions()), raise_error)
