@@ -20,7 +20,7 @@ from ...conditional import (
     ConditionalActivityTracker,
     ConditionalCompilationEnvironment,
 )
-from ...conditional.conditional_compilation import compiler_constants_with_defaults
+from ...conditional.conditional_compilation import host_win64
 from ...constants.integer_constant_expression import parse_vba_integer_literal
 from ...js_compat import js_number_to_string, js_trim
 from ...lexer.token_helpers import match_paren_from, split_top_level_token_groups
@@ -709,14 +709,14 @@ def check_declare_ptr_safe_for_win64(
     push: PushFn,
 ) -> None:
     """In 64-bit Office a Declare needs PtrSafe, "The code in this project must be
-    updated for use on 64-bit systems". Win64 is read with the default compiler
-    constants merged in, as the branch activity reads it, so an active Declare is
-    checked unless the caller says Win64 is off (issue #215, measured in 64-bit
-    Excel and Word). VB6 has no PtrSafe and is never 64-bit."""
+    updated for use on 64-bit systems". Win64 is the host's, with the default
+    compiler constants merged in, so an active Declare is checked unless the
+    caller says the host's Win64 is off (issue #215, measured in 64-bit Excel and
+    Word). A project argument or a `#Const` Win64 does not count (see
+    host_win64). VB6 has no PtrSafe and is never 64-bit."""
     if host is not None and host.lower() == "vb6":
         return
-    constants = compiler_constants_with_defaults(conditional_compilation)
-    if not _conditional_value_truthy(constants.get("win64")):
+    if not _conditional_value_truthy(host_win64(conditional_compilation)):
         return
     for member in active_module_members(mod, activity):
         if not isinstance(member, DeclareNode) or member.ptr_safe:

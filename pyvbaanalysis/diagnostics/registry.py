@@ -962,6 +962,7 @@ DIAGNOSTIC_RULE_REGISTRY: tuple[DiagnosticRuleEntry, ...] = (
             ctx.opts.project_procedures,
             ctx.opts.project_class_members,
             ctx.opts.conditional_compilation,
+            ctx.opts.host,
             ctx.activity,
             push,
         ),

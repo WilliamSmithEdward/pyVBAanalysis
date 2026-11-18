@@ -10,11 +10,17 @@ import re
 import pytest
 
 from pyvbaanalysis import analyze_module, analyze_module_options_for, host_token_for_file_name
-from pyvbaanalysis.conditional import ConditionalCompilationEnvironment
+from pyvbaanalysis.conditional import ConditionalCompilationEnvironment, parse_project_conditional_constants
 from pyvbaanalysis.diagnostics import AnalyzeModuleOptions
 from pyvbaanalysis.diagnostics.rule_metadata import diagnostic_metadata_for_code
 from pyvbaanalysis.evidence import DATA_DIR
-from pyvbaanalysis.symbols import ImplicitMember, ModuleInput, ModuleSymbolKind, ProjectIndex
+from pyvbaanalysis.symbols import (
+    ImplicitMember,
+    ModuleInput,
+    ModuleSymbolKind,
+    ProjectIndex,
+    ProjectIndexOptions,
+)
 
 _RAW_CASES = json.loads((DATA_DIR / "vbe_oracle_cases.json").read_text(encoding="utf-8"))["cases"]
 
@@ -260,3 +266,51 @@ def test_1538_legacy_powerpoint_file_reports_its_members() -> None:
     source = "Sub T()\n    Debug.Print ActivePresentation.Slides.Nope\nEnd Sub\n"
     opts = AnalyzeModuleOptions(host=host_token_for_file_name("Deck.pot"))
     assert [d.code for d in analyze_module(source, opts) if d.severity.value == "error"] == ["member-not-found"]
+
+
+# -- e4b377d1: a project argument Win64 = 0 leaves the 64-bit rules on (#1551) -
+
+_WIN64_PROBE = "#If Win64 Then\nPrivate m As Long\nPrivate m As Long\n#End If\n"
+_WIN64_CASES = [
+    ("declare_no_ptrsafe", "declare-missing-ptrsafe",
+     'Private Declare Function GetTickCount Lib "kernel32" () As Long\n'),
+    ("declare_ptrsafe", None, 'Private Declare PtrSafe Function GetTickCount Lib "kernel32" () As Long\n'),
+    ("varptr_into_long", "longlong-narrowing",
+     "Sub Main()\n    Dim x As Long\n    Dim n As Long\n    n = VarPtr(x)\nEnd Sub\n"),
+    ("varptr_into_longptr", None,
+     "Sub Main()\n    Dim x As Long\n    Dim n As LongPtr\n    n = VarPtr(x)\nEnd Sub\n"),
+    ("addressof_byval_long", "addressof-misuse",
+     "Sub Take(ByVal v As Long)\nEnd Sub\nSub Callback()\nEnd Sub\nSub Main()\n    Take AddressOf Callback\nEnd Sub\n"),
+    ("addressof_byval_longptr", None,
+     "Sub Take(ByVal v As LongPtr)\nEnd Sub\nSub Callback()\nEnd Sub\nSub Main()\n"
+     "    Take AddressOf Callback\nEnd Sub\n"),
+]
+
+
+def _win64_error_codes(body: str, arguments_text: str, host: str) -> list[str]:
+    """The project as the extension builds it: the arguments text parsed into the
+    project's constants, given to the index and to the rules alike."""
+    source = f"Option Explicit\n{body}"
+    env = ConditionalCompilationEnvironment(project_constants=parse_project_conditional_constants(arguments_text))
+    index = ProjectIndex(ProjectIndexOptions(conditional_compilation=env))
+    index.set_module(ModuleInput("Module1", ModuleSymbolKind.STANDARD, source))
+    opts = analyze_module_options_for(index, "Module1", ModuleSymbolKind.STANDARD, host=host, conditional_compilation=env)
+    return [d.code for d in analyze_module(source, opts) if d.severity.value == "error"]
+
+
+@pytest.mark.parametrize("host", ["excel", "word", "powerpoint", "access"])
+def test_1551_project_win64_argument_turns_if_win64_off(host: str) -> None:
+    assert _win64_error_codes(_WIN64_PROBE, "", host) == ["duplicate-module-variable"]
+    assert _win64_error_codes(_WIN64_PROBE, "Win64 = 0", host) == []
+
+
+@pytest.mark.parametrize("host", ["excel", "word", "powerpoint", "access"])
+@pytest.mark.parametrize("name, rule, body", _WIN64_CASES, ids=[c[0] for c in _WIN64_CASES])
+def test_1551_project_win64_argument_leaves_64_bit_rules_on(host: str, name: str, rule: str | None, body: str) -> None:
+    assert _win64_error_codes(body, "Win64 = 0", host) == ([rule] if rule else [])
+
+
+def test_1551_vb6_leaves_the_three_rules_off() -> None:
+    rules = {"declare-missing-ptrsafe", "longlong-narrowing", "addressof-misuse"}
+    for _name, _rule, body in _WIN64_CASES:
+        assert [c for c in _win64_error_codes(body, "Win64 = 0", "vb6") if c in rules] == []
